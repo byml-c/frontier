@@ -2,6 +2,7 @@ import AddRounded from "@mui/icons-material/AddRounded";
 import ArrowForwardRounded from "@mui/icons-material/ArrowForwardRounded";
 import CloudUploadRounded from "@mui/icons-material/CloudUploadRounded";
 import EditNoteRounded from "@mui/icons-material/EditNoteRounded";
+import HubRounded from "@mui/icons-material/HubRounded";
 import SearchRounded from "@mui/icons-material/SearchRounded";
 import {
   Alert,
@@ -215,25 +216,38 @@ function PaperCard({
               </MuiLink>
             </Box>
           ))}
-          {accumulated && paper.nodes.map((node) => (
-            <Box component="span" key={node.id} sx={{ display: "inline-flex", alignItems: "center", gap: 1 }}>
-              <Typography component="span" color="text.disabled">·</Typography>
-              <MuiLink
-                component={RouterLink}
-                to={`/graph/${node.id}`}
-                underline="hover"
-                sx={{ fontSize: "0.78rem", fontWeight: 650 }}
-              >
-                {node.name}
-              </MuiLink>
-            </Box>
-          ))}
           <Button size="small" color="inherit" startIcon={<EditNoteRounded />} onClick={onMetadata} sx={{ ml: "auto!important" }}>论文信息</Button>
         </Stack>
-        {accumulated && !paper.nodes.length && (
-          <Typography variant="caption" color="text.secondary" sx={{ display: "block", mt: 0.75 }}>
-            尚未关联研究节点
-          </Typography>
+        {accumulated && (
+          <Stack
+            direction={{ xs: "column", sm: "row" }}
+            alignItems={{ xs: "flex-start", sm: "center" }}
+            spacing={1}
+            sx={{ mt: 1.25, pt: 1.25, borderTop: 1, borderColor: "divider" }}
+          >
+            <Stack direction="row" spacing={0.75} alignItems="center" sx={{ color: "text.secondary", flexShrink: 0 }}>
+              <HubRounded sx={{ fontSize: 17 }} />
+              <Typography variant="caption" fontWeight={650}>所属节点</Typography>
+            </Stack>
+            {paper.nodes.length ? (
+              <Stack direction="row" flexWrap="wrap" gap={0.75}>
+                {paper.nodes.map((node) => (
+                  <Button
+                    component={RouterLink}
+                    to={`/graph/${node.id}`}
+                    variant="outlined"
+                    size="small"
+                    key={node.id}
+                    sx={{ minHeight: 26, px: 1, py: 0.25, fontSize: "0.75rem" }}
+                  >
+                    {node.name}
+                  </Button>
+                ))}
+              </Stack>
+            ) : (
+              <Typography variant="caption" color="text.disabled">尚未关联研究节点</Typography>
+            )}
+          </Stack>
         )}
       </CardContent>
       <CardActionArea onClick={onOpen}>
