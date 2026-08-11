@@ -1,0 +1,60 @@
+:root {
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+}
+
+* { box-sizing: border-box; }
+html, body, #root { width: 100%; min-width: 320px; min-height: 100%; margin: 0; }
+body { overflow-x: hidden; }
+.spin { animation: spin .9s linear infinite; }
+@keyframes spin { to { transform: rotate(360deg); } }
+
+/* PDF.js canvas and persistent reading marks */
+.pdf-scroll {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  padding: 20px 16px 50vh;
+  overscroll-behavior: contain;
+}
+.react-pdf__Document {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 18px;
+}
+.pdf-page {
+  position: relative;
+  width: fit-content;
+  max-width: none;
+  background: #fff;
+  box-shadow: 0 5px 20px rgba(35, 30, 24, .14);
+}
+.react-pdf__Page,
+.react-pdf__Page canvas { max-width: none; }
+.react-pdf__Page canvas { display: block; }
+.textLayer span::selection {
+  color: transparent !important;
+  background: rgba(25, 118, 210, .28) !important;
+}
+.annotation-overlay {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  overflow: hidden;
+}
+.annotation-mark {
+  position: absolute;
+  border-radius: 2px;
+}
+.annotation-mark--highlight {
+  opacity: .42;
+  mix-blend-mode: multiply;
+}
+
+canvas { touch-action: none; }
+
+@media (max-width: 899px) {
+  .pdf-scroll { padding: 12px 6px 50vh; }
+  .react-pdf__Document { gap: 12px; }
+}

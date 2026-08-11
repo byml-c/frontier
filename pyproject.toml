@@ -1,0 +1,45 @@
+[project]
+name = "frontier-research"
+version = "0.1.0"
+description = "Agent-driven embodied intelligence paper brief and research graph"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+  "apscheduler>=3.11,<4",
+  "bibtexparser>=1.4,<2",
+  "fastapi>=0.116,<1",
+  "feedparser>=6.0,<7",
+  "httpx[socks]>=0.28,<1",
+  "pydantic-settings>=2.10,<3",
+  "pymupdf>=1.26,<2",
+  "python-multipart>=0.0.20,<1",
+  "sqlalchemy>=2.0,<3",
+  "typer>=0.16,<1",
+  "uvicorn[standard]>=0.35,<1",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=8.4,<9",
+  "pytest-asyncio>=1.1,<2",
+  "ruff>=0.12,<1",
+]
+
+[project.scripts]
+frontier = "frontier.cli:app"
+frontier-server = "frontier.main:run"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/frontier"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"

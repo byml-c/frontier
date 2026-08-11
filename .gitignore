@@ -1,0 +1,14 @@
+.env
+translation.env
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+data/
+web/node_modules/
+web/dist/
+*.log
+.playwright-cli/
+我的文库.bib
+AGENTS.md

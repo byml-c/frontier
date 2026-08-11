@@ -1,0 +1,452 @@
+from __future__ import annotations
+
+from datetime import UTC, datetime
+from zoneinfo import ZoneInfo
+
+import pymupdf
+from fastapi.testclient import TestClient
+
+from frontier.api.papers import _translation_key
+from frontier.schemas import TranslationRequest
+
+
+def create_paper(client: TestClient, title: str = "Tactile VLA for Fine Manipulation") -> dict:
+    response = client.post(
+        "/api/papers",
+        json={
+            "title": title,
+            "abstract": "We combine tactile sensing with a vision-language-action policy.",
+            "authors": [{"name": "Ada Researcher"}],
+            "first_author": "Ada Researcher",
+            "source": "manual",
+            "published_at": "2026-08-01",
+        },
+    )
+    assert response.status_code == 200, response.text
+    return response.json()["paper"]
+
+
+def test_translation_cache_key_is_stable_across_selection_geometry() -> None:
+    first = TranslationRequest(
+        text="action-grounded latent",
+        page_number=2,
+        position_json={"rects": [[0.1, 0.2, 0.3, 0.04]]},
+    )
+    second = TranslationRequest(
+        text="action-grounded   latent",
+        page_number=2,
+        position_json={"rects": [[0.11, 0.21, 0.29, 0.05]]},
+    )
+    assert _translation_key("paper-id", first) == _translation_key("paper-id", second)
+
+
+def test_health_and_defaults(client: TestClient) -> None:
+    assert client.get("/api/health").json()["status"] == "ok"
+    settings = {item["key"]: item["value_json"] for item in client.get("/api/settings").json()}
+    assert settings["abstract_limit"] == 50
+    assert settings["fulltext_limit"] == 19
+    assert settings["brief_limit"] == 9
+    assert settings["featured_limit"] == 4
+    assert (
+        client.put(
+            "/api/settings",
+            json={"brief_limit": 7, "featured_limit": 3},
+        ).status_code
+        == 200
+    )
+    assert (
+        client.put(
+            "/api/settings",
+            json={"brief_limit": 3, "featured_limit": 3},
+        ).status_code
+        == 422
+    )
+
+
+def test_paper_dedup_annotations_and_feedback(client: TestClient) -> None:
+    paper = create_paper(client)
+    duplicate = create_paper(client)
+    assert duplicate["id"] == paper["id"]
+    assert (
+        client.patch(f"/api/papers/{paper['id']}", json={"status": "completed"}).status_code == 422
+    )
+
+    started = client.post(f"/api/papers/{paper['id']}/start-reading")
+    assert started.status_code == 200
+    assert started.json()["status"] == "reading"
+
+    annotation = client.post(
+        f"/api/papers/{paper['id']}/annotations",
+        json={
+            "kind": "highlight",
+            "page_number": 2,
+            "selected_text": "tactile sensing",
+            "position_json": {"rects": [[0.1, 0.2, 0.3, 0.1]]},
+        },
+    )
+    assert annotation.status_code == 200
+    assert annotation.json()["kind"] == "note"
+    assert annotation.json()["content"] == ""
+    assert len(client.get(f"/api/papers/{paper['id']}/annotations").json()) == 1
+    updated_annotation = client.patch(
+        f"/api/papers/{paper['id']}/annotations/{annotation.json()['id']}",
+        json={
+            "kind": "note",
+            "page_number": 2,
+            "selected_text": "tactile sensing",
+            "content": "Compare this representation with vision features.",
+            "position_json": {"rects": [[0.1, 0.2, 0.3, 0.1]]},
+            "color": "#9CCCF4",
+        },
+    )
+    assert updated_annotation.json()["color"] == "#9CCCF4"
+    assert (
+        client.delete(
+            f"/api/papers/{paper['id']}/annotations/{annotation.json()['id']}"
+        ).status_code
+        == 204
+    )
+    assert client.get(f"/api/papers/{paper['id']}/annotations").json() == []
+
+    tag = client.post("/api/tags", json={"name": "VLA"}).json()
+    finish = client.post(
+        f"/api/papers/{paper['id']}/finish",
+        json={
+            "summary": "A useful tactile VLA paper [[page:2]].",
+            "suggested_interested": True,
+            "suggested_quality": True,
+            "suggested_tags": ["VLA"],
+        },
+    )
+    assert finish.json()["status"] == "feedback_pending"
+    confirmed = client.post(
+        f"/api/papers/{paper['id']}/confirm-feedback",
+        json={
+            "interested": True,
+            "quality": True,
+            "tag_ids": [tag["id"]],
+            "new_tags": ["触觉"],
+        },
+    )
+    assert confirmed.status_code == 200
+    assert confirmed.json()["status"] == "completed"
+    graph_tasks = [
+        task
+        for task in client.get("/api/tasks", params={"limit": 20}).json()
+        if task["kind"] == "graph_maintenance"
+        and task["payload_json"].get("context", {}).get("paper_id") == paper["id"]
+    ]
+    assert graph_tasks
+    library = client.get("/api/papers", params={"library": True}).json()
+    assert any(item["id"] == paper["id"] for item in library["items"])
+    assert library["total"] >= 1
+    node = client.post(
+        "/api/graph/nodes",
+        json={"name": "Tactile Library Test", "core_question": "How does touch improve control?"},
+    ).json()
+    assert (
+        client.post(
+            "/api/graph/paper-links",
+            json={"paper_id": paper["id"], "node_id": node["id"], "reason": "Library test"},
+        ).status_code
+        == 200
+    )
+
+
+def test_timestamps_are_serialized_in_beijing_time(client: TestClient) -> None:
+    memory = client.post(
+        "/api/memories",
+        json={"kind": "agent_experience", "title": "Timezone", "content": "UTC storage"},
+    ).json()
+    assert memory["created_at"].endswith("+08:00")
+
+
+def test_graph_and_brief_snapshot(client: TestClient) -> None:
+    paper = create_paper(client, "A New Robot World Model")
+    parent = client.post(
+        "/api/graph/nodes",
+        json={"name": "VLA Test", "core_question": "How should robots act?"},
+    ).json()
+    child = client.post(
+        "/api/graph/nodes",
+        json={"name": "Tactile VLA Test", "core_question": "How should touch improve action?"},
+    ).json()
+    assert (
+        client.post(
+            "/api/graph/edges", json={"source_id": parent["id"], "target_id": child["id"]}
+        ).status_code
+        == 200
+    )
+    assert (
+        client.post(
+            "/api/graph/paper-links",
+            json={
+                "paper_id": paper["id"],
+                "node_id": child["id"],
+                "reason": "Addresses the core question.",
+                "is_key": True,
+            },
+        ).status_code
+        == 409
+    )
+    assert (
+        client.post(
+            f"/api/graph/nodes/{child['id']}/progress",
+            json={
+                "title": "New evidence",
+                "content": "Touch improved success.",
+                "paper_id": paper["id"],
+            },
+        ).status_code
+        == 409
+    )
+    assert client.get(f"/api/graph/nodes/{child['id']}").json()["paper_count"] == 0
+
+    finish = client.post(
+        f"/api/papers/{paper['id']}/finish",
+        json={"summary": "Reading complete."},
+    )
+    assert finish.status_code == 200
+    confirmed = client.post(
+        f"/api/papers/{paper['id']}/confirm-feedback",
+        json={"interested": False, "quality": False},
+    )
+    assert confirmed.status_code == 200
+    assert confirmed.json()["status"] == "completed"
+    assert (
+        client.post(
+            "/api/graph/paper-links",
+            json={
+                "paper_id": paper["id"],
+                "node_id": child["id"],
+                "reason": "Addresses the core question.",
+                "is_key": True,
+            },
+        ).status_code
+        == 200
+    )
+    assert (
+        client.post(
+            f"/api/graph/nodes/{child['id']}/progress",
+            json={
+                "title": "New evidence",
+                "content": "Touch improved success.",
+                "paper_id": paper["id"],
+            },
+        ).status_code
+        == 200
+    )
+    assert (
+        client.post(
+            f"/api/graph/nodes/{child['id']}/ideas",
+            json={"content": "Test asynchronous fusion.", "status": "to_explore"},
+        ).status_code
+        == 200
+    )
+    detail = client.get(f"/api/graph/nodes/{child['id']}").json()
+    assert detail["parents"][0]["id"] == parent["id"]
+    assert detail["papers"][0]["id"] == paper["id"]
+    assert detail["ideas"][0]["status"] == "to_explore"
+
+    brief = client.post(
+        "/api/briefs",
+        json={"brief_date": datetime.now(UTC).date().isoformat(), "title": "Test brief"},
+    ).json()
+    assert (
+        client.post(
+            f"/api/briefs/{brief['id']}/items",
+            json={"paper_id": paper["id"], "rank": 1, "tier": "featured"},
+        ).status_code
+        == 200
+    )
+    published = client.post(f"/api/briefs/{brief['id']}/publish")
+    assert published.status_code == 200
+    assert published.json()["items"][0]["paper"]["title"] == paper["title"]
+    assert (
+        client.post(
+            f"/api/briefs/{brief['id']}/items",
+            json={"paper_id": paper["id"], "rank": 2, "tier": "related"},
+        ).status_code
+        == 409
+    )
+
+
+def test_pdf_upload_and_extract(client: TestClient) -> None:
+    document = pymupdf.open()
+    page = document.new_page()
+    page.insert_text((72, 72), "A Tactile Robot Paper")
+    page.insert_text((72, 100), "The experiment improves manipulation success.")
+    content = document.tobytes()
+    document.close()
+    response = client.post(
+        "/api/papers/ingest/pdf",
+        files={"file": ("paper.pdf", content, "application/pdf")},
+    )
+    assert response.status_code == 200, response.text
+    paper = response.json()["paper"]
+    text = client.get(f"/api/papers/{paper['id']}/text").json()
+    assert text["page_count"] == 1
+    assert "manipulation success" in text["pages"][0]["text"]
+    rendered = client.post(
+        f"/api/papers/{paper['id']}/render-page",
+        params={"page_number": 1, "dpi": 96},
+    )
+    assert rendered.status_code == 200
+    assert rendered.json()["path"].endswith("96dpi.png")
+    assert (
+        client.post(
+            f"/api/papers/{paper['id']}/render-page",
+            params={"page_number": 2},
+        ).status_code
+        == 400
+    )
+
+
+def test_manual_ingest_stages_daily_recommendation_and_metadata_edit(
+    client: TestClient,
+) -> None:
+    document = pymupdf.open()
+    page = document.new_page()
+    page.insert_text((72, 72), "A User Added Tactile Foundation Policy")
+    page.insert_text((72, 100), "The full paper studies transferable tactile manipulation.")
+    content = document.tobytes()
+    document.close()
+
+    response = client.post(
+        "/api/papers/ingest/pdf",
+        data={"recommend": "true"},
+        files={"file": ("manual-tactile.pdf", content, "application/pdf")},
+    )
+    assert response.status_code == 200, response.text
+    result = response.json()
+    assert result["analysis_task_id"]
+    assert result["paper"]["analysis_status"] == "queued"
+
+    latest = client.get("/api/briefs/latest")
+    assert latest.status_code == 200
+    manual_items = [
+        item for item in latest.json()["items"] if item["paper"]["id"] == result["paper"]["id"]
+    ]
+    assert len(manual_items) == 1
+    assert manual_items[0]["tier"] == "manual"
+    assert manual_items[0]["paper"]["analysis_status"] == "queued"
+
+    suggested = client.patch(
+        f"/api/papers/{result['paper']['id']}",
+        json={"suggested_tags": ["触觉", "基础策略"]},
+    )
+    assert suggested.status_code == 200
+    assert suggested.json()["suggested_tags"] == ["触觉", "基础策略"]
+
+    edited = client.patch(
+        f"/api/papers/{result['paper']['id']}/metadata",
+        json={
+            "title": "Edited Tactile Foundation Policy",
+            "authors": [{"name": "First Author"}, {"name": "Second Author"}],
+            "first_author": "First Author",
+            "corresponding_author": "Second Author",
+            "primary_affiliation": "Tactile Robotics Lab",
+            "summary": "A manually reviewed summary.",
+            "agent_comment": "Promising cross-sensor transfer.",
+            "recommendation_reason": "Relevant to tactile policy generalization.",
+            "tag_ids": [],
+            "new_tags": ["触觉"],
+        },
+    )
+    assert edited.status_code == 200, edited.text
+    assert edited.json()["title"] == "Edited Tactile Foundation Policy"
+    assert edited.json()["corresponding_author"] == "Second Author"
+    assert [tag["name"] for tag in edited.json()["tags"]] == ["触觉"]
+
+    refreshed = client.get("/api/briefs/latest").json()
+    manual = next(
+        item for item in refreshed["items"] if item["paper"]["id"] == result["paper"]["id"]
+    )
+    assert manual["paper"]["title"] == "Edited Tactile Foundation Policy"
+    assert manual["paper"]["summary"] == "A manually reviewed summary."
+
+
+def test_memory_task_and_conversation(client: TestClient) -> None:
+    memory = client.post(
+        "/api/memories",
+        json={
+            "kind": "interest_profile",
+            "title": "Tactile interests",
+            "content": "Prefer tactile VLA papers.",
+        },
+    )
+    assert memory.status_code == 200
+    assert (
+        client.patch(f"/api/memories/{memory.json()['id']}", json={"active": False}).status_code
+        == 200
+    )
+
+    conversation = client.post(
+        "/api/conversations", json={"kind": "global", "title": "Research assistant"}
+    ).json()
+    sent = client.post(
+        f"/api/conversations/{conversation['id']}/messages",
+        json={"content": "Show me recent tactile work.", "context_json": {"page": "brief"}},
+    )
+    assert sent.status_code == 200
+    task = client.get(f"/api/tasks/{sent.json()['task_id']}").json()
+    assert task["status"] == "queued"
+
+
+def test_metadata_generation_can_be_requested_without_adding_a_brief_item(
+    client: TestClient,
+) -> None:
+    paper = create_paper(client, "Explicit Metadata Generation Test")
+    requested = client.post(f"/api/papers/{paper['id']}/metadata/generate")
+    assert requested.status_code == 200, requested.text
+    assert requested.json()["created"] is True
+    repeated = client.post(f"/api/papers/{paper['id']}/metadata/generate")
+    assert repeated.status_code == 200
+    assert repeated.json()["created"] is False
+    assert repeated.json()["id"] == requested.json()["id"]
+
+    detail = client.get(f"/api/papers/{paper['id']}").json()
+    assert detail["analysis_status"] == "queued"
+    after = client.get("/api/briefs/latest")
+    after_ids = (
+        {item["paper"]["id"] for item in after.json().get("items", [])}
+        if after.status_code == 200
+        else set()
+    )
+    assert paper["id"] not in after_ids
+
+
+def test_confirm_feedback_preserves_metadata_tags_when_tag_ids_are_omitted(
+    client: TestClient,
+) -> None:
+    paper = create_paper(client, "Preserve Metadata Tags on Reading Completion")
+    tag = client.post("/api/tags", json={"name": "保留标签"}).json()
+    saved = client.patch(
+        f"/api/papers/{paper['id']}/metadata",
+        json={"tag_ids": [tag["id"]]},
+    )
+    assert [item["name"] for item in saved.json()["tags"]] == ["保留标签"]
+    assert client.post(f"/api/papers/{paper['id']}/finish", json={}).status_code == 200
+
+    confirmed = client.post(
+        f"/api/papers/{paper['id']}/confirm-feedback",
+        json={"interested": False, "quality": False},
+    )
+    assert confirmed.status_code == 200
+    assert [item["name"] for item in confirmed.json()["tags"]] == ["保留标签"]
+
+
+def test_scheduled_daily_is_idempotent(client: TestClient) -> None:
+    from frontier.config import settings
+    from frontier.scheduler import scheduled_daily
+
+    target = datetime.now(ZoneInfo(settings.timezone)).date().isoformat()
+    scheduled_daily()
+    scheduled_daily()
+    tasks = client.get("/api/tasks", params={"limit": 200}).json()
+    matching = [
+        task
+        for task in tasks
+        if task["kind"] == "daily_brief" and task["payload_json"].get("date") == target
+    ]
+    assert len(matching) == 1

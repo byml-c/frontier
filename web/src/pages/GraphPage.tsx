@@ -1,0 +1,57 @@
+import ChevronRightRounded from "@mui/icons-material/ChevronRightRounded";
+import CloseRounded from "@mui/icons-material/CloseRounded";
+import DescriptionRounded from "@mui/icons-material/DescriptionRounded";
+import LightbulbRounded from "@mui/icons-material/LightbulbRounded";
+import PsychologyRounded from "@mui/icons-material/PsychologyRounded";
+import SearchRounded from "@mui/icons-material/SearchRounded";
+import { Box, Button, Chip, Divider, Drawer, IconButton, InputAdornment, Link as MuiLink, List, ListItemButton, ListItemText, Paper, Stack, Tab, Tabs, TextField, Typography, useMediaQuery, useTheme } from "@mui/material";
+import { useQuery } from "@tanstack/react-query";
+import { useEffect, useMemo, useRef, useState } from "react";
+import ForceGraph2D, { type ForceGraphMethods, type LinkObject, type NodeObject } from "react-force-graph-2d";
+import { Link, useNavigate, useParams } from "react-router-dom";
+import { api, formatDate } from "../api";
+import { Empty, ErrorState, Loading } from "../components/States";
+import { templateSurfaces } from "../theme";
+import type { GraphData, ResearchNode } from "../types";
+
+type ForceNode = ResearchNode & { x?: number; y?: number; fx?: number; fy?: number };
+type ForceLink = { id: string; source: string | ForceNode; target: string | ForceNode };
+type TunableForce = { distance?: (value: number) => unknown; strength?: (value: number) => unknown };
+
+export function GraphPage() {
+  const { nodeId } = useParams(); const navigate = useNavigate(); const theme = useTheme(); const mobile = useMediaQuery(theme.breakpoints.down("md"));
+  const graphRef = useRef<ForceGraphMethods<NodeObject<ForceNode>, LinkObject<ForceNode, ForceLink>> | undefined>(undefined); const didFitRef = useRef(false); const containerRef = useRef<HTMLDivElement>(null);
+  const [size, setSize] = useState({ width: 900, height: 680 }); const [search, setSearch] = useState(""); const [tab, setTab] = useState("overview");
+  const subgraph = useQuery({ queryKey: ["subgraph", nodeId], queryFn: () => api<GraphData>(`/api/graph/subgraph?depth=${nodeId ? 2 : 1}&limit=100${nodeId ? `&focus_id=${nodeId}` : ""}`) });
+  const detail = useQuery({ queryKey: ["node", nodeId], queryFn: () => api<ResearchNode>(`/api/graph/nodes/${nodeId}`), enabled: !!nodeId });
+  const searchResults = useQuery({ queryKey: ["node-search", search], queryFn: () => api<ResearchNode[]>(`/api/graph/nodes?q=${encodeURIComponent(search)}&limit=8`), enabled: search.trim().length > 1 });
+  const data = useMemo(() => ({ nodes: (subgraph.data?.nodes ?? []).map((node, index) => ({ ...node, x: node.layout_x ?? Math.cos(index * 2.399) * (140 + index * 7), y: node.layout_y ?? Math.sin(index * 2.399) * (140 + index * 7) })) as ForceNode[], links: (subgraph.data?.links ?? []).map((link) => ({ id: link.id, source: link.source_id, target: link.target_id })) as ForceLink[] }), [subgraph.data]);
+  useEffect(() => { if (!containerRef.current) return; const observer = new ResizeObserver(([entry]) => setSize({ width: entry.contentRect.width, height: entry.contentRect.height })); observer.observe(containerRef.current); return () => observer.disconnect(); }, []);
+  useEffect(() => { didFitRef.current = false; const linkForce = graphRef.current?.d3Force("link") as TunableForce | undefined; const chargeForce = graphRef.current?.d3Force("charge") as TunableForce | undefined; linkForce?.distance?.(125); chargeForce?.strength?.(-280); graphRef.current?.d3ReheatSimulation(); graphRef.current?.resumeAnimation(); setTab("overview"); }, [nodeId, data]);
+  const inspector = detail.isLoading ? <Loading /> : detail.error ? <ErrorState error={detail.error} /> : detail.data ? <NodeDetail node={detail.data} tab={tab} setTab={setTab} onClose={() => navigate("/graph")} /> : null;
+  return <Box sx={{ display: "flex", height: { xs: "calc(100dvh - 76px)", md: "calc(100dvh - 100px)" }, overflow: "hidden", bgcolor: "background.default" }}>
+    <Box ref={containerRef} sx={{ position: "relative", flex: 1, minWidth: 0, height: "100%" }}>
+      <Paper elevation={0} sx={{ position: "absolute", zIndex: 4, left: { xs: 12, md: 24 }, right: { xs: 12, md: "auto" }, top: { xs: 12, md: 20 }, width: { md: 360 }, ...templateSurfaces.navigation }}><TextField fullWidth size="small" value={search} onChange={(event) => setSearch(event.target.value)} placeholder="搜索研究节点" InputProps={{ startAdornment: <InputAdornment position="start"><SearchRounded /></InputAdornment> }} />{searchResults.data && search.trim() && <List dense sx={{ pt: 1 }}>{searchResults.data.map((node) => <ListItemButton key={node.id} onClick={() => { navigate(`/graph/${node.id}`); setSearch(""); }}><ListItemText primary={node.name} secondary={node.core_question} /><ChevronRightRounded /></ListItemButton>)}</List>}</Paper>
+      {subgraph.isLoading ? <Loading label="正在加载研究图谱" /> : subgraph.error ? <Box sx={{ p: 3 }}><ErrorState error={subgraph.error} /></Box> : !data.nodes.length ? <Empty title="图谱还没有节点" body="Agent 建立研究节点后会显示在这里。" /> : <ForceGraph2D ref={graphRef} width={size.width} height={size.height} graphData={data} backgroundColor="#FFFFFF" nodeRelSize={6} linkColor={() => "rgba(25, 118, 210, .22)"} linkWidth={1.2} linkDirectionalArrowLength={4} linkDirectionalArrowRelPos={0.86} minZoom={.35} maxZoom={5} cooldownTicks={90} d3AlphaDecay={.055} d3VelocityDecay={.46} onEngineStop={() => { data.nodes.forEach((node) => { node.fx = node.x; node.fy = node.y; }); if (!didFitRef.current) { didFitRef.current = true; graphRef.current?.zoomToFit(0, 90); const fittedScale = graphRef.current?.zoom() ?? 1; if (fittedScale > 1.7) graphRef.current?.zoom(1.7, 0); } graphRef.current?.pauseAnimation(); }} onNodeClick={(node) => { navigate(`/graph/${node.id}`); setTimeout(() => { graphRef.current?.centerAt(node.x, node.y, 400); graphRef.current?.zoom(2, 400); }, 40); }} nodeCanvasObject={(node, ctx, scale) => drawNode(node, ctx, scale, node.id === nodeId)} nodePointerAreaPaint={(node, color, ctx) => { ctx.fillStyle = color; ctx.beginPath(); ctx.arc(node.x ?? 0, node.y ?? 0, 18, 0, Math.PI * 2); ctx.fill(); }} />}
+      <Chip label="滚轮缩放 · 拖动画布 · 点击节点查看详情" size="small" sx={{ position: "absolute", left: "50%", bottom: 16, transform: "translateX(-50%)", bgcolor: "rgba(255,255,255,.9)", display: { xs: "none", sm: "flex" } }} />
+    </Box>
+    {!mobile && nodeId && <Paper square elevation={0} sx={{ width: 430, borderLeft: 1, borderColor: "divider", overflowY: "auto", bgcolor: "rgba(255,255,255,.82)", backdropFilter: "blur(24px) saturate(150%)" }}>{inspector}</Paper>}
+    {mobile && <Drawer anchor="bottom" open={!!nodeId} onClose={() => navigate("/graph")} PaperProps={{ sx: { height: "76dvh", borderRadius: "20px 20px 0 0" } }}>{inspector}</Drawer>}
+  </Box>;
+}
+
+function drawNode(node: ForceNode, ctx: CanvasRenderingContext2D, scale: number, active: boolean) {
+  const x = node.x ?? 0; const y = node.y ?? 0; const radius = active ? 11 : 7 + Math.min(node.paper_count ?? 0, 8) * .4;
+  ctx.beginPath(); ctx.arc(x, y, radius, 0, Math.PI * 2); ctx.fillStyle = active ? "#0066CC" : node.color || "#1976D2"; ctx.fill();
+  if (active) { ctx.beginPath(); ctx.arc(x, y, radius + 5, 0, Math.PI * 2); ctx.strokeStyle = "rgba(0, 114, 229, .22)"; ctx.lineWidth = 4; ctx.stroke(); }
+  const fontSize = 13 / scale; ctx.font = `600 ${fontSize}px Inter, "Noto Sans SC", sans-serif`; ctx.textAlign = "center"; ctx.textBaseline = "top"; ctx.fillStyle = "#212121";
+  const maxWidth = 170 / scale; let label = node.name; while (label.length > 2 && ctx.measureText(label).width > maxWidth) label = `${label.slice(0, -2)}…`;
+  ctx.fillText(label, x, y + radius + 5 / scale);
+}
+
+function NodeDetail({ node, tab, setTab, onClose }: { node: ResearchNode; tab: string; setTab: (tab: string) => void; onClose: () => void }) {
+  const items = [["overview", "概览"], ["papers", `论文 ${node.papers?.length ?? 0}`], ["progress", "进展"], ["relations", "关系"], ["ideas", "想法"]];
+  return <Stack sx={{ minHeight: "100%" }}><Box sx={{ p: 3, pb: 2 }}><Stack direction="row" justifyContent="space-between"><Chip size="small" label={node.domain || "研究节点"} color="primary" variant="outlined" /><IconButton onClick={onClose}><CloseRounded /></IconButton></Stack><Typography variant="h1" sx={{ mt: 2 }}>{node.name}</Typography><Typography color="text.secondary" sx={{ mt: 1 }}>{node.core_question}</Typography></Box><Tabs value={tab} onChange={(_, value) => setTab(value)} variant="scrollable" scrollButtons={false} sx={{ px: 2, borderBottom: 1, borderColor: "divider" }}>{items.map(([value, label]) => <Tab value={value} label={label} key={value} />)}</Tabs><Box sx={{ p: 3, flex: 1 }}>{tab === "overview" && <Stack spacing={2}><InfoBlock title="研究内容" body={node.summary} /><InfoBlock title="已有进展" body={node.solved} /><InfoBlock title="待解决问题" body={node.open_questions} /></Stack>}{tab === "papers" && <Stack spacing={1}>{node.papers?.map((paper) => <Paper component={Link} to={`/paper/${paper.id}`} key={paper.id} variant="outlined" sx={{ p: 1.75, display: "flex", gap: 1.5, color: "inherit", textDecoration: "none" }}><DescriptionRounded color="primary" /><Box><Typography fontWeight={650}>{paper.title}</Typography><Typography variant="caption" color="text.secondary">{paper.first_author} · {formatDate(paper.published_at)}</Typography>{paper.reason && <Typography variant="body2" color="text.secondary" sx={{ mt: .5 }}>{paper.reason}</Typography>}</Box></Paper>)}</Stack>}{tab === "progress" && <Stack spacing={2} divider={<Divider />}>{node.progress?.map((item) => <Box key={item.id}><Typography variant="caption" color="primary">{formatDate(item.happened_at || item.created_at)}</Typography><Typography variant="h3" sx={{ mt: .5 }}>{item.title}</Typography><Typography color="text.secondary" sx={{ mt: .5 }}>{item.content}</Typography></Box>)}</Stack>}{tab === "relations" && <Stack spacing={3}><Relation title="上游节点" nodes={node.parents} /><Relation title="下游节点" nodes={node.children} /></Stack>}{tab === "ideas" && <Stack spacing={1.5}>{node.ideas?.map((idea) => <Paper variant="outlined" sx={{ p: 1.75 }} key={idea.id}><Stack direction="row" spacing={1}><LightbulbRounded color="primary" /><Box><Chip size="small" label={idea.status} /><Typography sx={{ mt: 1 }}>{idea.content}</Typography></Box></Stack></Paper>)}{!node.ideas?.length && <Typography color="text.secondary">暂无已保存的研究想法。</Typography>}</Stack>}</Box><Box sx={{ p: 2.5, borderTop: 1, borderColor: "divider" }}><Button fullWidth variant="contained" startIcon={<PsychologyRounded />} onClick={() => window.dispatchEvent(new CustomEvent("frontier:open-agent", { detail: { context: `研究节点：${node.name}\n核心问题：${node.core_question}` } }))}>与研究助手讨论</Button></Box></Stack>;
+}
+function InfoBlock({ title, body }: { title: string; body?: string | null }) { return <Paper variant="outlined" sx={{ p: 2 }}><Typography variant="subtitle2" color="primary.dark">{title}</Typography><Typography color="text.secondary" sx={{ mt: .75, whiteSpace: "pre-wrap" }}>{body || "暂无内容。"}</Typography></Paper>; }
+function Relation({ title, nodes = [] }: { title: string; nodes?: Array<{ id: string; name: string }> }) { return <Box><Typography variant="h3" sx={{ mb: 1 }}>{title}</Typography>{nodes.length ? <Stack>{nodes.map((node) => <MuiLink component={Link} key={node.id} to={`/graph/${node.id}`} underline="none" sx={{ py: 1, display: "flex", justifyContent: "space-between" }}>{node.name}<ChevronRightRounded fontSize="small" /></MuiLink>)}</Stack> : <Typography color="text.secondary">暂无节点</Typography>}</Box>; }

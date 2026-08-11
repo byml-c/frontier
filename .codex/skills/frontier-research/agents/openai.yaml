@@ -1,0 +1,4 @@
+interface:
+  display_name: "Frontier Research"
+  short_description: "Collect, analyze, and connect embodied AI papers"
+  default_prompt: "Use $frontier-research to update my paper brief and research graph."

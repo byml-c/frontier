@@ -1,0 +1,20 @@
+[Unit]
+Description=Frontier personal research server
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# Use the same Unix user whose Codex CLI/provider configuration you maintain.
+User=YOUR_USER
+Group=YOUR_GROUP
+WorkingDirectory=/opt/frontier
+EnvironmentFile=/opt/frontier/.env
+ExecStart=/opt/frontier/.venv/bin/frontier-server
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=30
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target

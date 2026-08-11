@@ -1,0 +1,77 @@
+# 阿里云部署
+
+首版推荐把应用只监听在服务器本机，通过 Tailscale Serve 暴露给 tailnet 中受信任的手机和电脑。这样设备换网段不会影响访问，也不会把无登录的应用直接开放到公网。
+
+## 1. 安装与构建
+
+以下示例假设代码位于 `/opt/frontier`，并使用已经配置好 Codex/DeepSeek provider 的同一个 Unix 用户运行服务。
+
+```bash
+cd /opt/frontier
+uv sync --extra dev
+cd web
+pnpm install --frozen-lockfile
+pnpm build
+cd ..
+cp .env.example .env
+cp translation.env.example translation.env
+chmod 600 translation.env
+```
+
+按服务器实际路径修改 `.env`。保持 `FRONTIER_CODEX_SANDBOX=workspace-write` 和
+`FRONTIER_CODEX_NETWORK_ACCESS=true`，使受限 Agent 能访问本机 Server 与论文来源。
+不要把 Codex API key 写进项目 `.env`；继续使用该用户已有的 Codex 配置。划词翻译的独立模型只写入 `translation.env`：
+
+```dotenv
+OPENAI_API_KEY=你的翻译模型密钥
+BASE_URL=https://你的兼容接口/v1
+MODEL=你的翻译模型名称
+```
+
+然后做一次前台验收：
+
+```bash
+uv run frontier-server
+```
+
+另开终端验证：
+
+```bash
+uv run frontier health
+uv run frontier bootstrap bibtex '我的文库.bib'
+```
+
+## 2. systemd 常驻
+
+复制 `deploy/frontier.service.example` 到 `/etc/systemd/system/frontier.service`，把 `YOUR_USER`、`YOUR_GROUP` 和路径替换成实际值，再执行：
+
+```bash
+sudo systemctl daemon-reload
+sudo systemctl enable --now frontier
+sudo systemctl status frontier
+```
+
+日志通过 `journalctl -u frontier` 查看。Web 的“任务与日志”页面另行展示每次 Agent 任务的状态和失败原因。
+
+## 3. 受信设备访问
+
+按 [Tailscale Linux 安装文档](https://tailscale.com/docs/install/linux) 把服务器加入自己的 tailnet，并在手机、电脑上登录同一个 tailnet。应用保持 `FRONTIER_HOST=127.0.0.1`，不要在阿里云安全组开放 8000 端口。
+
+根据当前的 [Tailscale Serve 文档](https://tailscale.com/docs/features/tailscale-serve)，将本机服务私有转发到 tailnet：
+
+```bash
+sudo tailscale serve --bg http://127.0.0.1:8000
+tailscale serve status
+```
+
+使用命令返回的 tailnet HTTPS 地址访问。只使用 Serve，不启用 Funnel；Funnel 会把应用公开到互联网，不符合本系统的信任设备边界。
+
+## 4. 运行检查
+
+- 北京时间 05:00 启动日报 Agent，23:50 创建结构化数据本地 Git 备份；
+- 修改 Web 中的调度时间后，重启 Server 以重载任务；
+- 备份仓库位于 `data/backups/git`，PDF 和 SQLite 不进入该仓库；
+- 每次升级先执行 `pnpm build`，再重启 `frontier` 服务；
+- Codex/provider 状态、额度和凭据由维护者负责，失败原因会留在任务页。
+
+首版没有应用层登录。若不用 Tailscale，必须在应用前增加等价的设备身份验证；不能直接把 8000 暴露到公网。
