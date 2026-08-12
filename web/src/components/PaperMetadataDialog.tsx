@@ -71,6 +71,7 @@ const emptyForm: MetadataForm = {
   relevance_score: "",
   metadata_json: "{}",
 };
+const metadataCardSx = { p: { xs: .75, sm: 0 }, border: 0, borderRadius: 0, bgcolor: "transparent" };
 
 function paperToForm(paper: Paper): MetadataForm {
   return {
@@ -238,19 +239,20 @@ export function PaperMetadataDialog({
             <Tab value="metadata" label="文献信息" />
           </Tabs>
 
-          <Box sx={{ flex: 1, minHeight: 0, overflowY: "auto", py: 2, pr: 0.5 }}>
+          <Box sx={{ flex: 1, minHeight: 0, overflowY: "auto", py: { xs: 1, sm: 2 }, pr: { xs: 0, sm: .5 } }}>
             {tab === "summary" && (
-              <Stack spacing={2}>
-                <Stack direction={{ xs: "column", sm: "row" }} alignItems={{ sm: "center" }} justifyContent="space-between" gap={1}>
-                  <Box>
+              <Stack spacing={{ xs: 1.25, sm: 2 }}>
+                <Stack direction="row" alignItems="center" justifyContent="space-between" gap={1}>
+                  <Box sx={{ flex: 1, minWidth: 0 }}>
                     <Typography variant="h3">Agent 总结</Typography>
-                    <Typography variant="body2" color="text.secondary">查看并修订论文的核心判断。</Typography>
                   </Box>
                   <Button
+                    size="small"
                     variant="outlined"
                     startIcon={generate.isPending ? <CircularProgress size={16} /> : <AutoAwesomeRounded />}
                     disabled={generate.isPending || dirty || ["queued", "processing"].includes(paper.data?.analysis_status ?? "")}
                     onClick={() => generate.mutate()}
+                    sx={{ flexShrink: 0 }}
                   >
                     {["queued", "processing"].includes(paper.data?.analysis_status ?? "") ? "Agent 处理中" : "让 Agent 生成"}
                   </Button>
@@ -262,7 +264,7 @@ export function PaperMetadataDialog({
                 {paper.data?.analysis_status === "failed" && <Alert severity="error">{paper.data.analysis_error || "全文分析失败"}</Alert>}
                 {generate.error && <Alert severity="error">{generate.error.message}</Alert>}
 
-                <Card variant="outlined">
+                <Card variant="outlined" sx={metadataCardSx}>
                   <CardContent>
                     <Stack spacing={2}>
                       <Typography variant="h3">核心判断</Typography>
@@ -277,7 +279,7 @@ export function PaperMetadataDialog({
                   </CardContent>
                 </Card>
 
-                <Card variant="outlined">
+                <Card variant="outlined" sx={metadataCardSx}>
                   <CardContent>
                     <Stack spacing={2}>
                       <Typography variant="h3">研究内容</Typography>
@@ -289,7 +291,7 @@ export function PaperMetadataDialog({
                   </CardContent>
                 </Card>
 
-                <Card variant="outlined">
+                <Card variant="outlined" sx={metadataCardSx}>
                   <CardContent>
                     <Typography variant="h3">标签</Typography>
                     {suggestedTags.length > 0 && <Stack direction="row" flexWrap="wrap" gap={1} sx={{ mt: 1 }}><Typography variant="body2" color="text.secondary" sx={{ alignSelf: "center" }}>Agent 建议</Typography>{suggestedTags.map((name) => <Chip clickable color="primary" variant="outlined" label={name} key={name} onClick={() => acceptSuggestedTag(name)} />)}</Stack>}
@@ -307,7 +309,7 @@ export function PaperMetadataDialog({
             )}
 
             {tab === "metadata" && (
-              <Card variant="outlined">
+              <Card variant="outlined" sx={metadataCardSx}>
                 <CardContent>
                   <Stack spacing={2}>
                     <Typography variant="h3">论文标识</Typography>
@@ -339,7 +341,7 @@ export function PaperMetadataDialog({
             )}
 
             {tab === "reading" && paper.data?.completion_summary && (
-              <Card variant="outlined">
+              <Card variant="outlined" sx={metadataCardSx}>
                 <CardContent>
                   <MarkdownMessage content={paper.data.completion_summary} onJump={onJump} />
                 </CardContent>

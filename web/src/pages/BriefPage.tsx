@@ -1,8 +1,7 @@
-import HubRounded from "@mui/icons-material/HubRounded";
 import PlayArrowRounded from "@mui/icons-material/PlayArrowRounded";
 import { Box, Button, Container, Divider, Stack, Typography } from "@mui/material";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Link, useParams } from "react-router-dom";
+import { useParams } from "react-router-dom";
 import { api, ApiError } from "../api";
 import { BriefTabs } from "../components/BriefTabs";
 import { PageHeader } from "../components/PageHeader";
@@ -27,7 +26,6 @@ export function BriefPage() {
     <PageHeader
       title={data.title}
       tabs={<BriefTabs value={briefId ? "archive" : "today"} />}
-      actions={<Button component={Link} to="/graph" variant="contained" startIcon={<HubRounded />}>图谱</Button>}
     />
     {featured.length > 0 && <Section title="重点推荐" description="优先考虑研究价值和与你当前方向的关联"><Stack spacing={1.5}>{featured.map((item) => <PaperCard key={item.id} paper={{ ...item.paper, status: item.current_status, is_interested: item.is_interested, is_quality: item.is_quality }} rank={item.rank} featured />)}</Stack></Section>}
     {manual.length > 0 && <Section title="手动添加" description="已加入今日推荐，不占每日推荐篇数"><Stack spacing={1.5}>{manual.map((item) => <PaperCard key={item.id} paper={{ ...item.paper, status: item.current_status, is_interested: item.is_interested, is_quality: item.is_quality }} />)}</Stack></Section>}

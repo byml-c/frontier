@@ -3,8 +3,9 @@ from __future__ import annotations
 from contextlib import asynccontextmanager
 
 import uvicorn
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
@@ -36,6 +37,17 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+app.add_middleware(GZipMiddleware, minimum_size=1000, compresslevel=6)
+
+
+@app.middleware("http")
+async def static_cache_headers(request: Request, call_next):  # type: ignore[no-untyped-def]
+    response = await call_next(request)
+    if request.url.path.startswith("/assets/") and response.status_code == 200:
+        response.headers["Cache-Control"] = "public, max-age=31536000, immutable"
+    return response
+
+
 app.include_router(system.router)
 app.include_router(papers.router)
 app.include_router(papers.tags_router)
@@ -59,7 +71,10 @@ if settings.web_dist_dir.exists():
         candidate = settings.web_dist_dir / path
         if candidate.is_file() and settings.web_dist_dir in candidate.resolve().parents:
             return FileResponse(candidate)
-        return FileResponse(settings.web_dist_dir / "index.html")
+        return FileResponse(
+            settings.web_dist_dir / "index.html",
+            headers={"Cache-Control": "no-cache"},
+        )
 
 
 def run() -> None:

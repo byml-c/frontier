@@ -25,9 +25,10 @@ import {
 } from "@mui/material";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { FormEvent, useRef, useState } from "react";
-import { Link as RouterLink, useNavigate } from "react-router-dom";
+import { Link as RouterLink, useNavigate, useSearchParams } from "react-router-dom";
 import { api, formatDate, statusLabel } from "../api";
 import { Modal } from "../components/Modal";
+import { MobileConfirmAction } from "../components/MobileConfirmAction";
 import { PageHeader } from "../components/PageHeader";
 import { PaperMetadataDialog } from "../components/PaperMetadataDialog";
 import { Empty, ErrorState, Loading } from "../components/States";
@@ -46,8 +47,9 @@ const statusColors: Record<string, "default" | "primary" | "warning" | "success"
 
 export function LibraryPage() {
   const navigate = useNavigate();
+  const [searchParams, setSearchParams] = useSearchParams();
   const queryClient = useQueryClient();
-  const [tab, setTab] = useState<LibraryTab>("papers");
+  const tab: LibraryTab = searchParams.get("view") === "collection" ? "collection" : "papers";
   const [search, setSearch] = useState("");
   const [tag, setTag] = useState("");
   const [scope, setScope] = useState("all");
@@ -71,7 +73,7 @@ export function LibraryPage() {
   const tags = useQuery({ queryKey: ["tags"], queryFn: () => api<Tag[]>("/api/tags") });
 
   function changeTab(next: LibraryTab) {
-    setTab(next);
+    setSearchParams(next === "collection" ? { view: "collection" } : {}, { replace: true });
     setScope("all");
   }
 
@@ -81,7 +83,7 @@ export function LibraryPage() {
         title="论文"
         description="浏览全部论文，并将完成精读的成果沉淀到积累库。"
         tabs={<Tabs value={tab} onChange={(_, value: LibraryTab) => changeTab(value)} aria-label="论文库分类" sx={{ minHeight: 40, "& .MuiTab-root": { minHeight: 40, py: 0 } }}><Tab value="papers" label="论文库" /><Tab value="collection" label="积累库" /></Tabs>}
-        actions={<Button variant="contained" startIcon={<AddRounded />} onClick={() => setIngestOpen(true)}>添加论文</Button>}
+        actions={<><MobileConfirmAction label="添加论文" icon={<AddRounded fontSize="small" />} onConfirm={() => setIngestOpen(true)} /><Button variant="contained" startIcon={<AddRounded />} onClick={() => setIngestOpen(true)} sx={{ display: { xs: "none", md: "inline-flex" } }}>添加论文</Button></>}
       />
 
       <Card sx={{ mb: 3 }}>
@@ -152,7 +154,7 @@ export function LibraryPage() {
         onClose={() => setIngestOpen(false)}
         onSuccess={() => {
           setIngestOpen(false);
-          setTab("papers");
+          setSearchParams({}, { replace: true });
           setScope("all");
           queryClient.invalidateQueries({ queryKey: ["papers"] });
         }}

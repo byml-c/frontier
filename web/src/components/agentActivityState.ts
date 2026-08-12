@@ -25,3 +25,19 @@ export function updateActivities(current: AgentActivityItem[], event: StreamEven
 export function failRunningActivities(current: AgentActivityItem[]): AgentActivityItem[] {
   return current.map((item) => item.status === "running" ? { ...item, status: "failed" } : item);
 }
+
+export function activitiesFromContext(context: Record<string, unknown>): AgentActivityItem[] {
+  const values = Array.isArray(context.activities) ? context.activities : [];
+  return values.flatMap((value) => {
+    if (!value || typeof value !== "object") return [];
+    const item = value as Record<string, unknown>;
+    if (!item.id || !item.label) return [];
+    return [{
+      id: String(item.id),
+      kind: String(item.kind || "status"),
+      label: String(item.label),
+      detail: item.detail ? String(item.detail) : undefined,
+      status: item.status === "failed" || item.status === "running" ? item.status : "completed",
+    } satisfies AgentActivityItem];
+  }).slice(-8);
+}

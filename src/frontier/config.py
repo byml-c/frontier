@@ -54,6 +54,10 @@ class Settings(BaseSettings):
         return self.data_dir / "text"
 
     @property
+    def document_dir(self) -> Path:
+        return self.data_dir / "documents"
+
+    @property
     def export_dir(self) -> Path:
         return self.data_dir / "exports"
 
@@ -64,6 +68,7 @@ class Settings(BaseSettings):
             self.upload_dir,
             self.task_dir,
             self.text_dir,
+            self.document_dir,
             self.export_dir,
         ):
             path.mkdir(parents=True, exist_ok=True)

@@ -11,10 +11,10 @@ function prepareMarkdown(content: string): string {
     // (`** important**`). Move that whitespace outside so CommonMark can parse
     // the emphasis without joining adjacent Latin words.
     .replace(/\*\*([^*\n]+?)\*\*/g, (match, body: string) => {
-      const leading = body.match(/^[\t ]+/)?.[0] ?? "";
-      const trailing = body.match(/[\t ]+$/)?.[0] ?? "";
+      const leading = body.match(/^[\s\u200B\u3000]+/)?.[0] ?? "";
+      const trailing = body.match(/[\s\u200B\u3000]+$/)?.[0] ?? "";
       const normalized = body.trim();
-      return normalized ? `${leading}**${normalized}**${trailing}` : match;
+      return normalized ? `${leading.replace(/\u200B/g, "")}**${normalized.replace(/^\u200B+|\u200B+$/g, "")}**${trailing.replace(/\u200B/g, "")}` : match;
     })
     // CommonMark treats a closing emphasis marker followed directly by a CJK/Latin
     // character as ambiguous. Add a visual-neutral word boundary so streamed model
@@ -75,6 +75,7 @@ export function MarkdownMessage({
           bgcolor: inverted ? "rgba(0,0,0,.18)" : "rgba(15,23,42,.07)",
           fontSize: "0.88em",
         },
+        "& strong": { fontWeight: 750 },
         "& table": { display: "block", maxWidth: "100%", overflowX: "auto", borderCollapse: "collapse", my: 1.25 },
         "& th, & td": { border: "1px solid", borderColor: inverted ? "rgba(255,255,255,.35)" : "divider", px: 1.25, py: 0.75, textAlign: "left" },
         "& th": { bgcolor: inverted ? "rgba(0,0,0,.12)" : "action.hover" },

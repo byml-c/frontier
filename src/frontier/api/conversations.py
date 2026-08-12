@@ -162,9 +162,30 @@ def stream_message(
     )
 
     def generate():  # type: ignore[no-untyped-def]
+        activity_log: list[dict] = []
+
+        def activity_event(**event: object) -> str:
+            normalized = {
+                "id": str(event.get("activity_id") or f"activity-{len(activity_log)}"),
+                "kind": str(event.get("kind") or "status"),
+                "label": str(event.get("label") or "Agent 正在处理"),
+                "status": str(event.get("status") or "running"),
+            }
+            if event.get("detail"):
+                normalized["detail"] = str(event["detail"])
+            index = next(
+                (i for i, item in enumerate(activity_log) if item["id"] == normalized["id"]),
+                None,
+            )
+            if index is None:
+                activity_log.append(normalized)
+                del activity_log[:-8]
+            else:
+                activity_log[index] = normalized
+            return encode_stream_event("activity", **event)
+
         yield encode_stream_event("meta", task_id=task.id, message=model_dict(message))
-        yield encode_stream_event(
-            "activity",
+        yield activity_event(
             activity_id="agent-startup",
             kind="status",
             label="正在启动 Agent",
@@ -196,8 +217,7 @@ def stream_message(
                         if running:
                             running.codex_session_id = thread_id
                         runner_session.commit()
-                    yield encode_stream_event(
-                        "activity",
+                    yield activity_event(
                         activity_id="agent-startup",
                         kind="status",
                         label="Agent 已连接",
@@ -207,8 +227,8 @@ def stream_message(
                     content += event["delta"]
                     yield encode_stream_event("delta", delta=event["delta"])
                 elif event["type"] == "activity":
-                    yield encode_stream_event(
-                        "activity", **{key: value for key, value in event.items() if key != "type"}
+                    yield activity_event(
+                        **{key: value for key, value in event.items() if key != "type"}
                     )
             with SessionLocal() as runner_session:
                 current_conversation = runner_session.get(Conversation, conversation_id)
@@ -218,6 +238,19 @@ def stream_message(
                     role="assistant",
                     content=content,
                     citations_json=_parse_citations(content, paper_id),
+                    context_json={
+                        "activities": [
+                            {
+                                **activity,
+                                "status": (
+                                    "completed"
+                                    if activity["status"] == "running"
+                                    else activity["status"]
+                                ),
+                            }
+                            for activity in activity_log
+                        ]
+                    },
                 )
                 runner_session.add(assistant)
                 runner_session.flush()

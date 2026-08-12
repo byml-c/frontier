@@ -24,6 +24,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { ReactNode, useEffect, useState } from "react";
 import { api, formatDate } from "../api";
 import { PageHeader } from "../components/PageHeader";
+import { MobileConfirmAction } from "../components/MobileConfirmAction";
 import { ErrorState, Loading } from "../components/States";
 import type { Setting } from "../types";
 
@@ -66,7 +67,7 @@ export function SettingsPage() {
       <PageHeader
         title="运行设置"
         description="管理日报范围，检查 Agent 与翻译服务的运行状态。"
-        actions={<Button variant="contained" startIcon={<SaveRounded />} onClick={() => save.mutate()} disabled={save.isPending}>保存设置</Button>}
+        actions={<><MobileConfirmAction label="保存设置" icon={<SaveRounded fontSize="small" />} onConfirm={() => save.mutate()} disabled={save.isPending} /><Button variant="contained" startIcon={<SaveRounded />} onClick={() => save.mutate()} disabled={save.isPending} sx={{ display: { xs: "none", md: "inline-flex" } }}>保存设置</Button></>}
       />
       <ServiceChecks />
       {query.isLoading ? <Loading /> : query.error ? <ErrorState error={query.error} /> : (

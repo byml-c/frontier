@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from zoneinfo import ZoneInfo
 
 import pymupdf
@@ -8,6 +8,10 @@ from fastapi.testclient import TestClient
 
 from frontier.api.papers import _translation_key
 from frontier.schemas import TranslationRequest
+from frontier.services.document_reader import (
+    _estimate_conversion_seconds,
+    _processing_status_is_live,
+)
 
 
 def create_paper(client: TestClient, title: str = "Tactile VLA for Fine Manipulation") -> dict:
@@ -285,6 +289,10 @@ def test_pdf_upload_and_extract(client: TestClient) -> None:
     )
     assert response.status_code == 200, response.text
     paper = response.json()["paper"]
+    assert paper["pdf_version"]
+    pdf_response = client.get(f"/api/papers/{paper['id']}/pdf?v={paper['pdf_version']}")
+    assert pdf_response.status_code == 200
+    assert pdf_response.headers["cache-control"] == "private, max-age=31536000, immutable"
     text = client.get(f"/api/papers/{paper['id']}/text").json()
     assert text["page_count"] == 1
     assert "manipulation success" in text["pages"][0]["text"]
@@ -301,6 +309,62 @@ def test_pdf_upload_and_extract(client: TestClient) -> None:
         ).status_code
         == 400
     )
+
+
+def test_document_reader_queues_and_serves_cached_result(client: TestClient, monkeypatch) -> None:
+    paper = create_paper(client, "A Structured Mobile Reader Paper")
+    queued: list[str] = []
+    monkeypatch.setattr(
+        "frontier.api.papers.document_status",
+        lambda _session, item: {
+            "paper_id": item.id,
+            "version": "v1",
+            "status": "missing",
+        },
+    )
+    monkeypatch.setattr(
+        "frontier.api.papers.queue_document_conversion",
+        lambda paper_id, **_kwargs: queued.append(paper_id) or True,
+    )
+    response = client.get(f"/api/papers/{paper['id']}/document")
+    assert response.status_code == 200
+    assert response.json()["status"] == "processing"
+    assert queued == [paper["id"]]
+
+    monkeypatch.setattr(
+        "frontier.api.papers.document_status",
+        lambda _session, item: {
+            "paper_id": item.id,
+            "version": "v1",
+            "status": "ready",
+            "blocks": [
+                {
+                    "id": "intro",
+                    "kind": "text",
+                    "page_number": 1,
+                    "level": 0,
+                    "text": "A readable paragraph.",
+                }
+            ],
+        },
+    )
+    ready = client.get(f"/api/papers/{paper['id']}/document")
+    assert ready.json()["blocks"][0]["id"] == "intro"
+
+
+def test_document_reader_estimate_scales_with_page_count() -> None:
+    short = _estimate_conversion_seconds(4)
+    long = _estimate_conversion_seconds(40)
+    assert short[0] < short[1]
+    assert long[0] > short[0]
+    assert long[1] > short[1]
+
+
+def test_document_reader_detects_stale_queued_status() -> None:
+    fresh = datetime.now(UTC).isoformat()
+    stale = (datetime.now(UTC) - timedelta(minutes=2)).isoformat()
+    assert _processing_status_is_live("not-running", {"phase": "queued", "updated_at": fresh})
+    assert not _processing_status_is_live("not-running", {"phase": "queued", "updated_at": stale})
 
 
 def test_manual_ingest_stages_daily_recommendation_and_metadata_edit(
@@ -392,6 +456,53 @@ def test_memory_task_and_conversation(client: TestClient) -> None:
     assert sent.status_code == 200
     task = client.get(f"/api/tasks/{sent.json()['task_id']}").json()
     assert task["status"] == "queued"
+
+
+def test_streamed_conversation_persists_activity_with_answer(
+    client: TestClient,
+    monkeypatch,
+) -> None:
+    from frontier.api import conversations
+
+    monkeypatch.setattr(conversations.settings, "enable_codex_runs", True)
+
+    def fake_stream(*_args, **_kwargs):
+        yield {"type": "thread", "thread_id": "thread-with-activity"}
+        yield {
+            "type": "activity",
+            "activity_id": "tool-1",
+            "kind": "tool",
+            "label": "正在读取论文",
+            "status": "running",
+        }
+        yield {
+            "type": "activity",
+            "activity_id": "tool-1",
+            "kind": "tool",
+            "label": "已读取论文",
+            "status": "completed",
+        }
+        yield {"type": "delta", "delta": "**结论** 正文"}
+
+    monkeypatch.setattr(conversations, "stream_codex_prompt", fake_stream)
+    conversation = client.post(
+        "/api/conversations", json={"kind": "global", "title": "Activity persistence"}
+    ).json()
+    response = client.post(
+        f"/api/conversations/{conversation['id']}/messages/stream",
+        json={"content": "请分析"},
+    )
+    assert response.status_code == 200, response.text
+    detail = client.get(f"/api/conversations/{conversation['id']}").json()
+    assistant = detail["messages"][-1]
+    assert assistant["content"] == "**结论** 正文"
+    activities = assistant["context_json"]["activities"]
+    assert next(item for item in activities if item["id"] == "tool-1") == {
+        "id": "tool-1",
+        "kind": "tool",
+        "label": "已读取论文",
+        "status": "completed",
+    }
 
 
 def test_metadata_generation_can_be_requested_without_adding_a_brief_item(

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import mimetypes
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Annotated
@@ -49,6 +50,11 @@ from ..schemas import (
     TranslationRequest,
 )
 from ..services.common import log_operation, model_dict, normalize_title
+from ..services.document_reader import (
+    document_asset,
+    document_status,
+    queue_document_conversion,
+)
 from ..services.ingest import (
     create_or_update_paper,
     download_paper_pdf,
@@ -92,7 +98,13 @@ def _serialize_paper(session: Session, paper: Paper, *, detail: bool = False) ->
     ).all()
     payload["tags"] = [dict(row._mapping) for row in tags]
     payload["nodes"] = [dict(row._mapping) for row in nodes]
-    payload["has_pdf"] = bool(paper.pdf_path and Path(paper.pdf_path).exists())
+    pdf_path = Path(paper.pdf_path) if paper.pdf_path else None
+    payload["has_pdf"] = bool(pdf_path and pdf_path.exists())
+    if pdf_path and pdf_path.exists():
+        pdf_stat = pdf_path.stat()
+        payload["pdf_version"] = f"{pdf_stat.st_mtime_ns:x}-{pdf_stat.st_size:x}"
+    else:
+        payload["pdf_version"] = None
     metadata = paper.metadata_json or {}
     analysis = current_analysis_state(paper)
     payload["analysis_status"] = analysis.get("status")
@@ -514,7 +526,12 @@ def get_pdf(paper_id: str, session: Annotated[Session, Depends(get_session)]) ->
         path = download_paper_pdf(session, paper)
     except Exception as exc:
         raise HTTPException(status_code=404, detail=f"PDF unavailable: {exc}") from exc
-    return FileResponse(path, media_type="application/pdf", filename=f"{paper.id}.pdf")
+    return FileResponse(
+        path,
+        media_type="application/pdf",
+        filename=f"{paper.id}.pdf",
+        headers={"Cache-Control": "private, max-age=31536000, immutable"},
+    )
 
 
 @router.get("/{paper_id}/text")
@@ -528,6 +545,50 @@ def get_pdf_text(
         return extract_pdf_text(session, paper, force=force)
     except Exception as exc:
         raise HTTPException(status_code=400, detail=f"PDF extraction failed: {exc}") from exc
+
+
+@router.get("/{paper_id}/document")
+def get_document_reader(
+    paper_id: str,
+    session: Annotated[Session, Depends(get_session)],
+) -> dict:
+    paper = _paper_or_404(session, paper_id)
+    try:
+        status = document_status(session, paper)
+        if status.get("status") in {"missing", "processing"}:
+            queue_document_conversion(paper_id)
+            return {**status, "status": "processing"}
+        return status
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"Document conversion failed: {exc}") from exc
+
+
+@router.post("/{paper_id}/document/rebuild")
+def rebuild_document_reader(
+    paper_id: str,
+    session: Annotated[Session, Depends(get_session)],
+) -> dict:
+    _paper_or_404(session, paper_id)
+    queued = queue_document_conversion(paper_id, force=True)
+    return {"paper_id": paper_id, "status": "processing", "queued": queued}
+
+
+@router.get("/{paper_id}/document/assets/{filename}")
+def get_document_asset(
+    paper_id: str,
+    filename: str,
+    session: Annotated[Session, Depends(get_session)],
+) -> FileResponse:
+    _paper_or_404(session, paper_id)
+    try:
+        path = document_asset(paper_id, filename)
+    except (ValueError, FileNotFoundError) as exc:
+        raise HTTPException(status_code=404, detail="Document asset not found") from exc
+    return FileResponse(
+        path,
+        media_type=mimetypes.guess_type(path.name)[0] or "application/octet-stream",
+        headers={"Cache-Control": "private, max-age=31536000, immutable"},
+    )
 
 
 @router.post("/{paper_id}/render-page")

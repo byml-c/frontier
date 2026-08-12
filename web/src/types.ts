@@ -42,6 +42,7 @@ export type Paper = {
   tags: Tag[];
   nodes: NodeRef[];
   has_pdf?: boolean;
+  pdf_version?: string | null;
 };
 
 export type BriefItem = {
@@ -97,9 +98,46 @@ export type Annotation = {
   page_number: number;
   selected_text?: string | null;
   content?: string | null;
-  position_json: { rects?: number[][] };
+  position_json: { rects?: number[][]; block_id?: string; start_offset?: number; end_offset?: number };
   color?: string | null;
   created_at: string;
+};
+
+export type DocumentBlock = {
+  id: string;
+  anchor?: string | null;
+  kind: string;
+  page_number: number;
+  bbox?: { left: number; top: number; right: number; bottom: number } | null;
+  level: number;
+  text?: string;
+  caption?: string;
+  html?: string;
+  image_url?: string;
+};
+
+export type PaperDocument = {
+  paper_id: string;
+  version?: string;
+  status: "missing" | "processing" | "ready" | "failed";
+  schema_version?: number;
+  title?: string;
+  reader_source?: "arxiv_html" | "docling";
+  source_url?: string;
+  blocks?: DocumentBlock[];
+  error?: string;
+  phase?: "queued" | "preparing" | "source" | "parsing" | "structuring" | "assets" | "finalizing";
+  phase_label?: string;
+  progress?: number;
+  stage?: number;
+  stage_count?: number;
+  page_count?: number;
+  processed_items?: number;
+  total_items?: number;
+  started_at?: string;
+  estimated_seconds_low?: number;
+  estimated_seconds_high?: number;
+  updated_at?: string;
 };
 
 export type Message = {

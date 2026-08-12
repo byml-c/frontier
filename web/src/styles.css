@@ -37,6 +37,15 @@ body { overflow-x: hidden; }
   color: transparent !important;
   background: rgba(25, 118, 210, .28) !important;
 }
+.pdf-search-mark {
+  color: inherit;
+  position: relative;
+  z-index: 0;
+  background: rgba(255, 193, 7, .24);
+  border-radius: 1px;
+  box-shadow: inset 0 -1px 0 rgba(174, 112, 0, .42);
+  mix-blend-mode: multiply;
+}
 .annotation-overlay {
   position: absolute;
   inset: 0;
@@ -50,6 +59,18 @@ body { overflow-x: hidden; }
 .annotation-mark--highlight {
   opacity: .42;
   mix-blend-mode: multiply;
+}
+.annotation-mark--active {
+  opacity: .32;
+  background: #1976d2;
+  mix-blend-mode: multiply;
+}
+
+.mobile-reader-selection,
+.mobile-reader-selection * {
+  -webkit-touch-callout: none !important;
+  -webkit-user-select: none !important;
+  user-select: none !important;
 }
 
 canvas { touch-action: none; }
