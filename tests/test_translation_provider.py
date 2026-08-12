@@ -50,6 +50,14 @@ def test_translation_request_disables_thinking_for_low_latency(monkeypatch) -> N
     )
     monkeypatch.setattr(translation_provider, "load_translation_provider_config", lambda: config)
     monkeypatch.setattr(translation_provider, "_client_for", lambda _config: Client())
-    assert "".join(translation_provider.stream_translation_prompt("translate")) == "译文"
+    assert (
+        "".join(
+            translation_provider.stream_translation_prompt(
+                "translate", max_tokens=8, timeout_seconds=3
+            )
+        )
+        == "译文"
+    )
     assert captured["enable_thinking"] is False
     assert captured["stream"] is True
+    assert captured["max_tokens"] == 8

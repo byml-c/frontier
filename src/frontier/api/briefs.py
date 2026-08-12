@@ -80,9 +80,15 @@ def _serialize_brief(session: Session, brief: Brief, *, detail: bool = True) -> 
         {
             **model_dict(item),
             "paper": (
-                _paper_snapshot(session, paper)
-                if item.tier == "manual"
-                else item.snapshot_json or _paper_snapshot(session, paper)
+                {
+                    **(
+                        _paper_snapshot(session, paper)
+                        if item.tier == "manual"
+                        else item.snapshot_json or _paper_snapshot(session, paper)
+                    ),
+                    # 阅读结论属于论文的后续状态，不应被冻结在发布时的简报快照中。
+                    "completion_summary": paper.completion_summary,
+                }
             ),
             "current_status": paper.status,
             "is_interested": paper.is_interested,

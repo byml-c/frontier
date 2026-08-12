@@ -13,6 +13,16 @@ class CodexStreamError(RuntimeError):
     pass
 
 
+def is_missing_codex_thread_error(error: BaseException | str) -> bool:
+    """Return whether Codex can no longer resume a persisted thread locally."""
+    detail = str(error).lower()
+    return (
+        "no rollout found for thread id" in detail
+        or "rollout not found" in detail
+        or "thread not found" in detail
+    )
+
+
 def _app_server_command() -> list[str]:
     command = [settings.codex_command, "app-server"]
     if settings.codex_sandbox == "workspace-write" and settings.codex_network_access:
@@ -167,9 +177,13 @@ def _stream_turn(
     prompt: str,
     session_id: str | None = None,
     *,
+    recovery_prompt: str | None = None,
     reasoning_effort: str | None = None,
     ephemeral: bool = False,
 ) -> Iterator[dict[str, Any]]:
+    thread_request_id = 2
+    turn_request_id = 3
+    recovered = False
     if session_id:
         _write_message(
             process,
@@ -184,6 +198,28 @@ def _stream_turn(
                 },
             },
         )
+        try:
+            result = _await_response(process, thread_request_id)
+        except CodexStreamError as exc:
+            if not is_missing_codex_thread_error(exc):
+                raise
+            recovered = True
+            thread_request_id += 1
+            turn_request_id += 1
+            _write_message(
+                process,
+                {
+                    "id": thread_request_id,
+                    "method": "thread/start",
+                    "params": {
+                        "cwd": str(PROJECT_ROOT),
+                        "approvalPolicy": "never",
+                        "sandbox": settings.codex_sandbox,
+                        "ephemeral": ephemeral,
+                    },
+                },
+            )
+            result = _await_response(process, thread_request_id)
     else:
         _write_message(
             process,
@@ -198,18 +234,34 @@ def _stream_turn(
                 },
             },
         )
-    result = _await_response(process, 2)
+        result = _await_response(process, thread_request_id)
     thread_id = _thread_id(result)
     yield {"type": "thread", "thread_id": thread_id}
+    if recovered:
+        yield {
+            "type": "activity",
+            "activity_id": "conversation-recovery",
+            "kind": "status",
+            "label": "已从历史消息恢复对话",
+            "status": "completed",
+        }
 
     turn_params: dict[str, Any] = {
         "threadId": thread_id,
-        "input": [{"type": "text", "text": prompt}],
+        "input": [
+            {
+                "type": "text",
+                "text": (recovery_prompt or prompt) if recovered else prompt,
+            }
+        ],
     }
     if reasoning_effort:
         turn_params["effort"] = reasoning_effort
-    _write_message(process, {"id": 3, "method": "turn/start", "params": turn_params})
-    _await_response(process, 3)
+    _write_message(
+        process,
+        {"id": turn_request_id, "method": "turn/start", "params": turn_params},
+    )
+    _await_response(process, turn_request_id)
     streamed = ""
     completed_text = ""
     item_phases: dict[str, str | None] = {}
@@ -315,6 +367,7 @@ def stream_codex_prompt(
     prompt: str,
     session_id: str | None = None,
     *,
+    recovery_prompt: str | None = None,
     reasoning_effort: str | None = None,
     ephemeral: bool = False,
 ) -> Iterator[dict[str, Any]]:
@@ -324,6 +377,7 @@ def stream_codex_prompt(
             process,
             prompt,
             session_id,
+            recovery_prompt=recovery_prompt,
             reasoning_effort=reasoning_effort,
             ephemeral=ephemeral,
         )

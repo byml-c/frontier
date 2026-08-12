@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from datetime import date, datetime
-from typing import Annotated
+from typing import Annotated, Literal
 from zoneinfo import ZoneInfo
 
 from fastapi import APIRouter, BackgroundTasks, Depends, File, HTTPException, Query, UploadFile
@@ -19,6 +19,7 @@ from ..services.backup import create_local_git_backup
 from ..services.bootstrap import import_bibtex
 from ..services.common import log_operation, model_dict
 from ..services.ingest import create_or_update_paper, search_arxiv
+from ..services.service_checks import check_service
 from ..services.translation_provider import stream_translation_prompt
 
 router = APIRouter(prefix="/api", tags=["system"])
@@ -56,6 +57,46 @@ def _validate_setting_relationships(values: dict[str, object]) -> None:
 @router.get("/health")
 def health() -> dict:
     return {"status": "ok", "app": settings.app_name, "environment": settings.environment}
+
+
+@router.post("/service-checks/{service}")
+def run_service_check(
+    service: Literal["codex", "translation"],
+    session: Annotated[Session, Depends(get_session)],
+) -> dict:
+    result = check_service(service)
+    log = OperationLog(
+        actor="user",
+        action="service.checked",
+        entity_type="service",
+        entity_id=service,
+        detail_json=result,
+    )
+    session.add(log)
+    session.commit()
+    return {**result, "checked_at": model_dict(log)["created_at"]}
+
+
+@router.get("/service-checks")
+def list_latest_service_checks(
+    session: Annotated[Session, Depends(get_session)],
+) -> dict[str, dict | None]:
+    latest: dict[str, dict | None] = {}
+    for service in ("codex", "translation"):
+        log = session.scalar(
+            select(OperationLog)
+            .where(
+                OperationLog.action == "service.checked",
+                OperationLog.entity_type == "service",
+                OperationLog.entity_id == service,
+            )
+            .order_by(OperationLog.created_at.desc())
+            .limit(1)
+        )
+        latest[service] = (
+            {**log.detail_json, "checked_at": model_dict(log)["created_at"]} if log else None
+        )
+    return latest
 
 
 @router.get("/settings")

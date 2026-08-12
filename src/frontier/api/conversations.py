@@ -7,7 +7,13 @@ from fastapi.responses import StreamingResponse
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from ..agent_runner import _parse_citations, build_prompt, enqueue_task, run_task
+from ..agent_runner import (
+    _parse_citations,
+    build_conversation_recovery_prompt,
+    build_prompt,
+    enqueue_task,
+    run_task,
+)
 from ..config import settings
 from ..database import SessionLocal, get_session
 from ..interactive_stream import encode_stream_event, stream_codex_prompt
@@ -147,6 +153,13 @@ def stream_message(
     session.commit()
     session_id = conversation.codex_session_id
     paper_id = conversation.reference_id if conversation.kind == "paper" else None
+    prompt = build_prompt(task)
+    recovery_prompt = build_conversation_recovery_prompt(
+        session,
+        conversation.id,
+        prompt,
+        exclude_message_id=message.id,
+    )
 
     def generate():  # type: ignore[no-untyped-def]
         yield encode_stream_event("meta", task_id=task.id, message=model_dict(message))
@@ -168,9 +181,21 @@ def stream_message(
                     running.status = "running"
                     running.started_at = utcnow()
                     runner_session.commit()
-            for event in stream_codex_prompt(build_prompt(task), session_id=session_id):
+            for event in stream_codex_prompt(
+                prompt,
+                session_id=session_id,
+                recovery_prompt=recovery_prompt,
+            ):
                 if event["type"] == "thread":
                     thread_id = event["thread_id"]
+                    with SessionLocal() as runner_session:
+                        current_conversation = runner_session.get(Conversation, conversation_id)
+                        running = runner_session.get(TaskRun, task.id)
+                        if current_conversation:
+                            current_conversation.codex_session_id = thread_id
+                        if running:
+                            running.codex_session_id = thread_id
+                        runner_session.commit()
                     yield encode_stream_event(
                         "activity",
                         activity_id="agent-startup",

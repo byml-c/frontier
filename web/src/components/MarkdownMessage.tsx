@@ -7,6 +7,15 @@ import "katex/dist/katex.min.css";
 
 function prepareMarkdown(content: string): string {
   return content
+    // Model output occasionally leaves whitespace inside strong delimiters
+    // (`** important**`). Move that whitespace outside so CommonMark can parse
+    // the emphasis without joining adjacent Latin words.
+    .replace(/\*\*([^*\n]+?)\*\*/g, (match, body: string) => {
+      const leading = body.match(/^[\t ]+/)?.[0] ?? "";
+      const trailing = body.match(/[\t ]+$/)?.[0] ?? "";
+      const normalized = body.trim();
+      return normalized ? `${leading}**${normalized}**${trailing}` : match;
+    })
     // CommonMark treats a closing emphasis marker followed directly by a CJK/Latin
     // character as ambiguous. Add a visual-neutral word boundary so streamed model
     // output such as `**重点。**下一句` is parsed as strong text.

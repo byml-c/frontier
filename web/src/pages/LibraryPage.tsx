@@ -1,15 +1,13 @@
 import AddRounded from "@mui/icons-material/AddRounded";
-import ArrowForwardRounded from "@mui/icons-material/ArrowForwardRounded";
 import CloudUploadRounded from "@mui/icons-material/CloudUploadRounded";
-import EditNoteRounded from "@mui/icons-material/EditNoteRounded";
 import HubRounded from "@mui/icons-material/HubRounded";
+import MenuBookRounded from "@mui/icons-material/MenuBookRounded";
 import SearchRounded from "@mui/icons-material/SearchRounded";
 import {
   Alert,
   Box,
   Button,
   Card,
-  CardActionArea,
   CardContent,
   Chip,
   Container,
@@ -33,6 +31,7 @@ import { Modal } from "../components/Modal";
 import { PageHeader } from "../components/PageHeader";
 import { PaperMetadataDialog } from "../components/PaperMetadataDialog";
 import { Empty, ErrorState, Loading } from "../components/States";
+import { ExpandablePaperText } from "../components/ExpandablePaperText";
 import type { Paper, Tag } from "../types";
 
 type LibraryTab = "papers" | "collection";
@@ -81,20 +80,9 @@ export function LibraryPage() {
       <PageHeader
         title="论文"
         description="浏览全部论文，并将完成精读的成果沉淀到积累库。"
+        tabs={<Tabs value={tab} onChange={(_, value: LibraryTab) => changeTab(value)} aria-label="论文库分类" sx={{ minHeight: 40, "& .MuiTab-root": { minHeight: 40, py: 0 } }}><Tab value="papers" label="论文库" /><Tab value="collection" label="积累库" /></Tabs>}
         actions={<Button variant="contained" startIcon={<AddRounded />} onClick={() => setIngestOpen(true)}>添加论文</Button>}
       />
-
-      <Card sx={{ mb: 2.5 }}>
-        <Tabs
-          value={tab}
-          onChange={(_, value: LibraryTab) => changeTab(value)}
-          variant="fullWidth"
-          aria-label="论文库分类"
-        >
-          <Tab value="papers" label="论文库" />
-          <Tab value="collection" label="积累库" />
-        </Tabs>
-      </Card>
 
       <Card sx={{ mb: 3 }}>
         <CardContent>
@@ -216,7 +204,7 @@ function PaperCard({
               </MuiLink>
             </Box>
           ))}
-          <Button size="small" color="inherit" startIcon={<EditNoteRounded />} onClick={onMetadata} sx={{ ml: "auto!important" }}>论文信息</Button>
+          <Button size="small" variant="outlined" color={paper.status === "feedback_pending" ? "warning" : "primary"} startIcon={<MenuBookRounded />} onClick={onOpen} sx={{ ml: "auto!important" }}>{paper.status === "feedback_pending" ? "确认结论" : "阅读"}</Button>
         </Stack>
         {accumulated && (
           <Stack
@@ -250,22 +238,29 @@ function PaperCard({
           </Stack>
         )}
       </CardContent>
-      <CardActionArea onClick={onOpen}>
-        <CardContent sx={{ pt: 1.25 }}>
-          <Stack direction={{ xs: "column", sm: "row" }} spacing={2} alignItems={{ sm: "center" }}>
-            <Box sx={{ flex: 1, minWidth: 0 }}>
-              <Typography variant="h3">{paper.title}</Typography>
-              <Typography variant="body2" color="text.secondary" sx={{ mt: 0.75 }}>
-                {paper.first_author || "作者信息待确认"} · {paper.source}
-              </Typography>
-              <Typography variant="body2" sx={{ mt: 1 }} color="text.secondary">
-                {paper.completion_summary || paper.summary || paper.abstract || "摘要与分析信息待补充。"}
-              </Typography>
-            </Box>
-            <ArrowForwardRounded color="action" />
-          </Stack>
-        </CardContent>
-      </CardActionArea>
+      <CardContent
+        role="button"
+        tabIndex={0}
+        aria-label={`编辑 ${paper.title} 的论文信息`}
+        onClick={onMetadata}
+        onKeyDown={(event) => {
+          if (event.key === "Enter" || event.key === " ") {
+            event.preventDefault();
+            onMetadata();
+          }
+        }}
+        sx={{ pt: 1.25, cursor: "pointer", borderRadius: 1, "&:focus-visible": { outline: "2px solid", outlineColor: "primary.main", outlineOffset: 2 } }}
+      >
+        <Typography variant="h3">{paper.title}</Typography>
+        <Typography variant="body2" color="text.secondary" sx={{ mt: 0.5 }}>
+          {paper.first_author || "作者信息待确认"}{paper.primary_affiliation ? ` · ${paper.primary_affiliation}` : ""} · {paper.source}
+        </Typography>
+        <Box sx={{ mt: 1 }}>
+          <ExpandablePaperText lines={3}>
+            {paper.summary || paper.abstract || "摘要与分析信息待补充。"}
+          </ExpandablePaperText>
+        </Box>
+      </CardContent>
     </Card>
   );
 }

@@ -9,6 +9,7 @@ from typing import Any
 from zoneinfo import ZoneInfo
 
 from sqlalchemy import select
+from sqlalchemy.orm import Session
 
 from .config import PROJECT_ROOT, settings
 from .database import SessionLocal
@@ -50,6 +51,53 @@ def _parse_citations(content: str, paper_id: str | None = None) -> list[dict[str
             }
         )
     return citations
+
+
+def build_conversation_recovery_prompt(
+    session: Session,
+    conversation_id: str,
+    current_prompt: str,
+    *,
+    exclude_message_id: str | None = None,
+    max_chars: int = 24_000,
+) -> str:
+    """Rehydrate a new Codex thread from application-owned conversation history."""
+    statement = (
+        select(Message)
+        .where(Message.conversation_id == conversation_id)
+        .order_by(Message.created_at.desc())
+        .limit(40)
+    )
+    messages = list(reversed(session.scalars(statement).all()))
+    history: list[str] = []
+    used = 0
+    for item in reversed(messages):
+        if item.id == exclude_message_id:
+            continue
+        role = "用户" if item.role == "user" else "Agent"
+        context = ""
+        if item.role == "user" and item.context_json:
+            context = f"\n页面上下文：{json.dumps(item.context_json, ensure_ascii=False)}"
+        block = f"{role}：{item.content}{context}"
+        if used + len(block) > max_chars:
+            remaining = max_chars - used
+            if remaining > 200:
+                history.append(block[-remaining:])
+            break
+        history.append(block)
+        used += len(block)
+    history.reverse()
+    transcript = "\n\n".join(history) or "（没有更早的对话消息）"
+    return f"""The previous Codex thread is unavailable after a service or environment change.
+Continue the same user conversation using the application-persisted history below. Treat it as
+conversation context and do not mention the recovery unless the user asks about it.
+
+Persisted conversation history:
+{transcript}
+
+Current request:
+{current_prompt}
+"""
 
 
 def build_prompt(task: TaskRun) -> str:

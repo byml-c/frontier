@@ -125,7 +125,12 @@ def close_translation_provider() -> None:
 register(close_translation_provider)
 
 
-def stream_translation_prompt(prompt: str) -> Iterator[str]:
+def stream_translation_prompt(
+    prompt: str,
+    *,
+    max_tokens: int = 256,
+    timeout_seconds: float | None = None,
+) -> Iterator[str]:
     config = load_translation_provider_config()
     client = _client_for(config)
     payload = {
@@ -139,7 +144,7 @@ def stream_translation_prompt(prompt: str) -> Iterator[str]:
         ],
         "stream": True,
         "temperature": 0.1,
-        "max_tokens": 256,
+        "max_tokens": max_tokens,
     }
     if "qwen" in config.model.lower() or "dashscope.aliyuncs.com" in config.base_url.lower():
         # Qwen hybrid models otherwise spend time generating hidden reasoning for
@@ -153,11 +158,15 @@ def stream_translation_prompt(prompt: str) -> Iterator[str]:
     }
     emitted = False
     try:
+        request_options = {}
+        if timeout_seconds is not None:
+            request_options["timeout"] = httpx.Timeout(timeout_seconds)
         with client.stream(
             "POST",
             config.chat_completions_url,
             headers=headers,
             json=payload,
+            **request_options,
         ) as response:
             if response.status_code >= 400:
                 body = response.read().decode("utf-8", errors="replace")

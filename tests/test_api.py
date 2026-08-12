@@ -262,6 +262,7 @@ def test_graph_and_brief_snapshot(client: TestClient) -> None:
     published = client.post(f"/api/briefs/{brief['id']}/publish")
     assert published.status_code == 200
     assert published.json()["items"][0]["paper"]["title"] == paper["title"]
+    assert published.json()["items"][0]["paper"]["completion_summary"] == "Reading complete."
     assert (
         client.post(
             f"/api/briefs/{brief['id']}/items",

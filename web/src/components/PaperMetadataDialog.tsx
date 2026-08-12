@@ -3,6 +3,8 @@ import {
   Alert,
   Box,
   Button,
+  Card,
+  CardContent,
   Chip,
   CircularProgress,
   Divider,
@@ -17,6 +19,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useEffect, useState } from "react";
 import { api } from "../api";
 import type { Paper, Tag } from "../types";
+import { MarkdownMessage } from "./MarkdownMessage";
 import { Modal } from "./Modal";
 import { PaperTagSelector } from "./PaperTagSelector";
 import { ErrorState, Loading } from "./States";
@@ -72,7 +75,7 @@ const emptyForm: MetadataForm = {
 function paperToForm(paper: Paper): MetadataForm {
   return {
     title: paper.title || "",
-    authors: (paper.authors ?? []).map((author) => author.name).filter(Boolean).join("\n"),
+    authors: (paper.authors ?? []).map((author) => author.name).filter(Boolean).join(", "),
     first_author: paper.first_author || "",
     corresponding_author: paper.corresponding_author || "",
     primary_affiliation: paper.primary_affiliation || "",
@@ -99,13 +102,15 @@ export function PaperMetadataDialog({
   paperId,
   open,
   onClose,
+  onJump,
 }: {
   paperId: string;
   open: boolean;
   onClose: () => void;
+  onJump?: (page: number) => void;
 }) {
   const queryClient = useQueryClient();
-  const [tab, setTab] = useState("bibliography");
+  const [tab, setTab] = useState("summary");
   const [form, setForm] = useState<MetadataForm>(emptyForm);
   const [selectedTags, setSelectedTags] = useState<string[]>([]);
   const [newTags, setNewTags] = useState<string[]>([]);
@@ -136,6 +141,10 @@ export function PaperMetadataDialog({
     setDirty(false);
   }, [open, paper.data, dirty]);
 
+  useEffect(() => {
+    if (open) setTab("summary");
+  }, [open, paperId]);
+
   const save = useMutation({
     mutationFn: async () => {
       let metadata: Record<string, unknown>;
@@ -148,7 +157,7 @@ export function PaperMetadataDialog({
         method: "PATCH",
         body: JSON.stringify({
           title: form.title.trim(),
-          authors: form.authors.split("\n").map((name) => name.trim()).filter(Boolean).map((name) => ({ name })),
+          authors: form.authors.split(/[,，\n]+/).map((name) => name.trim()).filter(Boolean).map((name) => ({ name })),
           first_author: form.first_author.trim() || null,
           corresponding_author: form.corresponding_author.trim() || null,
           primary_affiliation: form.primary_affiliation.trim() || null,
@@ -220,87 +229,126 @@ export function PaperMetadataDialog({
   }
 
   return (
-    <Modal open={open} onClose={onClose} title="论文信息" wide>
+    <Modal open={open} onClose={onClose} title="论文信息" wide fixedHeight>
       {paper.isLoading ? <Loading label="正在读取论文信息" /> : paper.error ? <ErrorState error={paper.error} /> : (
-        <Stack spacing={2.5}>
-          <Tabs value={tab} onChange={(_, value) => setTab(value)} variant="scrollable" allowScrollButtonsMobile>
-            <Tab value="bibliography" label="文献信息" />
-            <Tab value="analysis" label="分析与标签" />
-            <Tab value="extended" label="扩展信息" />
+        <Stack sx={{ width: "100%", height: "100%", minHeight: 0 }}>
+          <Tabs value={tab} onChange={(_, value) => setTab(value)} sx={{ flexShrink: 0 }}>
+            <Tab value="summary" label="Agent 总结" />
+            {paper.data?.completion_summary && <Tab value="reading" label="精读结论" />}
+            <Tab value="metadata" label="文献信息" />
           </Tabs>
 
-          {tab === "bibliography" && (
-            <Grid container spacing={2}>
-              <Grid size={12}>{field("title", "标题")}</Grid>
-              <Grid size={{ xs: 12, md: 6 }}>{field("authors", "全部作者（每行一位）", { multiline: true, minRows: 5 })}</Grid>
-              <Grid size={{ xs: 12, md: 6 }}><Stack spacing={2}>{field("first_author", "第一作者")}{field("corresponding_author", "通讯作者")}{field("primary_affiliation", "第一单位")}</Stack></Grid>
-              <Grid size={{ xs: 12, md: 4 }}>{field("source", "来源")}</Grid>
-              <Grid size={{ xs: 12, md: 4 }}>{field("published_at", "发表日期", { type: "date" })}</Grid>
-              <Grid size={{ xs: 12, md: 4 }}>{field("doi", "DOI")}</Grid>
-              <Grid size={12}>{field("source_url", "原文链接")}</Grid>
-              <Grid size={12}>{field("pdf_url", "PDF 链接")}</Grid>
-              <Grid size={12}>{field("abstract", "摘要", { multiline: true, minRows: 6 })}</Grid>
-            </Grid>
-          )}
+          <Box sx={{ flex: 1, minHeight: 0, overflowY: "auto", py: 2, pr: 0.5 }}>
+            {tab === "summary" && (
+              <Stack spacing={2}>
+                <Stack direction={{ xs: "column", sm: "row" }} alignItems={{ sm: "center" }} justifyContent="space-between" gap={1}>
+                  <Box>
+                    <Typography variant="h3">Agent 总结</Typography>
+                    <Typography variant="body2" color="text.secondary">查看并修订论文的核心判断。</Typography>
+                  </Box>
+                  <Button
+                    variant="outlined"
+                    startIcon={generate.isPending ? <CircularProgress size={16} /> : <AutoAwesomeRounded />}
+                    disabled={generate.isPending || dirty || ["queued", "processing"].includes(paper.data?.analysis_status ?? "")}
+                    onClick={() => generate.mutate()}
+                  >
+                    {["queued", "processing"].includes(paper.data?.analysis_status ?? "") ? "Agent 处理中" : "让 Agent 生成"}
+                  </Button>
+                </Stack>
+                {dirty && <Alert severity="warning">请先保存当前修改，再调用 Agent，避免覆盖尚未保存的内容。</Alert>}
+                {paper.data?.analysis_status && ["queued", "processing"].includes(paper.data.analysis_status) && (
+                  <Alert severity="info" icon={<CircularProgress size={18} />}>Agent 正在读取全文并补充分析，当前内容仍可编辑。</Alert>
+                )}
+                {paper.data?.analysis_status === "failed" && <Alert severity="error">{paper.data.analysis_error || "全文分析失败"}</Alert>}
+                {generate.error && <Alert severity="error">{generate.error.message}</Alert>}
 
-          {tab === "analysis" && (
-            <Stack spacing={2}>
-              <Stack direction={{ xs: "column", sm: "row" }} alignItems={{ sm: "center" }} justifyContent="space-between" gap={1}>
-                <Box>
-                  <Typography variant="h3">Agent 分析</Typography>
-                  <Typography variant="body2" color="text.secondary">重新读取论文全文并生成简介、评价、问题、创新、实验、局限和推荐标签。</Typography>
-                </Box>
-                <Button
-                  variant="outlined"
-                  startIcon={generate.isPending ? <CircularProgress size={16} /> : <AutoAwesomeRounded />}
-                  disabled={generate.isPending || dirty || ["queued", "processing"].includes(paper.data?.analysis_status ?? "")}
-                  onClick={() => generate.mutate()}
-                >
-                  {["queued", "processing"].includes(paper.data?.analysis_status ?? "") ? "Agent 处理中" : "让 Agent 生成"}
-                </Button>
+                <Card variant="outlined">
+                  <CardContent>
+                    <Stack spacing={2}>
+                      <Typography variant="h3">核心判断</Typography>
+                      {field("summary", "一句话简介", { multiline: true, minRows: 2 })}
+                      {field("agent_comment", "Agent 评语", { multiline: true, minRows: 2 })}
+                      {field("recommendation_reason", "推荐理由", { multiline: true, minRows: 3 })}
+                      <Grid container spacing={2}>
+                        <Grid size={{ xs: 12, sm: 6 }}>{field("research_score", "研究价值（0–1）", { type: "number" })}</Grid>
+                        <Grid size={{ xs: 12, sm: 6 }}>{field("relevance_score", "个人相关性（0–1）", { type: "number" })}</Grid>
+                      </Grid>
+                    </Stack>
+                  </CardContent>
+                </Card>
+
+                <Card variant="outlined">
+                  <CardContent>
+                    <Stack spacing={2}>
+                      <Typography variant="h3">研究内容</Typography>
+                      {field("problem", "解决的问题", { multiline: true, minRows: 3 })}
+                      {field("innovation", "创新内容", { multiline: true, minRows: 3 })}
+                      {field("experiment", "实验结果", { multiline: true, minRows: 3 })}
+                      {field("limitations", "局限与遗留问题", { multiline: true, minRows: 3 })}
+                    </Stack>
+                  </CardContent>
+                </Card>
+
+                <Card variant="outlined">
+                  <CardContent>
+                    <Typography variant="h3">标签</Typography>
+                    {suggestedTags.length > 0 && <Stack direction="row" flexWrap="wrap" gap={1} sx={{ mt: 1 }}><Typography variant="body2" color="text.secondary" sx={{ alignSelf: "center" }}>Agent 建议</Typography>{suggestedTags.map((name) => <Chip clickable color="primary" variant="outlined" label={name} key={name} onClick={() => acceptSuggestedTag(name)} />)}</Stack>}
+                    <PaperTagSelector
+                      tags={tags.data ?? []}
+                      selectedIds={selectedTags}
+                      newTags={newTags}
+                      onSelectedIdsChange={setSelectedTags}
+                      onNewTagsChange={setNewTags}
+                      onEdit={() => setDirty(true)}
+                    />
+                  </CardContent>
+                </Card>
               </Stack>
-              {dirty && <Alert severity="warning">请先保存当前修改，再调用 Agent，避免新生成的内容覆盖尚未保存的编辑。</Alert>}
-              {paper.data?.analysis_status && ["queued", "processing"].includes(paper.data.analysis_status) && (
-                <Alert severity="info" icon={<CircularProgress size={18} />}>Agent 正在读取全文并补充分析，当前内容仍可编辑。</Alert>
-              )}
-              {paper.data?.analysis_status === "failed" && <Alert severity="error">{paper.data.analysis_error || "全文分析失败"}</Alert>}
-              {generate.error && <Alert severity="error">{generate.error.message}</Alert>}
-              {field("summary", "一句话简介", { multiline: true, minRows: 2 })}
-              {field("agent_comment", "Agent 一句话评语", { multiline: true, minRows: 2 })}
-              {field("recommendation_reason", "推荐理由", { multiline: true, minRows: 3 })}
-              <Grid container spacing={2}>
-                <Grid size={{ xs: 12, md: 6 }}>{field("research_score", "研究价值（0–1）", { type: "number" })}</Grid>
-                <Grid size={{ xs: 12, md: 6 }}>{field("relevance_score", "个人相关性（0–1）", { type: "number" })}</Grid>
-              </Grid>
-              {field("problem", "解决的问题", { multiline: true, minRows: 3 })}
-              {field("innovation", "创新内容", { multiline: true, minRows: 3 })}
-              {field("experiment", "实验结果", { multiline: true, minRows: 3 })}
-              {field("limitations", "局限与遗留问题", { multiline: true, minRows: 3 })}
-              <Divider />
-              <Box>
-                <Typography variant="h3">标签</Typography>
-                {suggestedTags.length > 0 && <Stack direction="row" flexWrap="wrap" gap={1} sx={{ mt: 1 }}><Typography variant="body2" color="text.secondary" sx={{ alignSelf: "center" }}>Agent 建议</Typography>{suggestedTags.map((name) => <Chip clickable color="primary" variant="outlined" label={name} key={name} onClick={() => acceptSuggestedTag(name)} />)}</Stack>}
-                <PaperTagSelector
-                  tags={tags.data ?? []}
-                  selectedIds={selectedTags}
-                  newTags={newTags}
-                  onSelectedIdsChange={setSelectedTags}
-                  onNewTagsChange={setNewTags}
-                  onEdit={() => setDirty(true)}
-                />
-              </Box>
-            </Stack>
-          )}
+            )}
 
-          {tab === "extended" && (
-            <Box>
-              <Typography variant="body2" color="text.secondary" sx={{ mb: 1.5 }}>用于保留论文来源提供的其他结构化字段。</Typography>
-              {field("metadata_json", "扩展信息（JSON）", { multiline: true, minRows: 18 })}
-            </Box>
-          )}
+            {tab === "metadata" && (
+              <Card variant="outlined">
+                <CardContent>
+                  <Stack spacing={2}>
+                    <Typography variant="h3">论文标识</Typography>
+                    {field("title", "标题")}
+                    <Grid container spacing={2}>
+                      <Grid size={{ xs: 12, sm: 4 }}>{field("first_author", "第一作者")}</Grid>
+                      <Grid size={{ xs: 12, sm: 4 }}>{field("corresponding_author", "通讯作者")}</Grid>
+                      <Grid size={{ xs: 12, sm: 4 }}>{field("primary_affiliation", "第一单位")}</Grid>
+                      <Grid size={12}>{field("authors", "全部作者（用逗号分隔）", { multiline: true, minRows: 3 })}</Grid>
+                    </Grid>
+                    <Divider />
+                    <Typography variant="h3">出版信息</Typography>
+                    <Grid container spacing={2}>
+                      <Grid size={{ xs: 12, md: 4 }}>{field("source", "来源")}</Grid>
+                      <Grid size={{ xs: 12, md: 4 }}>{field("published_at", "发表日期", { type: "date" })}</Grid>
+                      <Grid size={{ xs: 12, md: 4 }}>{field("doi", "DOI")}</Grid>
+                    </Grid>
+                    {field("source_url", "原文链接")}
+                    {field("pdf_url", "PDF 链接")}
+                    <Divider />
+                    <Typography variant="h3">摘要</Typography>
+                    {field("abstract", "原文摘要", { multiline: true, minRows: 7 })}
+                    <Divider />
+                    <Typography variant="h3">扩展信息</Typography>
+                    {field("metadata_json", "JSON", { multiline: true, minRows: 10 })}
+                  </Stack>
+                </CardContent>
+              </Card>
+            )}
 
-          {(formError || save.error) && <Alert severity="error">{formError || save.error?.message}</Alert>}
-          <Stack direction="row" justifyContent="flex-end" spacing={1}>
+            {tab === "reading" && paper.data?.completion_summary && (
+              <Card variant="outlined">
+                <CardContent>
+                  <MarkdownMessage content={paper.data.completion_summary} onJump={onJump} />
+                </CardContent>
+              </Card>
+            )}
+          </Box>
+
+          {(formError || save.error) && <Alert severity="error" sx={{ mt: 1, flexShrink: 0 }}>{formError || save.error?.message}</Alert>}
+          <Stack direction="row" justifyContent="flex-end" spacing={1} sx={{ flexShrink: 0, pt: 2, borderTop: 1, borderColor: "divider" }}>
             <Button onClick={onClose}>取消</Button>
             <Button variant="contained" disabled={save.isPending || !form.title.trim()} onClick={() => { setFormError(""); save.mutate(); }}>{save.isPending ? "正在保存…" : "保存"}</Button>
           </Stack>
