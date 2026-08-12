@@ -145,7 +145,7 @@ export type Message = {
   id: string;
   role: "user" | "assistant";
   content: string;
-  citations_json: Array<{ paper_id?: string; page_number: number; label: string; marker: string }>;
+  citations_json: Array<{ paper_id?: string; page_number: number; end_page_number?: number; label: string; marker: string }>;
   context_json: Record<string, unknown>;
   created_at: string;
 };

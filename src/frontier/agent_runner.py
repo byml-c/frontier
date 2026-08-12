@@ -40,16 +40,22 @@ def _find_session_id(value: Any) -> str | None:
 def _parse_citations(content: str, paper_id: str | None = None) -> list[dict[str, Any]]:
     citations = []
     for match in re.finditer(
-        r"\[\[(?:page|p)[:. ]?(\d+)(?:\|([^\]]+))?\]\]", content, re.IGNORECASE
+        r"\[\[(?:page|p)[:. ]?(\d+)(?:\s*[-–—~～]\s*(\d+))?(?:\|([^\]]+))?\]\]",
+        content,
+        re.IGNORECASE,
     ):
-        citations.append(
-            {
-                "paper_id": paper_id,
-                "page_number": int(match.group(1)),
-                "label": match.group(2) or f"第 {match.group(1)} 页",
-                "marker": match.group(0),
-            }
-        )
+        start_page = int(match.group(1))
+        end_page = int(match.group(2)) if match.group(2) else None
+        page_label = f"{start_page}–{end_page}" if end_page else str(start_page)
+        citation = {
+            "paper_id": paper_id,
+            "page_number": start_page,
+            "label": match.group(3) or f"第 {page_label} 页",
+            "marker": match.group(0),
+        }
+        if end_page is not None:
+            citation["end_page_number"] = end_page
+        citations.append(citation)
     return citations
 
 

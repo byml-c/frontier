@@ -8,10 +8,14 @@ from collections.abc import Callable
 from time import perf_counter
 from typing import Any, Literal
 
+import feedparser
+import httpx
+
 from ..config import PROJECT_ROOT, settings
+from .ingest import ARXIV_API, USER_AGENT
 from .translation_provider import load_translation_provider_config, stream_translation_prompt
 
-ServiceName = Literal["codex", "translation"]
+ServiceName = Literal["codex", "translation", "arxiv"]
 ServiceStatus = Literal["ok", "error", "disabled"]
 
 
@@ -178,9 +182,41 @@ def check_translation_service(timeout_seconds: float = 15) -> dict[str, str | bo
     return _result("translation", "ok", started_at, "翻译服务可正常调用")
 
 
+def check_arxiv_service(timeout_seconds: float = 15) -> dict[str, str | bool | int]:
+    """Exercise the same Atom endpoint used by daily paper collection."""
+    started_at = perf_counter()
+    try:
+        response = httpx.get(
+            ARXIV_API,
+            params={
+                "search_query": "id:1706.03762",
+                "start": 0,
+                "max_results": 1,
+            },
+            headers={"User-Agent": USER_AGENT},
+            timeout=timeout_seconds,
+            follow_redirects=True,
+        )
+        response.raise_for_status()
+        feed = feedparser.parse(response.content)
+        if getattr(feed, "bozo", False):
+            raise RuntimeError(f"Atom 响应无法解析：{feed.bozo_exception}")
+        if not feed.entries:
+            raise RuntimeError("arXiv API 已响应，但没有返回验证论文")
+    except Exception as exc:  # noqa: BLE001 - diagnostics normalize all network failures
+        return _result(
+            "arxiv",
+            "error",
+            started_at,
+            f"arXiv 数据接口不可用：{_public_error(exc)}",
+        )
+    return _result("arxiv", "ok", started_at, "arXiv 数据接口可正常访问")
+
+
 SERVICE_CHECKS: dict[ServiceName, Callable[[], dict[str, str | bool | int]]] = {
     "codex": check_codex_service,
     "translation": check_translation_service,
+    "arxiv": check_arxiv_service,
 }
 
 

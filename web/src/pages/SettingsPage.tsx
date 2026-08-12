@@ -1,5 +1,6 @@
 import CheckCircleOutlineRounded from "@mui/icons-material/CheckCircleOutlineRounded";
 import ErrorOutlineRounded from "@mui/icons-material/ErrorOutlineRounded";
+import PublicRounded from "@mui/icons-material/PublicRounded";
 import PsychologyRounded from "@mui/icons-material/PsychologyRounded";
 import SaveRounded from "@mui/icons-material/SaveRounded";
 import TranslateRounded from "@mui/icons-material/TranslateRounded";
@@ -39,7 +40,7 @@ const LABELS: Record<string, { label: string; help: string }> = {
   log_level: { label: "日志级别", help: "控制服务器记录的详细程度" },
 };
 
-type ServiceName = "codex" | "translation";
+type ServiceName = "codex" | "translation" | "arxiv";
 type ServiceCheck = {
   service: ServiceName;
   ok: boolean;
@@ -66,7 +67,7 @@ export function SettingsPage() {
     <Container maxWidth="md" sx={{ py: { xs: 4, md: 6 } }}>
       <PageHeader
         title="运行设置"
-        description="管理日报范围，检查 Agent 与翻译服务的运行状态。"
+        description="管理日报范围，检查 Agent、翻译与 arXiv 数据源的运行状态。"
         actions={<><MobileConfirmAction label="保存设置" icon={<SaveRounded fontSize="small" />} onConfirm={() => save.mutate()} disabled={save.isPending} /><Button variant="contained" startIcon={<SaveRounded />} onClick={() => save.mutate()} disabled={save.isPending} sx={{ display: { xs: "none", md: "inline-flex" } }}>保存设置</Button></>}
       />
       <ServiceChecks />
@@ -111,10 +112,11 @@ function ServiceChecks() {
     <Card sx={{ mb: 2.5 }}>
       <CardContent>
         <Typography variant="h3">服务检测</Typography>
-        <Typography variant="body2" color="text.secondary" sx={{ mt: 0.25, mb: 1.5 }}>发送一次最小真实请求，确认服务器配置和模型连接均可用。</Typography>
+        <Typography variant="body2" color="text.secondary" sx={{ mt: 0.25, mb: 1.5 }}>发送一次最小真实请求，确认关键外部服务可用。</Typography>
         <Stack divider={<Divider />}>
           <ServiceCheckRow service="codex" label="Codex Agent" icon={<PsychologyRounded />} previous={latest.data?.codex ?? null} />
           <ServiceCheckRow service="translation" label="翻译服务" icon={<TranslateRounded />} previous={latest.data?.translation ?? null} />
+          <ServiceCheckRow service="arxiv" label="arXiv 数据源" icon={<PublicRounded />} previous={latest.data?.arxiv ?? null} />
         </Stack>
       </CardContent>
     </Card>
@@ -125,7 +127,7 @@ function ServiceCheckRow({ service, label, icon, previous }: { service: ServiceN
   const queryClient = useQueryClient();
   const check = useMutation({
     mutationFn: () => api<ServiceCheck>(`/api/service-checks/${service}`, { method: "POST" }),
-    onSuccess: (result) => queryClient.setQueryData<LatestServiceChecks>(["service-checks"], (current) => ({ codex: current?.codex ?? null, translation: current?.translation ?? null, [service]: result })),
+    onSuccess: (result) => queryClient.setQueryData<LatestServiceChecks>(["service-checks"], (current) => ({ codex: current?.codex ?? null, translation: current?.translation ?? null, arxiv: current?.arxiv ?? null, [service]: result })),
   });
   const result = check.data ?? previous;
   return (

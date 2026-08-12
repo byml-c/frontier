@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import subprocess
 
+import httpx
 from fastapi.testclient import TestClient
 
 from frontier.api import system as system_api
@@ -40,6 +41,7 @@ def test_service_check_api_returns_structured_result(client: TestClient, monkeyp
     assert latest.status_code == 200
     assert latest.json()["codex"]["status"] == "ok"
     assert latest.json()["codex"]["checked_at"]
+    assert "arxiv" in latest.json()
     assert client.post("/api/service-checks/unknown").status_code == 422
 
 
@@ -127,3 +129,43 @@ def test_translation_check_uses_short_request_and_redacts_secret(monkeypatch) ->
     assert "Bearer ***" in result["message"]
     assert captured["max_tokens"] == 8
     assert captured["timeout_seconds"] == 15
+
+
+def test_arxiv_check_uses_collection_endpoint_and_validates_atom(monkeypatch) -> None:
+    captured: dict = {}
+
+    def get(url, **kwargs):
+        captured["url"] = url
+        captured.update(kwargs)
+        return httpx.Response(
+            200,
+            headers={"content-type": "application/atom+xml"},
+            content=b"""<?xml version="1.0" encoding="UTF-8"?>
+            <feed xmlns="http://www.w3.org/2005/Atom">
+              <title>arXiv Query</title>
+              <entry><id>http://arxiv.org/abs/1706.03762v7</id><title>Attention</title></entry>
+            </feed>""",
+            request=httpx.Request("GET", url),
+        )
+
+    monkeypatch.setattr(service_checks.httpx, "get", get)
+
+    result = service_checks.check_arxiv_service()
+
+    assert result["ok"] is True
+    assert captured["url"] == "https://export.arxiv.org/api/query"
+    assert captured["params"]["max_results"] == 1
+    assert captured["timeout"] == 15
+
+
+def test_arxiv_check_reports_invalid_response(monkeypatch) -> None:
+    def get(url, **_kwargs):
+        return httpx.Response(200, text="not an atom feed", request=httpx.Request("GET", url))
+
+    monkeypatch.setattr(service_checks.httpx, "get", get)
+
+    result = service_checks.check_arxiv_service()
+
+    assert result["ok"] is False
+    assert result["status"] == "error"
+    assert "arXiv 数据接口不可用" in result["message"]

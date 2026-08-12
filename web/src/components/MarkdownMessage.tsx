@@ -23,8 +23,11 @@ function prepareMarkdown(content: string): string {
     .replace(/\\\[((?:.|\n)*?)\\\]/g, (_match, body: string) => `$$\n${body}\n$$`)
     .replace(/\\\(((?:.|\n)*?)\\\)/g, (_match, body: string) => `$${body}$`)
     .replace(
-      /\[\[(?:page|p)[:. ]?(\d+)(?:\|([^\]]+))?\]\]/gi,
-      (_match, page: string, label?: string) => `[${label || `第 ${page} 页`}](#frontier-page-${page})`,
+      /\[\[(?:page|p)[:. ]?(\d+)(?:\s*[-–—~～]\s*(\d+))?(?:\|([^\]]+))?\]\]/gi,
+      (_match, startPage: string, endPage?: string, label?: string) => {
+        const range = endPage ? `${startPage}–${endPage}` : startPage;
+        return `[${label || `第 ${range} 页`}](#frontier-page-${startPage}${endPage ? `-${endPage}` : ""})`;
+      },
     );
 }
 
@@ -87,7 +90,7 @@ export function MarkdownMessage({
         rehypePlugins={[rehypeKatex]}
         components={{
           a: ({ href = "", children }) => {
-            const pageMatch = href.match(/^#frontier-page-(\d+)$/);
+            const pageMatch = href.match(/^#frontier-page-(\d+)(?:-(\d+))?$/);
             if (pageMatch && onJump) {
             return (
               <MuiLink

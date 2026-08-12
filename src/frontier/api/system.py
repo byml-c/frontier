@@ -61,7 +61,7 @@ def health() -> dict:
 
 @router.post("/service-checks/{service}")
 def run_service_check(
-    service: Literal["codex", "translation"],
+    service: Literal["codex", "translation", "arxiv"],
     session: Annotated[Session, Depends(get_session)],
 ) -> dict:
     result = check_service(service)
@@ -82,7 +82,7 @@ def list_latest_service_checks(
     session: Annotated[Session, Depends(get_session)],
 ) -> dict[str, dict | None]:
     latest: dict[str, dict | None] = {}
-    for service in ("codex", "translation"):
+    for service in ("codex", "translation", "arxiv"):
         log = session.scalar(
             select(OperationLog)
             .where(

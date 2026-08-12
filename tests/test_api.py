@@ -6,6 +6,7 @@ from zoneinfo import ZoneInfo
 import pymupdf
 from fastapi.testclient import TestClient
 
+from frontier.agent_runner import _parse_citations
 from frontier.api.papers import _translation_key
 from frontier.schemas import TranslationRequest
 from frontier.services.document_reader import (
@@ -30,6 +31,37 @@ def create_paper(client: TestClient, title: str = "Tactile VLA for Fine Manipula
     )
     assert response.status_code == 200, response.text
     return response.json()["paper"]
+
+
+def test_parse_citations_supports_page_ranges() -> None:
+    citations = _parse_citations(
+        "范围 [[page:1–2]]、半角 [[p:3-5]] 与自定义名称 [[page:8—9|实验部分]]。",
+        "paper-1",
+    )
+
+    assert citations == [
+        {
+            "paper_id": "paper-1",
+            "page_number": 1,
+            "end_page_number": 2,
+            "label": "第 1–2 页",
+            "marker": "[[page:1–2]]",
+        },
+        {
+            "paper_id": "paper-1",
+            "page_number": 3,
+            "end_page_number": 5,
+            "label": "第 3–5 页",
+            "marker": "[[p:3-5]]",
+        },
+        {
+            "paper_id": "paper-1",
+            "page_number": 8,
+            "end_page_number": 9,
+            "label": "实验部分",
+            "marker": "[[page:8—9|实验部分]]",
+        },
+    ]
 
 
 def test_translation_cache_key_is_stable_across_selection_geometry() -> None:
