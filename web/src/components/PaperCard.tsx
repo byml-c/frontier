@@ -28,6 +28,7 @@ import { useNavigate } from "react-router-dom";
 import { api, formatDate, jsonBody, statusLabel } from "../api";
 import type { Paper } from "../types";
 import { Modal } from "./Modal";
+import { MarkdownMessage } from "./MarkdownMessage";
 import { PaperMetadataDialog } from "./PaperMetadataDialog";
 import { ExpandablePaperText } from "./ExpandablePaperText";
 
@@ -53,9 +54,9 @@ export function PaperCard({ paper, rank, featured = false }: { paper: Paper; ran
       <Typography variant="body2" color="text.secondary" sx={{ mt: .5 }}>{paper.first_author || "作者信息待确认"}{paper.corresponding_author ? ` · 通讯作者 ${paper.corresponding_author}` : ""}{paper.primary_affiliation ? ` · ${paper.primary_affiliation}` : ""}</Typography>
       <Box sx={{ mt: 1 }}><ExpandablePaperText>{paper.summary || paper.abstract || "简介正在整理中。"}</ExpandablePaperText></Box>
       <Divider sx={{ my: 1.25 }} />
-      <Stack direction="row" spacing={1} alignItems="flex-start"><AutoAwesomeRounded color="action" sx={{ fontSize: 17, mt: .15 }} /><Box><Typography variant="caption" fontWeight={700} color="text.secondary">推荐理由</Typography><Typography variant="body2" sx={{ mt: .15, lineHeight: 1.65 }}>{paper.agent_comment || paper.recommendation_reason || "等待全文分析后给出判断。"}</Typography></Box></Stack>
+      <Stack direction="row" spacing={1} alignItems="flex-start"><AutoAwesomeRounded color="action" sx={{ fontSize: 17, mt: .15 }} /><Box sx={{ minWidth: 0 }}><Typography variant="caption" fontWeight={700} color="text.secondary">推荐理由</Typography><Box sx={{ mt: .15, fontSize: ".875rem" }}><MarkdownMessage content={paper.agent_comment || paper.recommendation_reason || "等待全文分析后给出判断。"} /></Box></Box></Stack>
       {!!paper.nodes?.length && <Stack direction="row" flexWrap="wrap" gap={.75} sx={{ mt: 1.25 }}>{paper.nodes.map((node) => <Chip size="small" key={node.id} clickable onClick={() => navigate(`/graph/${node.id}`)} label={node.name} variant="outlined" color="primary" />)}</Stack>}
-      <Accordion disableGutters elevation={0} sx={{ mt: .5, border: 0, bgcolor: "transparent", "&:before": { display: "none" } }}><AccordionSummary expandIcon={<ExpandMoreRounded />} sx={{ px: 0, minHeight: 36, "& .MuiAccordionSummary-content": { my: .5 } }}><Typography variant="body2" fontWeight={650}>问题、方法与实验</Typography></AccordionSummary><AccordionDetails sx={{ px: 0, pt: 0 }}><Stack divider={<Divider flexItem />} spacing={1.5}>{[["研究问题", paper.problem], ["主要创新", paper.innovation], ["实验结果", paper.experiment], ["局限与后续问题", paper.limitations]].map(([label, value]) => <Box key={label}><Typography variant="subtitle2">{label}</Typography><Typography variant="body2" color="text.secondary" sx={{ mt: .25, lineHeight: 1.65 }}>{value || "暂未获得足够证据。"}</Typography></Box>)}</Stack></AccordionDetails></Accordion>
+      <Accordion disableGutters elevation={0} sx={{ mt: .5, border: 0, bgcolor: "transparent", "&:before": { display: "none" } }}><AccordionSummary expandIcon={<ExpandMoreRounded />} sx={{ px: 0, minHeight: 36, "& .MuiAccordionSummary-content": { my: .5 } }}><Typography variant="body2" fontWeight={650}>问题、方法与实验</Typography></AccordionSummary><AccordionDetails sx={{ px: 0, pt: 0 }}><Stack divider={<Divider flexItem />} spacing={1.5}>{[["研究问题", paper.problem], ["主要创新", paper.innovation], ["实验结果", paper.experiment], ["局限与后续问题", paper.limitations]].map(([label, value]) => <Box key={label}><Typography variant="subtitle2">{label}</Typography><Box color="text.secondary" sx={{ mt: .25, fontSize: ".875rem" }}><MarkdownMessage content={value || "暂未获得足够证据。"} /></Box></Box>)}</Stack></AccordionDetails></Accordion>
     </CardContent>
     <Divider />
     <CardActions sx={{ px: 0, pt: 1, pb: 0, flexWrap: "wrap", gap: .5 }}>

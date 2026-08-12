@@ -1,7 +1,7 @@
 import AddRounded from "@mui/icons-material/AddRounded";
 import CloudUploadRounded from "@mui/icons-material/CloudUploadRounded";
+import EditNoteRounded from "@mui/icons-material/EditNoteRounded";
 import HubRounded from "@mui/icons-material/HubRounded";
-import MenuBookRounded from "@mui/icons-material/MenuBookRounded";
 import SearchRounded from "@mui/icons-material/SearchRounded";
 import UndoRounded from "@mui/icons-material/UndoRounded";
 import {
@@ -27,7 +27,7 @@ import {
   Typography,
 } from "@mui/material";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { FormEvent, useRef, useState } from "react";
+import { FormEvent, KeyboardEvent, MouseEvent, useRef, useState } from "react";
 import { Link as RouterLink, useNavigate, useSearchParams } from "react-router-dom";
 import { api, formatDate, statusLabel } from "../api";
 import { Modal } from "../components/Modal";
@@ -201,8 +201,15 @@ function PaperCard({
   onMetadata: () => void;
   onCancelReading: () => void;
 }) {
+  function openFromCard(event: MouseEvent<HTMLElement> | KeyboardEvent<HTMLElement>) {
+    const target = event.target as Element;
+    if (target.closest("button, a, input, textarea, select, [role=button]")) return;
+    if ("key" in event && !["Enter", " "].includes(event.key)) return;
+    if ("key" in event) event.preventDefault();
+    onOpen();
+  }
   return (
-    <Card>
+    <Card role="link" tabIndex={0} aria-label={`阅读 ${paper.title}`} onClick={openFromCard} onKeyDown={openFromCard} sx={{ cursor: "pointer", "&:focus-visible": { outline: "2px solid", outlineColor: "primary.main", outlineOffset: 2 } }}>
       <CardContent sx={{ pb: 1.25 }}>
         <Stack direction="row" alignItems="center" columnGap={1} rowGap={0.75} flexWrap="wrap">
           <Chip
@@ -230,8 +237,8 @@ function PaperCard({
               </MuiLink>
             </Box>
           ))}
-          {(["reading", "feedback_pending", "completed"] as string[]).includes(paper.status) && <><Tooltip title="取消精读状态"><IconButton size="small" color="warning" aria-label="取消精读状态" onClick={onCancelReading} sx={{ display: { xs: "inline-flex", md: "none" }, ml: "auto!important" }}><UndoRounded fontSize="small" /></IconButton></Tooltip><Button size="small" color="warning" startIcon={<UndoRounded />} onClick={onCancelReading} sx={{ display: { xs: "none", md: "inline-flex" }, ml: "auto!important" }}>取消精读</Button></>}
-          <Button size="small" variant="outlined" color={paper.status === "feedback_pending" ? "warning" : "primary"} startIcon={<MenuBookRounded />} onClick={onOpen} sx={{ ml: (["reading", "feedback_pending", "completed"] as string[]).includes(paper.status) ? undefined : "auto!important" }}>{paper.status === "feedback_pending" ? "确认结论" : "阅读"}</Button>
+          {(["reading", "feedback_pending", "completed"] as string[]).includes(paper.status) && <Tooltip title="取消精读状态"><IconButton size="small" color="warning" aria-label="取消精读状态" onClick={onCancelReading} sx={{ ml: "auto!important" }}><UndoRounded fontSize="small" /></IconButton></Tooltip>}
+          <Tooltip title="查看和编辑论文信息"><IconButton size="small" color="primary" aria-label="论文信息" onClick={onMetadata} sx={{ ml: (["reading", "feedback_pending", "completed"] as string[]).includes(paper.status) ? undefined : "auto!important" }}><EditNoteRounded fontSize="small" /></IconButton></Tooltip>
         </Stack>
         {accumulated && (
           <Stack
@@ -266,17 +273,7 @@ function PaperCard({
         )}
       </CardContent>
       <CardContent
-        role="button"
-        tabIndex={0}
-        aria-label={`编辑 ${paper.title} 的论文信息`}
-        onClick={onMetadata}
-        onKeyDown={(event) => {
-          if (event.key === "Enter" || event.key === " ") {
-            event.preventDefault();
-            onMetadata();
-          }
-        }}
-        sx={{ pt: 1.25, cursor: "pointer", borderRadius: 1, "&:focus-visible": { outline: "2px solid", outlineColor: "primary.main", outlineOffset: 2 } }}
+        sx={{ pt: 1.25, borderRadius: 1 }}
       >
         <Typography variant="h3">{paper.title}</Typography>
         <Typography variant="body2" color="text.secondary" sx={{ mt: 0.5 }}>

@@ -1,7 +1,8 @@
 import ExpandLessRounded from "@mui/icons-material/ExpandLessRounded";
 import ExpandMoreRounded from "@mui/icons-material/ExpandMoreRounded";
-import { Box, Button, Typography } from "@mui/material";
+import { Box, Button } from "@mui/material";
 import { useEffect, useRef, useState } from "react";
+import { MarkdownMessage } from "./MarkdownMessage";
 
 export function ExpandablePaperText({
   children,
@@ -12,7 +13,7 @@ export function ExpandablePaperText({
   lines?: number;
   color?: "text.primary" | "text.secondary";
 }) {
-  const textRef = useRef<HTMLParagraphElement>(null);
+  const textRef = useRef<HTMLDivElement>(null);
   const [expanded, setExpanded] = useState(false);
   const [overflowing, setOverflowing] = useState(false);
 
@@ -28,11 +29,11 @@ export function ExpandablePaperText({
 
   return (
     <Box>
-      <Typography
+      <Box
         ref={textRef}
-        variant="body2"
         color={color}
         sx={{
+          fontSize: "0.875rem",
           lineHeight: 1.7,
           ...(expanded ? {} : {
             display: "-webkit-box",
@@ -42,8 +43,8 @@ export function ExpandablePaperText({
           }),
         }}
       >
-        {children}
-      </Typography>
+        <MarkdownMessage content={children} />
+      </Box>
       {(overflowing || expanded) && (
         <Button
           size="small"

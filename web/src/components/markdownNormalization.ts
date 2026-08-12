@@ -1,26 +1,42 @@
 const CODE_SEGMENT = /(```[\s\S]*?```|~~~[\s\S]*?~~~|`[^`\n]*`)/g;
-const STRONG_PAIR = /(?<![\\*])\*\*(?!\*)([\s\S]+?)(?<![\\*])\*\*(?!\*)/g;
-const STRONG_BOUNDARY = /(?<![\\*])(\*\*(?!\*)[\s\S]+?(?<![\\*])\*\*)(?=[\p{L}\p{N}])/gu;
+const MALFORMED_OPENING_PAIR = /(?<![\\*])\*\*(?!\*)([\t \u00A0\u200B\u2060\u3000\uFEFF]+)([^\n]*?\S)[\t \u00A0\u200B\u2060\u3000\uFEFF]*\*\*(?!\*)/g;
+const STRONG_PAIR_ON_LINE = /(?<![\\*])\*\*(?!\*)([^\n]+?)(?<![\\*])\*\*(?!\*)/g;
+const STRONG_BOUNDARY = /(?<![\\*])(\*\*(?!\*)[^\n]+?(?<![\\*])\*\*)(?=[\p{L}\p{N}])/gu;
 const INNER_BOUNDARY = /^[\s\u200B\u2060\uFEFF\u3000]+|[\s\u200B\u2060\uFEFF\u3000]+$/g;
 
+function normalizeStrongSegment(segment: string): string {
+  const repairedPairs: string[] = [];
+  // Prefer the characteristic model error (`** label**`) before scanning normal
+  // pairs. Placeholders prevent an unrelated, unmatched delimiter earlier in the
+  // line from stealing this pair.
+  const protectedSegment = segment.replace(
+    MALFORMED_OPENING_PAIR,
+    (_match, _leading: string, body: string) => {
+      const marker = `\uE000frontier-strong-${repairedPairs.length}\uE001`;
+      repairedPairs.push(`**${body.replace(INNER_BOUNDARY, "")}**`);
+      return marker;
+    },
+  );
+  const normalized = protectedSegment.replace(STRONG_PAIR_ON_LINE, (match, body: string) => {
+    const value = body.replace(INNER_BOUNDARY, "");
+    return value ? `**${value}**` : match;
+  });
+  return repairedPairs
+    .reduce((value, pair, index) => value.replace(`\uE000frontier-strong-${index}\uE001`, pair), normalized)
+    // A closing delimiter next to a CJK/Latin letter can fail CommonMark's
+    // flanking rule when the bold text ends in punctuation.
+    .replace(STRONG_BOUNDARY, "$1 ");
+}
+
 /**
- * Repair the small CommonMark mistakes that streamed model output commonly
- * contains, while leaving inline and fenced code untouched.
+ * Repair CommonMark mistakes commonly produced by streamed model output while
+ * leaving inline and fenced code untouched. Repairs never cross a newline, so
+ * one unmatched delimiter cannot corrupt later paragraphs.
  */
 export function normalizeStrongMarkdown(content: string): string {
-  return content.split(CODE_SEGMENT).map((segment, index) => {
-    if (index % 2 === 1) return segment;
-    return segment
-      .replace(STRONG_PAIR, (match, body: string) => {
-        const leading = /^[\s\u200B\u2060\uFEFF\u3000]+/.test(body) ? " " : "";
-        const trailing = /[\s\u200B\u2060\uFEFF\u3000]+$/.test(body) ? " " : "";
-        const normalized = body.replace(INNER_BOUNDARY, "");
-        return normalized ? `${leading}**${normalized}**${trailing}` : match;
-      })
-      // `**重点。**下一句` is not a valid closing delimiter in CommonMark.
-      // A normal space preserves the visual sentence while making it parseable.
-      .replace(STRONG_BOUNDARY, "$1 ");
-  }).join("");
+  return content.split(CODE_SEGMENT).map((segment, index) => (
+    index % 2 === 1 ? segment : normalizeStrongSegment(segment)
+  )).join("");
 }
 
 export function prepareMarkdown(content: string): string {
