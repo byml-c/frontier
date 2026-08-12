@@ -22,6 +22,10 @@ DOCUMENT_SCHEMA_VERSION = 4
 logger = logging.getLogger(__name__)
 
 
+class DocumentReaderUnavailable(RuntimeError):
+    """Raised when no enabled structured-document source can serve a paper."""
+
+
 def _paths(paper_id: str) -> tuple[Path, Path, Path]:
     root = settings.document_dir / paper_id
     return root, root / "reader.json", root / "status.json"
@@ -222,6 +226,7 @@ def _convert_document_task(paper_id: str, force: bool) -> None:
                     )
                     return
             payload: dict[str, Any] | None = None
+            arxiv_html_error: str | None = None
             if paper.arxiv_id:
                 from .arxiv_reader import ArxivHtmlUnavailable, convert_from_arxiv_html
 
@@ -241,13 +246,25 @@ def _convert_document_task(paper_id: str, force: bool) -> None:
                         on_progress=report_progress,
                     )
                 except ArxivHtmlUnavailable as exc:
+                    arxiv_html_error = str(exc)
                     logger.info(
-                        "arXiv HTML unavailable for %s; falling back to Docling: %s",
+                        "arXiv HTML unavailable for %s: %s",
                         paper_id,
                         exc,
                     )
-                    report_progress("parsing", "源文档不可用，正在解析 PDF", 20, 2)
             if payload is None:
+                if not settings.enable_docling:
+                    if paper.arxiv_id:
+                        detail = f"（{arxiv_html_error}）" if arxiv_html_error else ""
+                        raise DocumentReaderUnavailable(
+                            "arXiv 暂未提供这篇论文的 HTML 正文"
+                            f"{detail}。当前服务器已关闭 PDF 结构化转换，请使用 PDF 模式。"
+                        )
+                    raise DocumentReaderUnavailable(
+                        "这篇论文没有可用的 arXiv HTML 正文。当前服务器已关闭 PDF "
+                        "结构化转换，请使用 PDF 模式。"
+                    )
+                report_progress("parsing", "正在解析 PDF", 20, 2)
                 payload = convert_with_docling(
                     path,
                     paper_id=paper_id,
@@ -269,6 +286,22 @@ def _convert_document_task(paper_id: str, force: bool) -> None:
                     "updated_at": datetime.now(UTC).isoformat(),
                 },
             )
+    except DocumentReaderUnavailable as exc:
+        logger.info("Structured reader unavailable for %s: %s", paper_id, exc)
+        _write_status(
+            paper_id,
+            {
+                "paper_id": paper_id,
+                "version": version,
+                "schema_version": DOCUMENT_SCHEMA_VERSION,
+                "status": "failed",
+                "retryable": False,
+                "page_count": page_count or None,
+                "started_at": started_at,
+                "error": str(exc),
+                "updated_at": datetime.now(UTC).isoformat(),
+            },
+        )
     except Exception as exc:
         logger.exception("Document conversion failed for %s", paper_id)
         _write_status(
@@ -348,19 +381,28 @@ def convert_with_docling(
     root: Path,
     on_progress: Callable[..., None] | None = None,
 ) -> dict[str, Any]:
+    if not settings.enable_docling:
+        raise DocumentReaderUnavailable(
+            "Docling 已在当前部署中关闭；如需使用，请安装 docling 可选依赖并启用配置。"
+        )
     import pymupdf
-    from docling.datamodel.base_models import InputFormat
-    from docling.datamodel.object_detection_engine_options import (
-        TransformersObjectDetectionEngineOptions,
-    )
-    from docling.datamodel.pipeline_options import (
-        AcceleratorDevice,
-        AcceleratorOptions,
-        LayoutObjectDetectionOptions,
-        PdfPipelineOptions,
-    )
-    from docling.document_converter import DocumentConverter, PdfFormatOption
-    from docling_core.types.doc import PictureItem, TableItem
+    try:
+        from docling.datamodel.base_models import InputFormat
+        from docling.datamodel.object_detection_engine_options import (
+            TransformersObjectDetectionEngineOptions,
+        )
+        from docling.datamodel.pipeline_options import (
+            AcceleratorDevice,
+            AcceleratorOptions,
+            LayoutObjectDetectionOptions,
+            PdfPipelineOptions,
+        )
+        from docling.document_converter import DocumentConverter, PdfFormatOption
+        from docling_core.types.doc import PictureItem, TableItem
+    except ModuleNotFoundError as exc:
+        raise DocumentReaderUnavailable(
+            "Docling 可选依赖尚未安装，请运行 `uv sync --extra docling` 后重试。"
+        ) from exc
 
     assets = root / "assets"
     assets.mkdir(parents=True, exist_ok=True)

@@ -554,7 +554,6 @@ dependencies = [
     { name = "apscheduler" },
     { name = "beautifulsoup4" },
     { name = "bibtexparser" },
-    { name = "docling" },
     { name = "fastapi" },
     { name = "feedparser" },
     { name = "httpx", extra = ["socks"] },
@@ -573,13 +572,16 @@ dev = [
     { name = "pytest-asyncio" },
     { name = "ruff" },
 ]
+docling = [
+    { name = "docling" },
+]
 
 [package.metadata]
 requires-dist = [
     { name = "apscheduler", specifier = ">=3.11,<4" },
     { name = "beautifulsoup4", specifier = ">=4.12,<5" },
     { name = "bibtexparser", specifier = ">=1.4,<2" },
-    { name = "docling", specifier = ">=2.58,<3" },
+    { name = "docling", marker = "extra == 'docling'", specifier = ">=2.58,<3" },
     { name = "fastapi", specifier = ">=0.116,<1" },
     { name = "feedparser", specifier = ">=6.0,<7" },
     { name = "httpx", extras = ["socks"], specifier = ">=0.28,<1" },
@@ -594,7 +596,7 @@ requires-dist = [
     { name = "typer", specifier = ">=0.16,<1" },
     { name = "uvicorn", extras = ["standard"], specifier = ">=0.35,<1" },
 ]
-provides-extras = ["dev"]
+provides-extras = ["docling", "dev"]
 
 [[package]]
 name = "fsspec"

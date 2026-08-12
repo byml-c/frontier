@@ -30,6 +30,9 @@ class Settings(BaseSettings):
     translation_env_file: Path = PROJECT_ROOT / "translation.env"
     enable_scheduler: bool = True
     enable_codex_runs: bool = True
+    # Docling loads large layout models and is unsuitable for the default
+    # low-memory deployment. arXiv HTML remains available independently.
+    enable_docling: bool = False
 
     @property
     def resolved_database_url(self) -> str:

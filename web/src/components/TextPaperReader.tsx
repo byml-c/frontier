@@ -126,7 +126,7 @@ export function TextPaperReader({ document, annotations, mobile, toolsOpen, acti
   function cancelMobileSelection() { window.clearTimeout(longPressTimer.current); longPressStart.current = null; }
 
   if (!document || document.status === "processing" || document.status === "missing") return <DocumentConversionProgress document={document} onRetry={onRetry} />;
-  if (document.status === "failed") return <Stack alignItems="center" justifyContent="center" sx={{ flex: 1, p: 3 }}><ErrorState error={document.error || "文本模式生成失败"} /><Button variant="outlined" onClick={onRetry}>重新生成</Button></Stack>;
+  if (document.status === "failed") return <Stack alignItems="center" justifyContent="center" sx={{ flex: 1, p: 3 }}><ErrorState error={document.error || "文本模式生成失败"} /><Button variant="outlined" onClick={document.retryable === false ? onModeToggle : onRetry}>{document.retryable === false ? "使用 PDF 模式" : "重新生成"}</Button></Stack>;
 
   return <Box sx={{ position: "relative", flex: 1, minHeight: 0, overflow: "hidden", bgcolor: "#f7f7f5" }}>
     {toolsOpen && <TextToolbar mobile={mobile} search={search} matches={matches.length} matchIndex={matchIndex} fontSize={fontSize} lineHeight={lineHeight} onSearch={setSearch} onMatch={jumpMatch} onFontSize={(value) => setTypography(value)} onLineHeight={(value) => setTypography(fontSize, value)} onModeToggle={onModeToggle} />}

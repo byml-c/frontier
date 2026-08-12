@@ -9,8 +9,10 @@ from fastapi.testclient import TestClient
 from frontier.api.papers import _translation_key
 from frontier.schemas import TranslationRequest
 from frontier.services.document_reader import (
+    DocumentReaderUnavailable,
     _estimate_conversion_seconds,
     _processing_status_is_live,
+    convert_with_docling,
 )
 
 
@@ -365,6 +367,21 @@ def test_document_reader_detects_stale_queued_status() -> None:
     stale = (datetime.now(UTC) - timedelta(minutes=2)).isoformat()
     assert _processing_status_is_live("not-running", {"phase": "queued", "updated_at": fresh})
     assert not _processing_status_is_live("not-running", {"phase": "queued", "updated_at": stale})
+
+
+def test_docling_is_blocked_before_import_when_disabled(monkeypatch, tmp_path) -> None:
+    monkeypatch.setattr("frontier.services.document_reader.settings.enable_docling", False)
+    try:
+        convert_with_docling(
+            tmp_path / "unused.pdf",
+            paper_id="paper-without-html",
+            version="v1",
+            root=tmp_path,
+        )
+    except DocumentReaderUnavailable as exc:
+        assert "Docling 已在当前部署中关闭" in str(exc)
+    else:
+        raise AssertionError("disabled Docling must not be imported or started")
 
 
 def test_manual_ingest_stages_daily_recommendation_and_metadata_edit(

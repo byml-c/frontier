@@ -8,7 +8,6 @@ dependencies = [
   "apscheduler>=3.11,<4",
   "beautifulsoup4>=4.12,<5",
   "bibtexparser>=1.4,<2",
-  "docling>=2.58,<3",
   "fastapi>=0.116,<1",
   "feedparser>=6.0,<7",
   "httpx[socks]>=0.28,<1",
@@ -22,6 +21,9 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+docling = [
+  "docling>=2.58,<3",
+]
 dev = [
   "pytest>=8.4,<9",
   "pytest-asyncio>=1.1,<2",

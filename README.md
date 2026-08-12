@@ -22,6 +22,15 @@ uv run frontier-server
 
 访问 `http://127.0.0.1:8000`。OpenAPI 文档位于 `/docs`。
 
+文本模式默认只读取轻量的 arXiv HTML，不会启动 Docling。arXiv 未提供 HTML
+或手动上传的 PDF 会继续使用 PDF 模式。如果部署机器资源充足，才建议安装并启用
+PDF 结构化转换：
+
+```bash
+uv sync --extra docling
+# 在 .env 中设置 FRONTIER_ENABLE_DOCLING=true，然后重启服务
+```
+
 首次初始化已有文献与研究图谱：
 
 ```bash

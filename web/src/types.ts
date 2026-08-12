@@ -126,6 +126,7 @@ export type PaperDocument = {
   source_url?: string;
   blocks?: DocumentBlock[];
   error?: string;
+  retryable?: boolean;
   phase?: "queued" | "preparing" | "source" | "parsing" | "structuring" | "assets" | "finalizing";
   phase_label?: string;
   progress?: number;
