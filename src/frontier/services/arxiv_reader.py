@@ -209,7 +209,7 @@ def _build_block(
     if node.name == "figure":
         caption_node = node.find("figcaption")
         caption = _plain_text(caption_node) if isinstance(caption_node, Tag) else ""
-        image = node.find("img")
+        asset_url = _figure_asset_url(node, base_url)
         table = node.find("table")
         is_table = "ltx_table" in classes or caption.lower().startswith("table")
         block: dict[str, Any] = {
@@ -220,8 +220,8 @@ def _build_block(
             "text": _plain_text(table) if isinstance(table, Tag) else "",
             "caption": caption,
         }
-        if isinstance(image, Tag) and image.get("src") and fetch_asset:
-            source_url = urljoin(base_url, str(image["src"]))
+        if asset_url and fetch_asset:
+            source_url = asset_url
             suffix = Path(urlparse(source_url).path).suffix.lower()
             if suffix not in _ASSET_SUFFIXES:
                 suffix = ".img"
@@ -271,6 +271,43 @@ def _build_block(
         "text": text,
         "html": _safe_fragment(node, base_url, inner=True),
     }
+
+
+def _figure_asset_url(node: Tag, base_url: str) -> str | None:
+    """Return the primary arXiv figure asset across LaTeXML media variants."""
+    for media in node.find_all(["img", "object", "embed", "source"]):
+        value: str | None = None
+        if media.name == "object":
+            value = str(media.get("data") or "")
+        elif media.name in {"img", "embed"}:
+            value = str(media.get("src") or "")
+            if not value and media.name == "img":
+                value = _best_srcset_candidate(str(media.get("srcset") or ""))
+        elif media.name == "source":
+            value = _best_srcset_candidate(str(media.get("srcset") or ""))
+        if value:
+            return urljoin(base_url, value)
+    return None
+
+
+def _best_srcset_candidate(srcset: str) -> str | None:
+    candidates: list[tuple[float, str]] = []
+    for index, raw_candidate in enumerate(srcset.split(",")):
+        parts = raw_candidate.strip().split()
+        if not parts:
+            continue
+        score = float(index)
+        if len(parts) > 1:
+            descriptor = parts[-1].lower()
+            try:
+                if descriptor.endswith("w"):
+                    score = float(descriptor[:-1])
+                elif descriptor.endswith("x"):
+                    score = float(descriptor[:-1]) * 10_000
+            except ValueError:
+                pass
+        candidates.append((score, parts[0]))
+    return max(candidates, default=(0, ""))[1] or None
 
 
 def _safe_fragment(node: Tag, base_url: str, *, inner: bool = False) -> str:

@@ -10,11 +10,14 @@ from frontier.agent_runner import _parse_citations
 from frontier.api.papers import _translation_key
 from frontier.schemas import TranslationRequest
 from frontier.services.document_reader import (
+    DOCUMENT_SCHEMA_VERSION,
     DocumentReaderUnavailable,
+    _document_payload_is_current,
     _estimate_conversion_seconds,
     _processing_status_is_live,
     convert_with_docling,
 )
+from frontier.services.ingest import parse_arxiv_abs_html
 
 
 def create_paper(client: TestClient, title: str = "Tactile VLA for Fine Manipulation") -> dict:
@@ -64,6 +67,18 @@ def test_parse_citations_supports_page_ranges() -> None:
     ]
 
 
+def test_parse_citations_supports_separate_page_lists() -> None:
+    citations = _parse_citations("两处证据 [[page:2, 12]]，另一处 [[p:4，7]]。", "paper-1")
+
+    assert [(item["page_number"], item["label"]) for item in citations] == [
+        (2, "第 2 页"),
+        (12, "第 12 页"),
+        (4, "第 4 页"),
+        (7, "第 7 页"),
+    ]
+    assert citations[0]["marker"] == citations[1]["marker"] == "[[page:2, 12]]"
+
+
 def test_translation_cache_key_is_stable_across_selection_geometry() -> None:
     first = TranslationRequest(
         text="action-grounded latent",
@@ -76,6 +91,32 @@ def test_translation_cache_key_is_stable_across_selection_geometry() -> None:
         position_json={"rects": [[0.11, 0.21, 0.29, 0.05]]},
     )
     assert _translation_key("paper-id", first) == _translation_key("paper-id", second)
+
+
+def test_arxiv_abs_metadata_parses_all_authors_without_atom_api() -> None:
+    payload = parse_arxiv_abs_html(
+        """
+        <html><head>
+          <meta property="og:url" content="https://arxiv.org/abs/2608.10232v1" />
+          <meta name="citation_title" content="FACT: Failure-Aware Causal Training" />
+          <meta name="citation_author" content="Peng, Quanquan" />
+          <meta name="citation_author" content="Liang, Yutong" />
+          <meta name="citation_date" content="2026/08/10" />
+          <meta name="citation_pdf_url" content="https://arxiv.org/pdf/2608.10232" />
+          <meta name="citation_arxiv_id" content="2608.10232" />
+          <meta name="citation_abstract" content="Failure-aware world-action training." />
+        </head></html>
+        """,
+        "2608.10232",
+    )
+
+    assert payload.first_author == "Quanquan Peng"
+    assert [author["name"] for author in payload.authors] == [
+        "Quanquan Peng",
+        "Yutong Liang",
+    ]
+    assert payload.arxiv_version == 1
+    assert payload.published_at.isoformat() == "2026-08-10"
 
 
 def test_health_and_defaults(client: TestClient) -> None:
@@ -189,6 +230,47 @@ def test_paper_dedup_annotations_and_feedback(client: TestClient) -> None:
         ).status_code
         == 200
     )
+    cancelled = client.post(f"/api/papers/{paper['id']}/cancel-reading")
+    assert cancelled.status_code == 200
+    assert cancelled.json()["status"] == "candidate"
+    assert cancelled.json()["reading_completed_at"] is None
+    assert cancelled.json()["is_interested"] is False
+    assert cancelled.json()["is_quality"] is False
+    assert cancelled.json()["pending_feedback"] == {}
+    assert cancelled.json()["nodes"] == []
+    assert {item["name"] for item in cancelled.json()["tags"]} == {"VLA", "触觉"}
+    assert not any(
+        item["id"] == paper["id"]
+        for item in client.get("/api/papers", params={"library": True}).json()["items"]
+    )
+
+
+def test_papers_are_grouped_by_reading_status(client: TestClient) -> None:
+    candidate = create_paper(client, "Status order candidate")
+    reading = create_paper(client, "Status order reading")
+    pending = create_paper(client, "Status order pending")
+    completed = create_paper(client, "Status order completed")
+    ignored = create_paper(client, "Status order ignored")
+
+    assert client.post(f"/api/papers/{reading['id']}/start-reading").status_code == 200
+    assert client.post(f"/api/papers/{pending['id']}/finish", json={}).status_code == 200
+    assert client.post(f"/api/papers/{completed['id']}/finish", json={}).status_code == 200
+    assert client.post(
+        f"/api/papers/{completed['id']}/confirm-feedback",
+        json={"interested": False, "quality": False},
+    ).status_code == 200
+    assert client.post(
+        f"/api/papers/{ignored['id']}/ignore",
+        json={"reason": "not relevant"},
+    ).status_code == 200
+
+    target_ids = {candidate["id"], reading["id"], pending["id"], completed["id"], ignored["id"]}
+    ordered = [
+        item["status"]
+        for item in client.get("/api/papers", params={"limit": 200}).json()["items"]
+        if item["id"] in target_ids
+    ]
+    assert ordered == ["feedback_pending", "reading", "candidate", "completed", "ignored"]
 
 
 def test_timestamps_are_serialized_in_beijing_time(client: TestClient) -> None:
@@ -401,6 +483,23 @@ def test_document_reader_detects_stale_queued_status() -> None:
     assert not _processing_status_is_live("not-running", {"phase": "queued", "updated_at": stale})
 
 
+def test_document_reader_invalidates_old_cache_and_worker_status() -> None:
+    version = "pdf-v1"
+
+    assert _document_payload_is_current(
+        {"version": version, "schema_version": DOCUMENT_SCHEMA_VERSION}, version
+    )
+    assert not _document_payload_is_current(
+        {"version": version, "schema_version": DOCUMENT_SCHEMA_VERSION - 1}, version
+    )
+    assert not _document_payload_is_current(
+        {"version": "pdf-v0", "schema_version": DOCUMENT_SCHEMA_VERSION}, version
+    )
+    assert _document_payload_is_current(
+        {"schema_version": DOCUMENT_SCHEMA_VERSION}, version, allow_missing_version=True
+    )
+
+
 def test_docling_is_blocked_before_import_when_disabled(monkeypatch, tmp_path) -> None:
     monkeypatch.setattr("frontier.services.document_reader.settings.enable_docling", False)
     try:
@@ -478,6 +577,26 @@ def test_manual_ingest_stages_daily_recommendation_and_metadata_edit(
     )
     assert manual["paper"]["title"] == "Edited Tactile Foundation Policy"
     assert manual["paper"]["summary"] == "A manually reviewed summary."
+
+
+def test_manual_ingest_can_defer_agent_analysis(client: TestClient) -> None:
+    document = pymupdf.open()
+    page = document.new_page()
+    page.insert_text((72, 72), "Deferred Agent Analysis Paper")
+    content = document.tobytes()
+    document.close()
+
+    response = client.post(
+        "/api/papers/ingest/pdf",
+        data={"recommend": "true", "analyze": "false"},
+        files={"file": ("deferred-analysis.pdf", content, "application/pdf")},
+    )
+    assert response.status_code == 200, response.text
+    result = response.json()
+    assert result["analysis_task_id"] is None
+    assert result["paper"]["analysis_status"] is None
+    latest = client.get("/api/briefs/latest").json()
+    assert any(item["paper"]["id"] == result["paper"]["id"] for item in latest["items"])
 
 
 def test_memory_task_and_conversation(client: TestClient) -> None:

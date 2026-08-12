@@ -18,7 +18,7 @@ from fastapi import (
     UploadFile,
 )
 from fastapi.responses import FileResponse, StreamingResponse
-from sqlalchemy import and_, func, or_, select
+from sqlalchemy import and_, case, func, or_, select
 from sqlalchemy.orm import Session
 
 from ..agent_runner import build_prompt, enqueue_task, run_task
@@ -121,8 +121,12 @@ def _manual_ingest_result(
     paper: Paper,
     created: bool,
     background_tasks: BackgroundTasks,
+    *,
+    analyze: bool,
 ) -> dict:
-    brief, _item, task, task_created = stage_manual_recommendation(session, paper)
+    brief, _item, task, task_created = stage_manual_recommendation(
+        session, paper, queue_analysis=analyze
+    )
     if task and task_created and settings.enable_codex_runs:
         background_tasks.add_task(run_task, task.id)
     return {
@@ -170,7 +174,19 @@ def list_papers(
     limit: int = Query(default=50, ge=1, le=200),
     offset: int = Query(default=0, ge=0),
 ) -> dict:
-    statement = select(Paper).order_by(Paper.published_at.desc(), Paper.created_at.desc())
+    reading_status_order = case(
+        (Paper.status == "feedback_pending", 0),
+        (Paper.status == "reading", 1),
+        (Paper.status == "candidate", 2),
+        (Paper.status == "completed", 3),
+        (Paper.status == "ignored", 4),
+        else_=5,
+    )
+    statement = select(Paper).order_by(
+        reading_status_order,
+        Paper.published_at.desc(),
+        Paper.created_at.desc(),
+    )
     count_statement = select(func.count(func.distinct(Paper.id)))
     filters = []
     if q:
@@ -223,6 +239,7 @@ def add_arxiv(
     session: Annotated[Session, Depends(get_session)],
     value: str = Form(...),
     recommend: bool = Form(False),
+    analyze: bool = Form(True),
 ) -> dict:
     try:
         paper, created = ingest_arxiv(session, value)
@@ -231,7 +248,9 @@ def add_arxiv(
     except Exception as exc:
         raise HTTPException(status_code=502, detail=f"arXiv ingestion failed: {exc}") from exc
     if recommend:
-        return _manual_ingest_result(session, paper, created, background_tasks)
+        return _manual_ingest_result(
+            session, paper, created, background_tasks, analyze=analyze
+        )
     return {"paper": _serialize_paper(session, paper, detail=True), "created": created}
 
 
@@ -241,6 +260,7 @@ def add_url(
     session: Annotated[Session, Depends(get_session)],
     url: str = Form(...),
     recommend: bool = Form(False),
+    analyze: bool = Form(True),
 ) -> dict:
     try:
         paper, created = ingest_url(session, url)
@@ -249,7 +269,9 @@ def add_url(
     except Exception as exc:
         raise HTTPException(status_code=502, detail=f"URL ingestion failed: {exc}") from exc
     if recommend:
-        return _manual_ingest_result(session, paper, created, background_tasks)
+        return _manual_ingest_result(
+            session, paper, created, background_tasks, analyze=analyze
+        )
     return {"paper": _serialize_paper(session, paper, detail=True), "created": created}
 
 
@@ -259,6 +281,7 @@ async def add_pdf(
     session: Annotated[Session, Depends(get_session)],
     file: Annotated[UploadFile, File()],
     recommend: bool = Form(False),
+    analyze: bool = Form(True),
 ) -> dict:
     if file.content_type not in {"application/pdf", "application/octet-stream"}:
         raise HTTPException(status_code=415, detail="Only PDF files are supported")
@@ -272,7 +295,9 @@ async def add_pdf(
     except Exception as exc:
         raise HTTPException(status_code=400, detail=f"PDF ingestion failed: {exc}") from exc
     if recommend:
-        return _manual_ingest_result(session, paper, created, background_tasks)
+        return _manual_ingest_result(
+            session, paper, created, background_tasks, analyze=analyze
+        )
     return {"paper": _serialize_paper(session, paper, detail=True), "created": created}
 
 
@@ -401,6 +426,32 @@ def start_reading(paper_id: str, session: Annotated[Session, Depends(get_session
         action="paper.reading_started",
         entity_type="paper",
         entity_id=paper.id,
+    )
+    session.commit()
+    return _serialize_paper(session, paper, detail=True)
+
+
+@router.post("/{paper_id}/cancel-reading")
+def cancel_reading(paper_id: str, session: Annotated[Session, Depends(get_session)]) -> dict:
+    paper = _paper_or_404(session, paper_id)
+    if paper.status not in {"reading", "feedback_pending", "completed"}:
+        raise HTTPException(status_code=409, detail="Paper is not in a reading state")
+    previous_status = paper.status
+    paper.status = "candidate"
+    paper.pending_feedback = {}
+    paper.is_interested = False
+    paper.is_quality = False
+    paper.reading_completed_at = None
+    removed_links = (
+        session.query(PaperNode).filter(PaperNode.paper_id == paper.id).delete()
+    )
+    log_operation(
+        session,
+        actor="user",
+        action="paper.reading_cancelled",
+        entity_type="paper",
+        entity_id=paper.id,
+        detail={"previous_status": previous_status, "removed_node_links": removed_links},
     )
     session.commit()
     return _serialize_paper(session, paper, detail=True)

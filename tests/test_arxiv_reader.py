@@ -14,6 +14,10 @@ ARXIV_HTML = """
       <img src="paper-v1/figure.png" alt="Refer to caption" />
       <figcaption>Figure 1: One original figure.</figcaption>
     </figure>
+    <figure id="S1.F2" class="ltx_figure">
+      <object type="image/svg+xml" data="paper-v1/vector-figure.svg"></object>
+      <figcaption>Figure 2: One vector figure.</figcaption>
+    </figure>
     <table id="S1.E1" class="ltx_equation"><tr><td><math display="block"><semantics><mrow><mi>y</mi></mrow><annotation encoding="application/x-tex">y = x^2</annotation></semantics></math></td></tr></table>
   </section>
   <section id="bib" class="ltx_bibliography"><h2 class="ltx_title ltx_title_bibliography">References</h2><ul><li id="bib.bib1" class="ltx_bibitem"><span class="ltx_tag ltx_bib_key">[1]</span><span class="ltx_bibblock">A. Author (2026). A complete reference.</span></li></ul></section>
@@ -48,9 +52,13 @@ def test_arxiv_html_preserves_semantics_without_duplicate_captions(tmp_path: Pat
 
     assert payload["reader_source"] == "arxiv_html"
     assert not [block for block in blocks if block["kind"] == "caption"]
-    picture = next(block for block in blocks if block["kind"] == "picture")
-    assert picture["caption"] == "Figure 1: One original figure."
-    assert picture["image_url"].endswith(".png")
+    pictures = [block for block in blocks if block["kind"] == "picture"]
+    assert [picture["caption"] for picture in pictures] == [
+        "Figure 1: One original figure.",
+        "Figure 2: One vector figure.",
+    ]
+    assert pictures[0]["image_url"].endswith(".png")
+    assert pictures[1]["image_url"].endswith(".svg")
     paragraph = next(block for block in blocks if "We optimize" in block.get("text", ""))
     assert 'data-reader-tex="x^2"' in paragraph["html"]
     assert 'data-reader-ref="A1"' in paragraph["html"]

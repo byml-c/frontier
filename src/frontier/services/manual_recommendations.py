@@ -68,6 +68,8 @@ def queue_paper_metadata_analysis(session: Session, paper: Paper) -> tuple[TaskR
 def stage_manual_recommendation(
     session: Session,
     paper: Paper,
+    *,
+    queue_analysis: bool = True,
 ) -> tuple[Brief, BriefItem, TaskRun | None, bool]:
     """Place a user-added paper in today's brief and queue missing analysis."""
     brief_date = datetime.now(ZoneInfo(settings.timezone)).date()
@@ -121,7 +123,11 @@ def stage_manual_recommendation(
 
     task = active_task
     task_created = False
-    if task is None and (_needs_analysis(paper) or analysis.get("status") == "failed"):
+    if (
+        queue_analysis
+        and task is None
+        and (_needs_analysis(paper) or analysis.get("status") == "failed")
+    ):
         task = TaskRun(
             kind="manual_paper_analysis",
             payload_json={

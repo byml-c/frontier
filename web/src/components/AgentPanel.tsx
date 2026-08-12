@@ -21,6 +21,7 @@ import { api, jsonBody, streamApi } from "../api";
 import type { Conversation } from "../types";
 import { AgentActivity } from "./AgentActivity";
 import { activitiesFromContext, type AgentActivityItem, failRunningActivities, updateActivities } from "./agentActivityState";
+import { submitChatOnEnter } from "./chatInput";
 import { ConversationScroller } from "./ConversationScroller";
 import { MarkdownMessage } from "./MarkdownMessage";
 
@@ -99,7 +100,7 @@ export function AgentPanel({ open, onClose, width, onWidthChange }: Props) {
         {error && <Alert severity="error">{error}</Alert>}
       </ConversationScroller>
       <Box component="form" onSubmit={submit} sx={{ p: 2, borderTop: 1, borderColor: "divider" }}>
-        <TextField fullWidth multiline maxRows={6} minRows={2} value={text} onChange={(event) => setText(event.target.value)} placeholder="输入研究问题或整理指令" disabled={sending} InputProps={{ endAdornment: <IconButton color="primary" type="submit" disabled={!text.trim() || sending}><SendRounded /></IconButton> }} />
+        <TextField fullWidth multiline maxRows={6} minRows={2} value={text} onChange={(event) => setText(event.target.value)} onKeyDown={submitChatOnEnter} placeholder="输入研究问题或整理指令" disabled={sending} InputProps={{ endAdornment: <IconButton color="primary" type="submit" disabled={!text.trim() || sending}><SendRounded /></IconButton> }} />
       </Box>
     </Stack>
   </Drawer>;

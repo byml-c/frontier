@@ -40,22 +40,32 @@ def _find_session_id(value: Any) -> str | None:
 def _parse_citations(content: str, paper_id: str | None = None) -> list[dict[str, Any]]:
     citations = []
     for match in re.finditer(
-        r"\[\[(?:page|p)[:. ]?(\d+)(?:\s*[-–—~～]\s*(\d+))?(?:\|([^\]]+))?\]\]",
+        r"\[\[(?:page|p)[:. ]?(\d+(?:\s*[-–—~～]\s*\d+)?"
+        r"(?:\s*[,，]\s*\d+(?:\s*[-–—~～]\s*\d+)?)*)(?:\|([^\]]+))?\]\]",
         content,
         re.IGNORECASE,
     ):
-        start_page = int(match.group(1))
-        end_page = int(match.group(2)) if match.group(2) else None
-        page_label = f"{start_page}–{end_page}" if end_page else str(start_page)
-        citation = {
-            "paper_id": paper_id,
-            "page_number": start_page,
-            "label": match.group(3) or f"第 {page_label} 页",
-            "marker": match.group(0),
-        }
-        if end_page is not None:
-            citation["end_page_number"] = end_page
-        citations.append(citation)
+        parts = re.split(r"\s*[,，]\s*", match.group(1))
+        custom_label = match.group(2)
+        for part in parts:
+            page_match = re.fullmatch(r"(\d+)(?:\s*[-–—~～]\s*(\d+))?", part)
+            if page_match is None:
+                continue
+            start_page = int(page_match.group(1))
+            end_page = int(page_match.group(2)) if page_match.group(2) else None
+            page_label = f"{start_page}–{end_page}" if end_page else str(start_page)
+            label = custom_label
+            if custom_label and len(parts) > 1:
+                label = f"{custom_label}（第 {page_label} 页）"
+            citation = {
+                "paper_id": paper_id,
+                "page_number": start_page,
+                "label": label or f"第 {page_label} 页",
+                "marker": match.group(0),
+            }
+            if end_page is not None:
+                citation["end_page_number"] = end_page
+            citations.append(citation)
     return citations
 
 
@@ -168,6 +178,8 @@ annotations, notes, and its paper conversation. Summarize the question, evidence
 experiment, limitations, the user's apparent attitude, and suggested tags. Every material paper
 claim must cite a page as [[page:N]]. Save only suggestions with `frontier paper finish`; do not
 confirm interest, quality, tags, or node creation on the user's behalf.
+After saving, return only one concise Chinese sentence confirming completion. Do not narrate loaded
+context, tool calls, internal reasoning, or intermediate work in the final response.
 """
     if task.kind == "translate":
         text = payload["text"]

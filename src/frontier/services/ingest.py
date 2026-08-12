@@ -27,6 +27,7 @@ class MetadataParser(HTMLParser):
     def __init__(self) -> None:
         super().__init__()
         self.meta: dict[str, str] = {}
+        self.meta_all: dict[str, list[str]] = {}
         self.title_parts: list[str] = []
         self.in_title = False
         self.pdf_link: str | None = None
@@ -39,7 +40,10 @@ class MetadataParser(HTMLParser):
             key = values.get("property") or values.get("name")
             content = values.get("content")
             if key and content:
-                self.meta[key.lower()] = content.strip()
+                normalized_key = key.lower()
+                normalized_content = content.strip()
+                self.meta[normalized_key] = normalized_content
+                self.meta_all.setdefault(normalized_key, []).append(normalized_content)
         if tag.lower() == "link" and values.get("type") == "application/pdf":
             self.pdf_link = values.get("href")
 
@@ -204,15 +208,74 @@ def search_arxiv(query: str, max_results: int = 50) -> list[PaperCreate]:
     return results
 
 
+def _citation_author_name(value: str) -> str:
+    family, separator, given = value.partition(",")
+    if separator and given.strip():
+        return f"{given.strip()} {family.strip()}"
+    return value.strip()
+
+
+def parse_arxiv_abs_html(content: str, arxiv_id: str) -> PaperCreate:
+    """Parse the stable citation metadata embedded in an arXiv abstract page."""
+    parser = MetadataParser()
+    parser.feed(content)
+    title = parser.meta.get("citation_title") or parser.meta.get("og:title")
+    abstract = parser.meta.get("citation_abstract") or parser.meta.get("og:description")
+    if not title or not abstract:
+        raise ValueError("arXiv abstract page did not contain paper metadata")
+    page_id = parser.meta.get("citation_arxiv_id") or arxiv_id
+    parsed_page_id = parse_arxiv_id(page_id)
+    if not parsed_page_id or parsed_page_id[0] != arxiv_id:
+        raise ValueError("arXiv abstract page returned a different paper")
+    canonical = parser.meta.get("og:url", "")
+    parsed_canonical = parse_arxiv_id(canonical)
+    version = parsed_canonical[1] if parsed_canonical else parsed_page_id[1]
+    authors = [
+        {"name": _citation_author_name(value)}
+        for value in parser.meta_all.get("citation_author", [])
+        if value.strip()
+    ]
+    published_at = None
+    date_value = parser.meta.get("citation_date") or parser.meta.get("citation_online_date")
+    if date_value:
+        try:
+            published_at = datetime.fromisoformat(date_value[:10].replace("/", "-")).date()
+        except ValueError:
+            pass
+    return PaperCreate(
+        title=html.unescape(" ".join(title.split())),
+        abstract=html.unescape(" ".join(abstract.split())),
+        authors=authors,
+        first_author=authors[0]["name"] if authors else None,
+        source="arxiv",
+        source_url=f"https://arxiv.org/abs/{arxiv_id}",
+        pdf_url=parser.meta.get("citation_pdf_url") or f"https://arxiv.org/pdf/{arxiv_id}",
+        arxiv_id=arxiv_id,
+        arxiv_version=version or 1,
+        published_at=published_at,
+    )
+
+
 def ingest_arxiv(session: Session, value: str, *, actor: str = "user") -> tuple[Paper, bool]:
     parsed = parse_arxiv_id(value)
     if not parsed:
         raise ValueError("Invalid arXiv ID or URL")
     arxiv_id, _version = parsed
-    results = search_arxiv(f"id:{arxiv_id}", max_results=1)
-    if not results:
-        raise ValueError(f"arXiv paper not found: {arxiv_id}")
-    return create_or_update_paper(session, results[0], actor=actor)
+    try:
+        response = httpx.get(
+            f"https://arxiv.org/abs/{arxiv_id}",
+            headers={"User-Agent": USER_AGENT},
+            timeout=15,
+            follow_redirects=True,
+        )
+        response.raise_for_status()
+        payload = parse_arxiv_abs_html(response.text, arxiv_id)
+    except (httpx.HTTPError, ValueError):
+        results = search_arxiv(f"id:{arxiv_id}", max_results=1)
+        if not results:
+            raise ValueError(f"arXiv paper not found: {arxiv_id}") from None
+        payload = results[0]
+    return create_or_update_paper(session, payload, actor=actor)
 
 
 def ingest_url(session: Session, url: str, *, actor: str = "user") -> tuple[Paper, bool]:

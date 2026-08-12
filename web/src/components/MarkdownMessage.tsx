@@ -4,32 +4,7 @@ import rehypeKatex from "rehype-katex";
 import remarkGfm from "remark-gfm";
 import remarkMath from "remark-math";
 import "katex/dist/katex.min.css";
-
-function prepareMarkdown(content: string): string {
-  return content
-    // Model output occasionally leaves whitespace inside strong delimiters
-    // (`** important**`). Move that whitespace outside so CommonMark can parse
-    // the emphasis without joining adjacent Latin words.
-    .replace(/\*\*([^*\n]+?)\*\*/g, (match, body: string) => {
-      const leading = body.match(/^[\s\u200B\u3000]+/)?.[0] ?? "";
-      const trailing = body.match(/[\s\u200B\u3000]+$/)?.[0] ?? "";
-      const normalized = body.trim();
-      return normalized ? `${leading.replace(/\u200B/g, "")}**${normalized.replace(/^\u200B+|\u200B+$/g, "")}**${trailing.replace(/\u200B/g, "")}` : match;
-    })
-    // CommonMark treats a closing emphasis marker followed directly by a CJK/Latin
-    // character as ambiguous. Add a visual-neutral word boundary so streamed model
-    // output such as `**重点。**下一句` is parsed as strong text.
-    .replace(/(\*\*[^*\n]+?\*\*)(?=[\p{L}\p{N}])/gu, "$1 ")
-    .replace(/\\\[((?:.|\n)*?)\\\]/g, (_match, body: string) => `$$\n${body}\n$$`)
-    .replace(/\\\(((?:.|\n)*?)\\\)/g, (_match, body: string) => `$${body}$`)
-    .replace(
-      /\[\[(?:page|p)[:. ]?(\d+)(?:\s*[-–—~～]\s*(\d+))?(?:\|([^\]]+))?\]\]/gi,
-      (_match, startPage: string, endPage?: string, label?: string) => {
-        const range = endPage ? `${startPage}–${endPage}` : startPage;
-        return `[${label || `第 ${range} 页`}](#frontier-page-${startPage}${endPage ? `-${endPage}` : ""})`;
-      },
-    );
-}
+import { prepareMarkdown } from "./markdownNormalization";
 
 export function MarkdownMessage({
   content,

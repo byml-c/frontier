@@ -3,6 +3,7 @@ import CloudUploadRounded from "@mui/icons-material/CloudUploadRounded";
 import HubRounded from "@mui/icons-material/HubRounded";
 import MenuBookRounded from "@mui/icons-material/MenuBookRounded";
 import SearchRounded from "@mui/icons-material/SearchRounded";
+import UndoRounded from "@mui/icons-material/UndoRounded";
 import {
   Alert,
   Box,
@@ -12,6 +13,7 @@ import {
   Chip,
   Container,
   FormControl,
+  IconButton,
   InputAdornment,
   InputLabel,
   Link as MuiLink,
@@ -21,6 +23,7 @@ import {
   Tab,
   Tabs,
   TextField,
+  Tooltip,
   Typography,
 } from "@mui/material";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
@@ -55,6 +58,7 @@ export function LibraryPage() {
   const [scope, setScope] = useState("all");
   const [ingestOpen, setIngestOpen] = useState(false);
   const [metadataId, setMetadataId] = useState<string | null>(null);
+  const [cancelPaper, setCancelPaper] = useState<Paper | null>(null);
 
   const scopeFilter = scope === "quality"
     ? "&quality=true"
@@ -71,6 +75,13 @@ export function LibraryPage() {
     ),
   });
   const tags = useQuery({ queryKey: ["tags"], queryFn: () => api<Tag[]>("/api/tags") });
+  const cancelReading = useMutation({
+    mutationFn: (paperId: string) => api(`/api/papers/${paperId}/cancel-reading`, { method: "POST" }),
+    onSuccess: () => {
+      setCancelPaper(null);
+      queryClient.invalidateQueries({ queryKey: ["papers"] });
+    },
+  });
 
   function changeTab(next: LibraryTab) {
     setSearchParams(next === "collection" ? { view: "collection" } : {}, { replace: true });
@@ -144,6 +155,7 @@ export function LibraryPage() {
               onOpen={() => navigate(`/paper/${paper.id}`)}
               onTagClick={setTag}
               onMetadata={() => setMetadataId(paper.id)}
+              onCancelReading={() => setCancelPaper(paper)}
             />
           ))}
         </Stack>
@@ -160,6 +172,16 @@ export function LibraryPage() {
         }}
       />
       {metadataId && <PaperMetadataDialog paperId={metadataId} open onClose={() => setMetadataId(null)} />}
+      <Modal open={Boolean(cancelPaper)} onClose={() => setCancelPaper(null)} title="取消精读状态">
+        <Stack spacing={2}>
+          <Typography>论文将回到“待阅读”，并退出积累库。已有元数据、标签、笔记和对话会保留；已建立的研究节点关联会移除。</Typography>
+          {cancelReading.error && <Alert severity="error">{cancelReading.error.message}</Alert>}
+          <Stack direction="row" justifyContent="flex-end" spacing={1}>
+            <Button onClick={() => setCancelPaper(null)}>保留当前状态</Button>
+            <Button color="warning" variant="contained" onClick={() => cancelPaper && cancelReading.mutate(cancelPaper.id)} disabled={cancelReading.isPending}>确认取消</Button>
+          </Stack>
+        </Stack>
+      </Modal>
     </Container>
   );
 }
@@ -170,12 +192,14 @@ function PaperCard({
   onOpen,
   onTagClick,
   onMetadata,
+  onCancelReading,
 }: {
   paper: Paper;
   accumulated: boolean;
   onOpen: () => void;
   onTagClick: (tagId: string) => void;
   onMetadata: () => void;
+  onCancelReading: () => void;
 }) {
   return (
     <Card>
@@ -206,7 +230,8 @@ function PaperCard({
               </MuiLink>
             </Box>
           ))}
-          <Button size="small" variant="outlined" color={paper.status === "feedback_pending" ? "warning" : "primary"} startIcon={<MenuBookRounded />} onClick={onOpen} sx={{ ml: "auto!important" }}>{paper.status === "feedback_pending" ? "确认结论" : "阅读"}</Button>
+          {(["reading", "feedback_pending", "completed"] as string[]).includes(paper.status) && <><Tooltip title="取消精读状态"><IconButton size="small" color="warning" aria-label="取消精读状态" onClick={onCancelReading} sx={{ display: { xs: "inline-flex", md: "none" }, ml: "auto!important" }}><UndoRounded fontSize="small" /></IconButton></Tooltip><Button size="small" color="warning" startIcon={<UndoRounded />} onClick={onCancelReading} sx={{ display: { xs: "none", md: "inline-flex" }, ml: "auto!important" }}>取消精读</Button></>}
+          <Button size="small" variant="outlined" color={paper.status === "feedback_pending" ? "warning" : "primary"} startIcon={<MenuBookRounded />} onClick={onOpen} sx={{ ml: (["reading", "feedback_pending", "completed"] as string[]).includes(paper.status) ? undefined : "auto!important" }}>{paper.status === "feedback_pending" ? "确认结论" : "阅读"}</Button>
         </Stack>
         {accumulated && (
           <Stack
@@ -274,6 +299,7 @@ function IngestModal({ open, onClose, onSuccess }: { open: boolean; onClose: () 
     mutationFn: async () => {
       const form = new FormData();
       form.set("recommend", "true");
+      form.set("analyze", "false");
       if (fileRef.current?.files?.[0]) {
         form.set("file", fileRef.current.files[0]);
         return api("/api/papers/ingest/pdf", { method: "POST", body: form });

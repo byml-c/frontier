@@ -1,4 +1,4 @@
-const API_ROOT = import.meta.env.VITE_API_ROOT ?? "";
+const API_ROOT = import.meta.env?.VITE_API_ROOT ?? "";
 
 export class ApiError extends Error {
   status: number;
@@ -18,13 +18,12 @@ export async function api<T>(path: string, options: RequestInit = {}): Promise<T
   }
   const response = await fetch(`${API_ROOT}${path}`, { ...options, headers });
   if (!response.ok) {
-    let detail: unknown = response.statusText;
+    const text = await response.text();
+    let detail: unknown = text || response.statusText;
     try {
-      const body = await response.json();
+      const body = JSON.parse(text) as { detail?: unknown };
       detail = body.detail ?? body;
-    } catch {
-      detail = await response.text();
-    }
+    } catch { /* Non-JSON errors already use the response text. */ }
     throw new ApiError(response.status, detail);
   }
   if (response.status === 204) return undefined as T;

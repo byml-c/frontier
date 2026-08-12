@@ -18,7 +18,9 @@ from .ingest import download_paper_pdf
 
 _conversion_lock = threading.Lock()
 _converting: set[str] = set()
-DOCUMENT_SCHEMA_VERSION = 4
+# Increment whenever cached reader output semantics change. Old caches and old
+# worker statuses then become stale and are rebuilt lazily on the next access.
+DOCUMENT_SCHEMA_VERSION = 5
 logger = logging.getLogger(__name__)
 
 
@@ -53,28 +55,30 @@ def _processing_status_is_live(paper_id: str, status: dict[str, Any]) -> bool:
     return age < max(600, estimate * 2)
 
 
+def _document_payload_is_current(
+    payload: dict[str, Any], version: str, *, allow_missing_version: bool = False
+) -> bool:
+    if payload.get("schema_version") != DOCUMENT_SCHEMA_VERSION:
+        return False
+    payload_version = payload.get("version")
+    return payload_version == version or (allow_missing_version and payload_version is None)
+
+
 def document_status(session: Session, paper: Paper) -> dict[str, Any]:
     root, cache, status_path = _paths(paper.id)
     path = download_paper_pdf(session, paper)
     version = _pdf_version(path)
     if cache.exists():
         payload = json.loads(cache.read_text(encoding="utf-8"))
-        if (
-            payload.get("version") == version
-            and payload.get("schema_version") == DOCUMENT_SCHEMA_VERSION
-        ):
+        if _document_payload_is_current(payload, version):
             return payload
     if status_path.exists():
         status = json.loads(status_path.read_text(encoding="utf-8"))
-        if (
-            status.get("version") == version
-            and status.get("schema_version") == DOCUMENT_SCHEMA_VERSION
-            and status.get("status") == "failed"
-        ):
+        if status.get("status") == "failed" and _document_payload_is_current(status, version):
             return status
         if (
             status.get("status") == "processing"
-            and status.get("version") in {None, version}
+            and _document_payload_is_current(status, version, allow_missing_version=True)
             and _processing_status_is_live(paper.id, status)
         ):
             return {**status, "version": version}
@@ -210,10 +214,7 @@ def _convert_document_task(paper_id: str, force: bool) -> None:
             root, cache, _status_path = _paths(paper_id)
             if cache.exists() and not force:
                 cached = json.loads(cache.read_text(encoding="utf-8"))
-                if (
-                    cached.get("version") == version
-                    and cached.get("schema_version") == DOCUMENT_SCHEMA_VERSION
-                ):
+                if _document_payload_is_current(cached, version):
                     _write_status(
                         paper_id,
                         {

@@ -8,7 +8,11 @@ export type AgentActivityItem = {
   status: "running" | "completed" | "failed";
 };
 
-export function updateActivities(current: AgentActivityItem[], event: StreamEvent): AgentActivityItem[] {
+export function updateActivities(
+  current: AgentActivityItem[],
+  event: StreamEvent,
+  maxItems: number | null = 8,
+): AgentActivityItem[] {
   if (event.type !== "activity") return current;
   const next: AgentActivityItem = {
     id: String(event.activity_id || `${event.kind || "activity"}-${current.length}`),
@@ -18,7 +22,10 @@ export function updateActivities(current: AgentActivityItem[], event: StreamEven
     status: event.status === "failed" || event.status === "completed" ? event.status : "running",
   };
   const index = current.findIndex((item) => item.id === next.id);
-  if (index < 0) return [...current, next].slice(-8);
+  if (index < 0) {
+    const items = [...current, next];
+    return maxItems === null ? items : items.slice(-maxItems);
+  }
   return current.map((item, itemIndex) => itemIndex === index ? { ...item, ...next } : item);
 }
 
