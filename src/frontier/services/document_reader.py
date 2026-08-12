@@ -137,6 +137,68 @@ def queue_document_conversion(paper_id: str, *, force: bool = False) -> bool:
     return True
 
 
+def queue_document_conversions(paper_ids: list[str], *, limit: int = 4) -> list[str]:
+    """Queue a small paper batch on one worker to protect low-resource servers."""
+    unique_ids = list(dict.fromkeys(paper_ids))[: max(0, limit)]
+    claimed: list[str] = []
+    with _conversion_lock:
+        for paper_id in unique_ids:
+            if paper_id not in _converting:
+                _converting.add(paper_id)
+                claimed.append(paper_id)
+    if not claimed:
+        return []
+
+    now = datetime.now(UTC).isoformat()
+    for paper_id in claimed:
+        _write_status(
+            paper_id,
+            {
+                "paper_id": paper_id,
+                "schema_version": DOCUMENT_SCHEMA_VERSION,
+                "status": "processing",
+                "phase": "queued",
+                "phase_label": "等待每日推荐文本缓存",
+                "progress": 1,
+                "stage": 0,
+                "stage_count": 4,
+                "started_at": now,
+                "updated_at": now,
+            },
+        )
+
+    def convert_batch() -> None:
+        for paper_id in claimed:
+            _convert_document_task(paper_id, False)
+
+    thread = threading.Thread(
+        target=convert_batch,
+        name="document-reader-featured",
+        daemon=True,
+    )
+    try:
+        thread.start()
+    except Exception as exc:
+        with _conversion_lock:
+            for paper_id in claimed:
+                _converting.discard(paper_id)
+        for paper_id in claimed:
+            _write_status(
+                paper_id,
+                {
+                    "paper_id": paper_id,
+                    "schema_version": DOCUMENT_SCHEMA_VERSION,
+                    "status": "failed",
+                    "started_at": now,
+                    "error": f"每日推荐文本缓存启动失败：{exc}",
+                    "updated_at": datetime.now(UTC).isoformat(),
+                },
+            )
+        logger.exception("Failed to start featured document conversion batch")
+        return []
+    return claimed
+
+
 def _write_status(paper_id: str, payload: dict[str, Any]) -> None:
     root, _cache, status_path = _paths(paper_id)
     root.mkdir(parents=True, exist_ok=True)

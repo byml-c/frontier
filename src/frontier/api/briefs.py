@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query
 from sqlalchemy import or_, select
 from sqlalchemy.orm import Session
 
@@ -11,6 +11,7 @@ from ..database import get_session
 from ..models import Brief, BriefItem, Paper, PaperNode, PaperTag, ResearchNode, Tag
 from ..schemas import BriefCreate, BriefItemCreate
 from ..services.common import get_setting, log_operation, model_dict
+from ..services.document_reader import queue_document_conversions
 from ..services.manual_recommendations import current_analysis_state
 
 router = APIRouter(prefix="/api/briefs", tags=["briefs"])
@@ -208,7 +209,11 @@ def add_brief_item(
 
 
 @router.post("/{brief_id}/publish")
-def publish_brief(brief_id: str, session: Annotated[Session, Depends(get_session)]) -> dict:
+def publish_brief(
+    brief_id: str,
+    background_tasks: BackgroundTasks,
+    session: Annotated[Session, Depends(get_session)],
+) -> dict:
     brief = _brief_or_404(session, brief_id)
     rows = session.execute(
         select(BriefItem, Paper)
@@ -227,6 +232,9 @@ def publish_brief(brief_id: str, session: Annotated[Session, Depends(get_session
     }
     brief.status = "published"
     brief.published_at = datetime.now(UTC)
+    featured_paper_ids = [
+        paper.id for item, paper in rows if item.tier == "featured"
+    ][:4]
     log_operation(
         session,
         actor="agent",
@@ -234,7 +242,13 @@ def publish_brief(brief_id: str, session: Annotated[Session, Depends(get_session
         entity_type="brief",
         entity_id=brief.id,
         task_id=brief.task_id,
-        detail={"item_count": len(rows)},
+        detail={
+            "item_count": len(rows),
+            "text_cache_count": len(featured_paper_ids),
+        },
     )
     session.commit()
-    return _serialize_brief(session, brief)
+    result = _serialize_brief(session, brief)
+    if featured_paper_ids:
+        background_tasks.add_task(queue_document_conversions, featured_paper_ids)
+    return result

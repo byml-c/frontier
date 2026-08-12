@@ -392,6 +392,43 @@ def test_graph_and_brief_snapshot(client: TestClient) -> None:
     )
 
 
+def test_brief_publish_prewarms_only_first_four_featured_papers(
+    client: TestClient,
+    monkeypatch,
+) -> None:
+    queued_batches: list[list[str]] = []
+    monkeypatch.setattr(
+        "frontier.api.briefs.queue_document_conversions",
+        lambda paper_ids: queued_batches.append(list(paper_ids)),
+    )
+    monkeypatch.setattr(
+        "frontier.api.briefs.get_setting",
+        lambda _session, key, default: 6 if key == "featured_limit" else default,
+    )
+    brief = client.post(
+        "/api/briefs",
+        json={"brief_date": "2026-07-30", "title": "Featured text cache test"},
+    ).json()
+    featured_ids = []
+    for index in range(5):
+        paper = create_paper(client, f"Featured cache paper {index}")
+        featured_ids.append(paper["id"])
+        assert client.post(
+            f"/api/briefs/{brief['id']}/items",
+            json={"paper_id": paper["id"], "rank": index + 1, "tier": "featured"},
+        ).status_code == 200
+    related = create_paper(client, "Related paper without text prewarm")
+    assert client.post(
+        f"/api/briefs/{brief['id']}/items",
+        json={"paper_id": related["id"], "rank": 6, "tier": "related"},
+    ).status_code == 200
+
+    published = client.post(f"/api/briefs/{brief['id']}/publish")
+
+    assert published.status_code == 200, published.text
+    assert queued_batches == [featured_ids[:4]]
+
+
 def test_pdf_upload_and_extract(client: TestClient) -> None:
     document = pymupdf.open()
     page = document.new_page()
