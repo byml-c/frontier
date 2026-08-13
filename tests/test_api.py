@@ -255,14 +255,20 @@ def test_papers_are_grouped_by_reading_status(client: TestClient) -> None:
     assert client.post(f"/api/papers/{reading['id']}/start-reading").status_code == 200
     assert client.post(f"/api/papers/{pending['id']}/finish", json={}).status_code == 200
     assert client.post(f"/api/papers/{completed['id']}/finish", json={}).status_code == 200
-    assert client.post(
-        f"/api/papers/{completed['id']}/confirm-feedback",
-        json={"interested": False, "quality": False},
-    ).status_code == 200
-    assert client.post(
-        f"/api/papers/{ignored['id']}/ignore",
-        json={"reason": "not relevant"},
-    ).status_code == 200
+    assert (
+        client.post(
+            f"/api/papers/{completed['id']}/confirm-feedback",
+            json={"interested": False, "quality": False},
+        ).status_code
+        == 200
+    )
+    assert (
+        client.post(
+            f"/api/papers/{ignored['id']}/ignore",
+            json={"reason": "not relevant"},
+        ).status_code
+        == 200
+    )
 
     target_ids = {candidate["id"], reading["id"], pending["id"], completed["id"], ignored["id"]}
     ordered = [
@@ -383,14 +389,20 @@ def test_graph_and_brief_snapshot(client: TestClient) -> None:
     published = client.post(f"/api/briefs/{brief['id']}/publish")
     assert published.status_code == 200
     assert published.json()["items"][0]["paper"]["title"] == brief_paper["title"]
-    assert client.post(
-        f"/api/papers/{brief_paper['id']}/finish",
-        json={"summary": "Reading complete after publication."},
-    ).status_code == 200
-    assert client.post(
-        f"/api/papers/{brief_paper['id']}/confirm-feedback",
-        json={"interested": False, "quality": False},
-    ).status_code == 200
+    assert (
+        client.post(
+            f"/api/papers/{brief_paper['id']}/finish",
+            json={"summary": "Reading complete after publication."},
+        ).status_code
+        == 200
+    )
+    assert (
+        client.post(
+            f"/api/papers/{brief_paper['id']}/confirm-feedback",
+            json={"interested": False, "quality": False},
+        ).status_code
+        == 200
+    )
     historical = client.get(f"/api/briefs/{brief['id']}").json()
     assert historical["items"][0]["paper"]["completion_summary"] == (
         "Reading complete after publication."
@@ -413,10 +425,13 @@ def test_daily_brief_excludes_papers_that_are_being_or_have_been_read(
     completed = create_paper(client, "Already completed")
     assert client.post(f"/api/papers/{reading['id']}/start-reading").status_code == 200
     assert client.post(f"/api/papers/{completed['id']}/finish", json={}).status_code == 200
-    assert client.post(
-        f"/api/papers/{completed['id']}/confirm-feedback",
-        json={"interested": False, "quality": False},
-    ).status_code == 200
+    assert (
+        client.post(
+            f"/api/papers/{completed['id']}/confirm-feedback",
+            json={"interested": False, "quality": False},
+        ).status_code
+        == 200
+    )
 
     today = datetime.now(ZoneInfo("Asia/Shanghai")).date().isoformat()
     brief = client.post(
@@ -424,10 +439,13 @@ def test_daily_brief_excludes_papers_that_are_being_or_have_been_read(
         json={"brief_date": today, "title": "Unread-only daily brief"},
     ).json()
     for rank, paper in enumerate((candidate, other_candidate), start=1):
-        assert client.post(
-            f"/api/briefs/{brief['id']}/items",
-            json={"paper_id": paper["id"], "rank": rank, "tier": "featured"},
-        ).status_code == 200
+        assert (
+            client.post(
+                f"/api/briefs/{brief['id']}/items",
+                json={"paper_id": paper["id"], "rank": rank, "tier": "featured"},
+            ).status_code
+            == 200
+        )
     for paper in (reading, completed):
         rejected = client.post(
             f"/api/briefs/{brief['id']}/items",
@@ -465,10 +483,13 @@ def test_brief_publish_drops_papers_that_started_reading_after_ranking(
         json={"brief_date": "2026-07-28", "title": "Publish race test"},
     ).json()
     for rank, paper in enumerate((stale, eligible), start=1):
-        assert client.post(
-            f"/api/briefs/{brief['id']}/items",
-            json={"paper_id": paper["id"], "rank": rank, "tier": "featured"},
-        ).status_code == 200
+        assert (
+            client.post(
+                f"/api/briefs/{brief['id']}/items",
+                json={"paper_id": paper["id"], "rank": rank, "tier": "featured"},
+            ).status_code
+            == 200
+        )
     assert client.post(f"/api/papers/{stale['id']}/start-reading").status_code == 200
 
     published = client.post(f"/api/briefs/{brief['id']}/publish")
@@ -498,15 +519,21 @@ def test_brief_publish_prewarms_only_first_four_featured_papers(
     for index in range(5):
         paper = create_paper(client, f"Featured cache paper {index}")
         featured_ids.append(paper["id"])
-        assert client.post(
-            f"/api/briefs/{brief['id']}/items",
-            json={"paper_id": paper["id"], "rank": index + 1, "tier": "featured"},
-        ).status_code == 200
+        assert (
+            client.post(
+                f"/api/briefs/{brief['id']}/items",
+                json={"paper_id": paper["id"], "rank": index + 1, "tier": "featured"},
+            ).status_code
+            == 200
+        )
     related = create_paper(client, "Related paper without text prewarm")
-    assert client.post(
-        f"/api/briefs/{brief['id']}/items",
-        json={"paper_id": related["id"], "rank": 6, "tier": "related"},
-    ).status_code == 200
+    assert (
+        client.post(
+            f"/api/briefs/{brief['id']}/items",
+            json={"paper_id": related["id"], "rank": 6, "tier": "related"},
+        ).status_code
+        == 200
+    )
 
     published = client.post(f"/api/briefs/{brief['id']}/publish")
 
@@ -850,6 +877,18 @@ def test_streamed_conversation_persists_activity_with_answer(
     def fake_stream(*_args, **_kwargs):
         yield {"type": "thread", "thread_id": "thread-with-activity"}
         yield {
+            "type": "runtime",
+            "model": "gpt-5.4",
+            "model_provider": "openai",
+            "reasoning_effort": "high",
+        }
+        yield {
+            "type": "usage",
+            "current_tokens": 1024,
+            "context_window": 32768,
+            "total_tokens": 1536,
+        }
+        yield {
             "type": "activity",
             "activity_id": "tool-1",
             "kind": "tool",
@@ -874,10 +913,22 @@ def test_streamed_conversation_persists_activity_with_answer(
         json={"content": "请分析"},
     )
     assert response.status_code == 200, response.text
+    assert '"type": "runtime"' in response.text
+    assert '"type": "usage"' in response.text
     detail = client.get(f"/api/conversations/{conversation['id']}").json()
     assistant = detail["messages"][-1]
     assert assistant["content"] == "**结论** 正文"
     assert assistant["context_json"]["stream_status"] == "completed"
+    assert assistant["context_json"]["runtime"] == {
+        "model": "gpt-5.4",
+        "model_provider": "openai",
+        "reasoning_effort": "high",
+    }
+    assert assistant["context_json"]["usage"] == {
+        "current_tokens": 1024,
+        "context_window": 32768,
+        "total_tokens": 1536,
+    }
     activities = assistant["context_json"]["activities"]
     assert next(item for item in activities if item["id"] == "tool-1") == {
         "id": "tool-1",
@@ -890,6 +941,8 @@ def test_streamed_conversation_persists_activity_with_answer(
         "response": "**结论** 正文",
         "activities": activities,
         "stream_status": "completed",
+        "runtime": assistant["context_json"]["runtime"],
+        "usage": assistant["context_json"]["usage"],
     }
 
 
@@ -903,6 +956,8 @@ def test_streamed_conversation_persists_partial_answer_and_failed_activity(
 
     def fake_stream(*_args, **_kwargs):
         yield {"type": "thread", "thread_id": "thread-partial"}
+        yield {"type": "runtime", "model": "gpt-5.4", "reasoning_effort": "medium"}
+        yield {"type": "usage", "current_tokens": 400, "context_window": 8192}
         yield {
             "type": "activity",
             "activity_id": "reason-1",
@@ -931,9 +986,62 @@ def test_streamed_conversation_persists_partial_answer_and_failed_activity(
     assert assistant["context_json"]["stream_error"] == "模型连接中断"
     assert assistant["context_json"]["activities"][-1]["status"] == "failed"
     assert assistant["context_json"]["activities"][-1]["label"] == "Agent 响应未完成"
+    assert assistant["context_json"]["runtime"] == {
+        "model": "gpt-5.4",
+        "reasoning_effort": "medium",
+    }
+    assert assistant["context_json"]["usage"] == {
+        "current_tokens": 400,
+        "context_window": 8192,
+    }
     task = client.get(f"/api/tasks/{assistant['context_json']['task_id']}").json()
     assert task["status"] == "failed"
     assert task["result_json"]["response"] == "已经生成的部分回答"
+
+
+def test_streamed_conversation_keeps_runtime_usage_when_cancelled(
+    client: TestClient,
+    monkeypatch,
+) -> None:
+    from frontier.api import conversations
+    from frontier.database import SessionLocal
+    from frontier.models import TaskRun
+
+    monkeypatch.setattr(conversations.settings, "enable_codex_runs", True)
+
+    def fake_stream(*_args, **kwargs):
+        yield {"type": "runtime", "model": "gpt-5.4", "reasoning_effort": "high"}
+        yield {"type": "usage", "current_tokens": 640, "context_window": 8192}
+        with SessionLocal() as session:
+            task = session.get(TaskRun, kwargs["run_id"])
+            assert task is not None
+            task.status = "cancelled"
+            session.commit()
+        raise RuntimeError("process terminated")
+
+    monkeypatch.setattr(conversations, "stream_codex_prompt", fake_stream)
+    conversation = client.post(
+        "/api/conversations", json={"kind": "global", "title": "Cancelled usage"}
+    ).json()
+    response = client.post(
+        f"/api/conversations/{conversation['id']}/messages/stream",
+        json={"content": "发错的消息"},
+    )
+    assert response.status_code == 200, response.text
+
+    assistant = client.get(f"/api/conversations/{conversation['id']}").json()["messages"][-1]
+    assert assistant["context_json"]["stream_status"] == "cancelled"
+    assert assistant["context_json"]["runtime"] == {
+        "model": "gpt-5.4",
+        "reasoning_effort": "high",
+    }
+    assert assistant["context_json"]["usage"] == {
+        "current_tokens": 640,
+        "context_window": 8192,
+    }
+    task = client.get(f"/api/tasks/{assistant['context_json']['task_id']}").json()
+    assert task["result_json"]["runtime"] == assistant["context_json"]["runtime"]
+    assert task["result_json"]["usage"] == assistant["context_json"]["usage"]
 
 
 def test_service_startup_marks_orphaned_conversation_draft_as_interrupted(
@@ -965,6 +1073,8 @@ def test_service_startup_marks_orphaned_conversation_draft_as_interrupted(
                         "status": "running",
                     }
                 ],
+                "runtime": {"model": "gpt-5.4", "reasoning_effort": "high"},
+                "usage": {"current_tokens": 2048, "context_window": 32768},
             },
         )
         session.add(assistant)
@@ -980,6 +1090,8 @@ def test_service_startup_marks_orphaned_conversation_draft_as_interrupted(
     task = client.get(f"/api/tasks/{task_id}").json()
     assert task["status"] == "failed"
     assert task["result_json"]["stream_status"] == "interrupted"
+    assert task["result_json"]["runtime"] == recovered["context_json"]["runtime"]
+    assert task["result_json"]["usage"] == recovered["context_json"]["usage"]
 
 
 def test_metadata_generation_can_be_requested_without_adding_a_brief_item(

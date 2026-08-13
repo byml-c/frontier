@@ -67,7 +67,7 @@ def _load_toml(path: Path) -> dict[str, Any]:
     return value if isinstance(value, dict) else {}
 
 
-def _codex_runtime_config(environment: dict[str, str]) -> dict[str, str]:
+def _codex_runtime_config(environment: dict[str, str]) -> dict[str, Any]:
     """Resolve the model settings that the service-check command will use."""
     home = Path(environment.get("CODEX_HOME") or Path(environment.get("HOME", "~")).expanduser() / ".codex")
     base = _load_toml(home / "config.toml")
@@ -78,17 +78,25 @@ def _codex_runtime_config(environment: dict[str, str]) -> dict[str, str]:
         if isinstance(inline_profiles, dict) and isinstance(inline_profiles.get(profile), dict):
             resolved.update(inline_profiles[profile])
         resolved.update(_load_toml(home / f"{profile}.config.toml"))
-    result: dict[str, str] = {}
+    result: dict[str, Any] = {}
     model = resolved.get("model")
+    model_provider = resolved.get("model_provider")
     reasoning_effort = resolved.get("model_reasoning_effort")
+    context_window = resolved.get("model_context_window")
     if isinstance(model, str) and model.strip():
         result["model"] = model.strip()
+    if isinstance(model_provider, str) and model_provider.strip():
+        result["model_provider"] = model_provider.strip()
     if isinstance(reasoning_effort, str) and reasoning_effort.strip():
         result["reasoning_effort"] = reasoning_effort.strip()
+    if isinstance(context_window, int) and context_window > 0:
+        result["context_window"] = context_window
+    if profile:
+        result["profile"] = profile
     return result
 
 
-def _codex_command(runtime: dict[str, str] | None = None) -> list[str]:
+def _codex_command(runtime: dict[str, Any] | None = None) -> list[str]:
     command = [
         settings.codex_command,
         "exec",
@@ -179,12 +187,23 @@ def check_codex_service(timeout_seconds: float = 30) -> dict[str, Any]:
             completed.stderr or completed.stdout,
             secrets=_environment_secrets(environment),
         )
-        return _result(
-            "codex",
-            "error",
-            started_at,
-            f"Codex 调用失败（退出码 {completed.returncode}）：{detail}",
-        )
+        if "model provider" in detail.lower() and "not found" in detail.lower():
+            profile = runtime.get("profile")
+            profile_hint = f"FRONTIER_CODEX_PROFILE={profile}；" if profile else ""
+            detail = (
+                f"{detail}。{profile_hint}请确认运行服务的用户在 $CODEX_HOME/config.toml "
+                "或所选 profile 文件中定义了对应的 [model_providers.<id>]；"
+                "若要使用默认 OpenAI provider，请移除 FRONTIER_CODEX_PROFILE"
+            )
+        return {
+            **_result(
+                "codex",
+                "error",
+                started_at,
+                f"Codex 调用失败（退出码 {completed.returncode}）：{detail}",
+            ),
+            **runtime,
+        }
     if not _has_codex_response(completed.stdout):
         return _result(
             "codex",

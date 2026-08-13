@@ -4,6 +4,19 @@ from frontier import interactive_stream
 from frontier.interactive_stream import CodexStreamError, _tool_activity
 
 
+def test_app_server_command_uses_configured_profile(monkeypatch) -> None:
+    monkeypatch.setattr(interactive_stream.settings, "codex_profile", "openai")
+
+    command = interactive_stream._app_server_command()
+
+    assert command[:4] == [
+        interactive_stream.settings.codex_command,
+        "--profile",
+        "openai",
+        "app-server",
+    ]
+
+
 def test_failed_command_is_exposed_as_failed_activity() -> None:
     activity = _tool_activity(
         {
@@ -100,8 +113,7 @@ def test_added_paper_activity_uses_returned_title() -> None:
             "type": "commandExecution",
             "command": "uv run frontier paper add-arxiv 2608.10232",
             "aggregatedOutput": (
-                'warning before json\n{"id": "paper-1", '
-                '"title": "A Generalist Tactile Policy"}'
+                'warning before json\n{"id": "paper-1", "title": "A Generalist Tactile Policy"}'
             ),
             "exitCode": 0,
         },
@@ -210,20 +222,65 @@ def test_stream_turn_exposes_public_activity_without_mixing_commentary(
     assert turn_start["params"]["summary"] == "concise"
 
 
-def test_stream_turn_recovers_missing_rollout_with_new_thread(monkeypatch) -> None:
-    writes: list[dict] = []
+def test_stream_turn_exposes_runtime_and_normalized_token_usage(monkeypatch) -> None:
     responses = iter(
         [
-            CodexStreamError(
-                "no rollout found for thread id 019ff168-56dd-7622-8f68-fe5d25b3f6d0"
-            ),
-            {"thread": {"id": "thread-recovered"}},
+            {
+                "thread": {"id": "thread-runtime"},
+                "model": "gpt-5.4",
+                "modelProvider": "openai",
+                "reasoningEffort": "high",
+                "baseUrl": "https://must-not-be-exposed.example",
+            },
             {},
         ]
     )
     messages = iter(
-        [{"method": "turn/completed", "params": {"turn": {"status": "completed"}}}]
+        [
+            {
+                "method": "thread/tokenUsage/updated",
+                "params": {
+                    "threadId": "thread-runtime",
+                    "tokenUsage": {
+                        "last": {"inputTokens": 90, "totalTokens": 128},
+                        "total": {"inputTokens": 190, "totalTokens": 256},
+                        "modelContextWindow": 4096,
+                    },
+                },
+            },
+            {"method": "turn/completed", "params": {"turn": {"status": "completed"}}},
+        ]
     )
+    monkeypatch.setattr(interactive_stream, "_write_message", lambda *_args: None)
+    monkeypatch.setattr(interactive_stream, "_await_response", lambda *_args: next(responses))
+    monkeypatch.setattr(interactive_stream, "_read_message", lambda *_args: next(messages))
+
+    events = list(interactive_stream._stream_turn(object(), "test prompt"))  # type: ignore[arg-type]
+
+    assert next(event for event in events if event["type"] == "runtime") == {
+        "type": "runtime",
+        "model": "gpt-5.4",
+        "model_provider": "openai",
+        "reasoning_effort": "high",
+    }
+    assert next(event for event in events if event["type"] == "usage") == {
+        "type": "usage",
+        "current_tokens": 128,
+        "context_window": 4096,
+        "total_tokens": 256,
+    }
+
+
+def test_stream_turn_recovers_missing_rollout_with_new_thread(monkeypatch) -> None:
+    writes: list[dict] = []
+    responses = iter(
+        [
+            CodexStreamError("no rollout found for thread id 019ff168-56dd-7622-8f68-fe5d25b3f6d0"),
+            {"thread": {"id": "thread-recovered"}},
+            {},
+        ]
+    )
+    messages = iter([{"method": "turn/completed", "params": {"turn": {"status": "completed"}}}])
 
     def await_response(*_args):
         response = next(responses)
@@ -254,9 +311,7 @@ def test_stream_turn_recovers_missing_rollout_with_new_thread(monkeypatch) -> No
         "turn/start",
     ]
     assert writes[2]["params"]["input"][0]["text"] == "persisted history and current prompt"
-    assert any(
-        event.get("activity_id") == "conversation-recovery" for event in events
-    )
+    assert any(event.get("activity_id") == "conversation-recovery" for event in events)
     assert next(event for event in events if event["type"] == "thread")["thread_id"] == (
         "thread-recovered"
     )

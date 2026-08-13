@@ -165,6 +165,41 @@ export type Conversation = {
   messages: Message[];
 };
 
+export type AgentRuntime = {
+  model?: string;
+  reasoning_effort?: string;
+  model_provider?: string;
+};
+
+export type AgentUsage = {
+  current_tokens?: number;
+  context_window?: number;
+  total_tokens?: number;
+  input_tokens?: number;
+  output_tokens?: number;
+  cached_input_tokens?: number;
+};
+
+export type AgentRuntimeState = {
+  runtime?: AgentRuntime;
+  usage?: AgentUsage;
+};
+
+export type ServiceCheck = {
+  service: "codex" | "translation" | "arxiv";
+  ok: boolean;
+  status: "ok" | "error" | "disabled";
+  latency_ms: number;
+  message: string;
+  checked_at: string;
+  model?: string;
+  reasoning_effort?: string;
+  model_provider?: string;
+  context_window?: number;
+};
+
+export type LatestServiceChecks = Record<ServiceCheck["service"], ServiceCheck | null>;
+
 export type TaskRun = {
   id: string;
   kind: string;

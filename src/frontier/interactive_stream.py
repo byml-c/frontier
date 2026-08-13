@@ -79,7 +79,10 @@ def is_missing_codex_thread_error(error: BaseException | str) -> bool:
 
 
 def _app_server_command() -> list[str]:
-    command = [settings.codex_command, "app-server"]
+    command = [settings.codex_command]
+    if settings.codex_profile:
+        command.extend(["--profile", settings.codex_profile])
+    command.append("app-server")
     if settings.codex_sandbox == "workspace-write" and settings.codex_network_access:
         command.extend(["-c", "sandbox_workspace_write.network_access=true"])
     command.append("--stdio")
@@ -184,6 +187,49 @@ def _thread_id(result: dict[str, Any]) -> str:
     if not isinstance(value, str) or not value:
         raise CodexStreamError("Codex app-server did not return a thread id")
     return value
+
+
+def _runtime_event(result: dict[str, Any]) -> dict[str, Any] | None:
+    """Expose only non-sensitive runtime identity returned by Codex app-server."""
+    fields = {
+        "model": result.get("model"),
+        "model_provider": result.get("modelProvider"),
+        "reasoning_effort": result.get("reasoningEffort"),
+    }
+    runtime = {
+        key: value.strip()
+        for key, value in fields.items()
+        if isinstance(value, str) and value.strip()
+    }
+    return {"type": "runtime", **runtime} if runtime else None
+
+
+def _nonnegative_int(value: Any) -> int | None:
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or value < 0:
+        return None
+    return int(value)
+
+
+def _usage_event(params: Any) -> dict[str, Any] | None:
+    """Normalize app-server token usage without forwarding provider payloads."""
+    if not isinstance(params, dict):
+        return None
+    token_usage = params.get("tokenUsage")
+    if not isinstance(token_usage, dict):
+        return None
+    last = token_usage.get("last")
+    total = token_usage.get("total")
+    fields = {
+        "current_tokens": _nonnegative_int(
+            last.get("totalTokens") if isinstance(last, dict) else None
+        ),
+        "context_window": _nonnegative_int(token_usage.get("modelContextWindow")),
+        "total_tokens": _nonnegative_int(
+            total.get("totalTokens") if isinstance(total, dict) else None
+        ),
+    }
+    usage = {key: value for key, value in fields.items() if value is not None}
+    return {"type": "usage", **usage} if usage else None
 
 
 def _short_public_text(value: Any, limit: int = 600) -> str:
@@ -335,9 +381,19 @@ def _tool_activity(item: dict[str, Any], status: str) -> dict[str, Any] | None:
         exit_code = item.get("exitCode")
         duration = item.get("durationMs")
         failed = failed or (exit_code is not None and exit_code != 0)
-        label = actions[0] if status == "running" else f"{actions[0].removeprefix('正在')}失败" if failed else actions[1]
+        label = (
+            actions[0]
+            if status == "running"
+            else f"{actions[0].removeprefix('正在')}失败"
+            if failed
+            else actions[1]
+        )
         if status != "running":
-            detail = "调用失败" if failed else _frontier_result_detail(command, output_payload) or "调用成功"
+            detail = (
+                "调用失败"
+                if failed
+                else _frontier_result_detail(command, output_payload) or "调用成功"
+            )
             if isinstance(duration, int):
                 detail += f" · {duration / 1000:.1f} 秒"
     elif item_type in {"mcpToolCall", "dynamicToolCall"}:
@@ -427,6 +483,9 @@ def _stream_turn(
         result = _await_response(process, thread_request_id)
     thread_id = _thread_id(result)
     yield {"type": "thread", "thread_id": thread_id}
+    runtime_event = _runtime_event(result)
+    if runtime_event:
+        yield runtime_event
     if recovered:
         yield {
             "type": "activity",
@@ -464,7 +523,11 @@ def _stream_turn(
         message = _read_message(process)
         method = message.get("method")
         params = message.get("params", {})
-        if method == "item/started":
+        if method == "thread/tokenUsage/updated":
+            usage_event = _usage_event(params)
+            if usage_event:
+                yield usage_event
+        elif method == "item/started":
             item = params.get("item", {})
             if not isinstance(item, dict):
                 continue

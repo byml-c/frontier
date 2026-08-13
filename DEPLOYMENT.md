@@ -30,6 +30,10 @@ FRONTIER_OUTBOUND_PROXY=http://127.0.0.1:7890
 Frontier 本机 API 会通过 `NO_PROXY` 保持直连。修改后需要重启 `frontier.service`。
 不要把 Codex API key 写进项目 `.env`；继续使用该用户已有的 Codex 配置。划词翻译的独立模型只写入 `translation.env`：
 
+`FRONTIER_CODEX_PROFILE` 只用于显式选择 `$CODEX_HOME/<name>.config.toml`。
+默认配置已经可用时应保持未设置；它不是 provider 名称，也不会自动创建
+`[model_providers.<id>]`。
+
 ```dotenv
 OPENAI_API_KEY=你的翻译模型密钥
 BASE_URL=https://你的兼容接口/v1

@@ -50,8 +50,10 @@ def _completed_activities(activity_log: list[dict], *, failed: bool = False) -> 
         {
             **activity,
             "status": (
-                "failed" if failed and activity["status"] == "running"
-                else "completed" if activity["status"] == "running"
+                "failed"
+                if failed and activity["status"] == "running"
+                else "completed"
+                if activity["status"] == "running"
                 else activity["status"]
             ),
         }
@@ -74,6 +76,48 @@ def _failed_activities(activity_log: list[dict], detail: str) -> list[dict]:
     return activities
 
 
+def _runtime_usage_payload(
+    runtime: dict[str, str] | None,
+    usage: dict[str, int] | None,
+) -> dict[str, dict]:
+    payload: dict[str, dict] = {}
+    if runtime:
+        payload["runtime"] = dict(runtime)
+    if usage:
+        payload["usage"] = dict(usage)
+    return payload
+
+
+def _persist_cancelled_turn(
+    task: TaskRun | None,
+    assistant: Message | None,
+    *,
+    task_id: str,
+    content: str,
+    activities: list[dict],
+    runtime: dict[str, str],
+    usage: dict[str, int],
+) -> None:
+    """Keep the last observable runtime snapshot when cancellation wins a race."""
+    payload = {
+        "response": content,
+        "activities": activities,
+        "stream_status": "cancelled",
+        **_runtime_usage_payload(runtime, usage),
+    }
+    if task:
+        task.result_json = payload
+    if assistant:
+        assistant.content = content
+        assistant.context_json = {
+            **(assistant.context_json or {}),
+            "task_id": task_id,
+            "stream_status": "cancelled",
+            "activities": activities,
+            **_runtime_usage_payload(runtime, usage),
+        }
+
+
 def _persist_stream_snapshot(
     task_id: str,
     assistant_id: str,
@@ -83,12 +127,15 @@ def _persist_stream_snapshot(
     stream_status: str,
     thread_id: str | None = None,
     error: str | None = None,
+    runtime: dict[str, str] | None = None,
+    usage: dict[str, int] | None = None,
 ) -> None:
     """Persist enough state for a conversation turn to survive a browser refresh."""
     snapshot = {
         "response": content,
         "activities": activities,
         "stream_status": stream_status,
+        **_runtime_usage_payload(runtime, usage),
     }
     with SessionLocal() as snapshot_session:
         task = snapshot_session.get(TaskRun, task_id)
@@ -109,6 +156,7 @@ def _persist_stream_snapshot(
                 "stream_status": stream_status,
                 "activities": activities,
                 **({"stream_error": error} if error else {}),
+                **_runtime_usage_payload(runtime, usage),
             }
         snapshot_session.commit()
 
@@ -147,6 +195,10 @@ def mark_orphaned_conversation_streams() -> int:
                 "response": message.content,
                 "activities": failed_activities,
                 "stream_status": "interrupted",
+                **_runtime_usage_payload(
+                    context.get("runtime") if isinstance(context.get("runtime"), dict) else None,
+                    context.get("usage") if isinstance(context.get("usage"), dict) else None,
+                ),
             }
             updated += 1
         if updated:
@@ -296,6 +348,8 @@ def stream_message(
         last_snapshot_at = 0.0
         last_snapshot_length = 0
         terminal = False
+        runtime: dict[str, str] = {}
+        usage: dict[str, int] = {}
 
         def persist_snapshot(
             stream_status: str = "running",
@@ -306,7 +360,11 @@ def stream_message(
         ) -> None:
             nonlocal last_snapshot_at, last_snapshot_length
             now = time.monotonic()
-            if not force and now - last_snapshot_at < 0.35 and len(content) - last_snapshot_length < 384:
+            if (
+                not force
+                and now - last_snapshot_at < 0.35
+                and len(content) - last_snapshot_length < 384
+            ):
                 return
             _persist_stream_snapshot(
                 task.id,
@@ -316,6 +374,8 @@ def stream_message(
                 stream_status=stream_status,
                 thread_id=thread_id,
                 error=error,
+                runtime=runtime,
+                usage=usage,
             )
             last_snapshot_at = now
             last_snapshot_length = len(content)
@@ -339,8 +399,7 @@ def stream_message(
                 activity_log[index] = normalized
             persist_snapshot(
                 force=(
-                    normalized["status"] != "running"
-                    or normalized["kind"] in {"tool", "status"}
+                    normalized["status"] != "running" or normalized["kind"] in {"tool", "status"}
                 )
             )
             return encode_stream_event("activity", **event)
@@ -385,6 +444,25 @@ def stream_message(
                         label="Agent 已连接",
                         status="completed",
                     )
+                elif event["type"] == "runtime":
+                    runtime = {
+                        key: value
+                        for key, value in event.items()
+                        if key in {"model", "model_provider", "reasoning_effort"}
+                        and isinstance(value, str)
+                    }
+                    persist_snapshot(force=True)
+                    yield encode_stream_event("runtime", **runtime)
+                elif event["type"] == "usage":
+                    usage = {
+                        key: value
+                        for key, value in event.items()
+                        if key in {"current_tokens", "context_window", "total_tokens"}
+                        and isinstance(value, int)
+                        and not isinstance(value, bool)
+                    }
+                    persist_snapshot(force=True)
+                    yield encode_stream_event("usage", **usage)
                 elif event["type"] == "delta":
                     content += event["delta"]
                     persist_snapshot()
@@ -398,6 +476,16 @@ def stream_message(
                 running = runner_session.get(TaskRun, task.id)
                 assistant = runner_session.get(Message, assistant_id)
                 if running and running.status == "cancelled":
+                    _persist_cancelled_turn(
+                        running,
+                        assistant,
+                        task_id=task.id,
+                        content=content,
+                        activities=cancelled_activities(activity_log),
+                        runtime=runtime,
+                        usage=usage,
+                    )
+                    runner_session.commit()
                     terminal = True
                     yield encode_stream_event("cancelled", task_id=task.id)
                     return
@@ -414,6 +502,7 @@ def stream_message(
                             "response": content,
                             "activities": completed_activities,
                             "stream_status": "completed",
+                            **_runtime_usage_payload(runtime, usage),
                         },
                         finished_at=utcnow(),
                     )
@@ -422,6 +511,16 @@ def stream_message(
                     runner_session.rollback()
                     current = runner_session.get(TaskRun, task.id)
                     if current and current.status == "cancelled":
+                        _persist_cancelled_turn(
+                            current,
+                            runner_session.get(Message, assistant_id),
+                            task_id=task.id,
+                            content=content,
+                            activities=cancelled_activities(activity_log),
+                            runtime=runtime,
+                            usage=usage,
+                        )
+                        runner_session.commit()
                         terminal = True
                         yield encode_stream_event("cancelled", task_id=task.id)
                         return
@@ -432,6 +531,7 @@ def stream_message(
                     "task_id": task.id,
                     "stream_status": "completed",
                     "activities": completed_activities,
+                    **_runtime_usage_payload(runtime, usage),
                 }
                 if current_conversation:
                     current_conversation.codex_session_id = thread_id
@@ -446,20 +546,15 @@ def stream_message(
                 if cancelled:
                     cancelled_activity_log = cancelled_activities(activity_log)
                     cancelled_assistant = runner_session.get(Message, assistant_id)
-                    if cancelled_assistant:
-                        cancelled_assistant.content = content
-                        cancelled_assistant.context_json = {
-                            **(cancelled_assistant.context_json or {}),
-                            "task_id": task.id,
-                            "stream_status": "cancelled",
-                            "activities": cancelled_activity_log,
-                        }
-                    if running:
-                        running.result_json = {
-                            "response": content,
-                            "activities": cancelled_activity_log,
-                            "stream_status": "cancelled",
-                        }
+                    _persist_cancelled_turn(
+                        running,
+                        cancelled_assistant,
+                        task_id=task.id,
+                        content=content,
+                        activities=cancelled_activity_log,
+                        runtime=runtime,
+                        usage=usage,
+                    )
                     runner_session.commit()
                 else:
                     failed_activities = _failed_activities(activity_log, str(exc))
@@ -470,6 +565,7 @@ def stream_message(
                         "response": content,
                         "activities": failed_activities,
                         "stream_status": "failed",
+                        **_runtime_usage_payload(runtime, usage),
                     }
                     running.finished_at = utcnow()
                 failed_assistant = runner_session.get(Message, assistant_id)
@@ -480,6 +576,7 @@ def stream_message(
                         "stream_status": "failed",
                         "stream_error": str(exc),
                         "activities": failed_activities,
+                        **_runtime_usage_payload(runtime, usage),
                     }
                 runner_session.commit()
             terminal = True
@@ -494,13 +591,24 @@ def stream_message(
                 with SessionLocal() as runner_session:
                     running = runner_session.get(TaskRun, task.id)
                     cancelled = bool(running and running.status == "cancelled")
-                    if running and not cancelled and running.status in {"queued", "running"}:
+                    if cancelled:
+                        _persist_cancelled_turn(
+                            running,
+                            runner_session.get(Message, assistant_id),
+                            task_id=task.id,
+                            content=content,
+                            activities=cancelled_activities(activity_log),
+                            runtime=runtime,
+                            usage=usage,
+                        )
+                    elif running and running.status in {"queued", "running"}:
                         running.status = "failed"
                         running.error = interruption
                         running.result_json = {
                             "response": content,
                             "activities": interrupted_activities,
                             "stream_status": "interrupted",
+                            **_runtime_usage_payload(runtime, usage),
                         }
                         running.finished_at = utcnow()
                     interrupted_assistant = runner_session.get(Message, assistant_id)
@@ -511,6 +619,7 @@ def stream_message(
                             "stream_status": "interrupted",
                             "stream_error": interruption,
                             "activities": interrupted_activities,
+                            **_runtime_usage_payload(runtime, usage),
                         }
                     runner_session.commit()
 

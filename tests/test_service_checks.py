@@ -77,7 +77,8 @@ def test_codex_check_reports_and_pins_profile_model_settings(monkeypatch, tmp_pa
         encoding="utf-8",
     )
     (tmp_path / "research.config.toml").write_text(
-        'model = "profile-model"\nmodel_reasoning_effort = "high"\n',
+        'model = "profile-model"\nmodel_provider = "openai"\n'
+        'model_reasoning_effort = "high"\nmodel_context_window = 200000\n',
         encoding="utf-8",
     )
     captured: dict = {}
@@ -98,13 +99,43 @@ def test_codex_check_reports_and_pins_profile_model_settings(monkeypatch, tmp_pa
     result = service_checks.check_codex_service()
 
     assert result["model"] == "profile-model"
+    assert result["model_provider"] == "openai"
     assert result["reasoning_effort"] == "high"
+    assert result["context_window"] == 200000
+    assert result["profile"] == "research"
     assert captured["command"][-5:-1] == [
         "--model",
         "profile-model",
         "--config",
         'model_reasoning_effort="high"',
     ]
+
+
+def test_codex_check_explains_missing_profile_provider(monkeypatch, tmp_path) -> None:
+    (tmp_path / "deepseek.config.toml").write_text(
+        'model = "deepseek-chat"\nmodel_provider = "deepseek"\n',
+        encoding="utf-8",
+    )
+
+    def run(command, **_kwargs):
+        return subprocess.CompletedProcess(
+            command,
+            1,
+            stdout="",
+            stderr="failed to load configuration: Model provider `deepseek` not found",
+        )
+
+    monkeypatch.setenv("CODEX_HOME", str(tmp_path))
+    monkeypatch.setattr(settings, "enable_codex_runs", True)
+    monkeypatch.setattr(settings, "codex_profile", "deepseek")
+    monkeypatch.setattr(service_checks.subprocess, "run", run)
+
+    result = service_checks.check_codex_service()
+
+    assert result["ok"] is False
+    assert result["model_provider"] == "deepseek"
+    assert "FRONTIER_CODEX_PROFILE=deepseek" in result["message"]
+    assert "[model_providers.<id>]" in result["message"]
 
 
 def test_codex_check_reports_disabled_without_starting_process(monkeypatch) -> None:

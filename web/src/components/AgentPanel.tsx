@@ -21,9 +21,11 @@ import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { FormEvent, useEffect, useRef, useState } from "react";
 import { useLocation } from "react-router-dom";
 import { api, cancelTask, jsonBody, streamApi } from "../api";
-import type { Conversation } from "../types";
+import type { AgentRuntimeState, Conversation } from "../types";
 import { AgentActivity } from "./AgentActivity";
+import { AgentRuntimeStatus } from "./AgentRuntimeStatus";
 import { activitiesFromContext, type AgentActivityItem, failRunningActivities, updateActivities } from "./agentActivityState";
+import { updateAgentStateFromStream } from "./agentRuntimeState";
 import { submitChatOnEnter } from "./chatInput";
 import { ConversationScroller } from "./ConversationScroller";
 import { activeConversationTask, isRequestAbort } from "./conversationTask";
@@ -43,6 +45,7 @@ export function AgentPanel({ open, onClose, width, onWidthChange }: Props) {
   const [activities, setActivities] = useState<AgentActivityItem[]>([]);
   const [error, setError] = useState("");
   const [liveTaskId, setLiveTaskId] = useState<string | null>(null);
+  const [liveAgentState, setLiveAgentState] = useState<AgentRuntimeState>({});
   const [cancelling, setCancelling] = useState(false);
   const streamController = useRef<AbortController | null>(null);
   const cancellingRef = useRef(false);
@@ -76,9 +79,10 @@ export function AgentPanel({ open, onClose, width, onWidthChange }: Props) {
     const controller = new AbortController();
     streamController.current = controller;
     cancellingRef.current = false;
-    setText(""); setLiveUser(content); setStreaming(""); setActivities([]); setError(""); setLiveTaskId(null); setSending(true);
+    setText(""); setLiveUser(content); setStreaming(""); setActivities([]); setError(""); setLiveTaskId(null); setLiveAgentState({}); setSending(true);
     try {
       await streamApi(`/api/conversations/${conversation.data.id}/messages/stream`, { content, context_json: { path: location.pathname } }, (streamEvent) => {
+        setLiveAgentState((value) => updateAgentStateFromStream(value, streamEvent));
         if (streamEvent.type === "meta" && typeof streamEvent.task_id === "string") setLiveTaskId(streamEvent.task_id);
         if (streamEvent.type === "delta") setStreaming((value) => value + String(streamEvent.delta ?? ""));
         if (streamEvent.type === "activity") setActivities((value) => updateActivities(value, streamEvent));
@@ -92,7 +96,7 @@ export function AgentPanel({ open, onClose, width, onWidthChange }: Props) {
       streamController.current = null;
       setSending(false);
       await queryClient.invalidateQueries({ queryKey: ["global-conversation"] });
-      setLiveUser(""); setStreaming(""); setActivities([]); setLiveTaskId(null);
+      setLiveUser(""); setStreaming(""); setActivities([]); setLiveTaskId(null); setLiveAgentState({});
     }
   }
 
@@ -139,6 +143,7 @@ export function AgentPanel({ open, onClose, width, onWidthChange }: Props) {
       </ConversationScroller>
       <Box component="form" onSubmit={submit} sx={{ p: 2, borderTop: 1, borderColor: "divider" }}>
         <TextField fullWidth multiline maxRows={6} minRows={2} value={text} onChange={(event) => setText(event.target.value)} onKeyDown={active ? undefined : submitChatOnEnter} placeholder={active ? "可以先输入修正后的消息，停止后重新发送" : "输入研究问题或整理指令"} InputProps={{ endAdornment: active ? <Tooltip title="停止 Agent"><span><IconButton color="error" aria-label="停止 Agent" onClick={stopAgent} disabled={!activeTaskId || cancelling} sx={{ width: 44, height: 44 }}>{cancelling ? <CircularProgress size={20} /> : <StopRounded />}</IconButton></span></Tooltip> : <IconButton color="primary" type="submit" disabled={!text.trim()}><SendRounded /></IconButton> }} />
+        <AgentRuntimeStatus conversation={conversation.data} liveState={liveAgentState} />
       </Box>
     </Stack>
   </Drawer>;
