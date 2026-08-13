@@ -6,6 +6,7 @@ import {
   agentStateFromStreamEvent,
   contextUsageDetails,
   mergeAgentRuntimeStates,
+  modelDisplayName,
   normalizeAgentUsage,
   updateAgentStateFromStream,
 } from "../src/components/agentRuntimeState.ts";
@@ -70,4 +71,10 @@ test("context percentage is bounded while retaining exact token counts", () => {
     percentLabel: "<1%",
   });
   assert.equal(contextUsageDetails({ current_tokens: 120_000, context_window: 100_000 })?.percent, 100);
+});
+
+test("formats Codex model ids for the compact status label", () => {
+  assert.equal(modelDisplayName("gpt-5.6-sol"), "GPT-5.6-Sol");
+  assert.equal(modelDisplayName("gpt-5.6-terra"), "GPT-5.6-Terra");
+  assert.equal(modelDisplayName(), "模型未检测");
 });

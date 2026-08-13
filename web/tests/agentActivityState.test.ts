@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  activityStepText,
   activitiesFromContext,
   activityPhasesForDisplay,
   agentActivityOutcome,
@@ -58,6 +59,18 @@ test("activity summaries render as plain text instead of Markdown source", () =>
     "Comparing SLIM to JEPA-WAM Reviewing details",
   );
   assert.equal(plainActivitySummary("保留没有配对的 ** 标记"), "保留没有配对的 ** 标记");
+});
+
+test("tool activity label and result share one compact line", () => {
+  assert.equal(
+    activityStepText(activity({
+      id: "tool-1",
+      kind: "tool",
+      label: "已完成研究工具调用",
+      detail: "调用成功 · 0.0 秒",
+    })),
+    "工具：已完成研究工具调用 · 调用成功 · 0.0 秒",
+  );
 });
 
 test("live and persisted activity histories are not truncated to eight items", () => {

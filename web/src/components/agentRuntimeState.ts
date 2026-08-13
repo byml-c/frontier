@@ -125,6 +125,18 @@ export function reasoningEffortLabel(value?: string): string {
   return ({ minimal: "最简", low: "低", medium: "中", high: "高", xhigh: "极高" } as Record<string, string>)[value ?? ""] ?? value ?? "未报告";
 }
 
+export function modelDisplayName(value?: string): string {
+  if (!value) return "模型未检测";
+  return value.split("-").map((part) => {
+    const lower = part.toLowerCase();
+    if (lower === "gpt") return "GPT";
+    if (lower === "sol") return "Sol";
+    if (lower === "terra") return "Terra";
+    if (lower === "luna") return "Luna";
+    return part;
+  }).join("-");
+}
+
 export type ContextUsageDetails = {
   current: number;
   window: number;

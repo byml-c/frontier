@@ -33,6 +33,13 @@ export function plainActivitySummary(value?: string): string {
   return result.trim();
 }
 
+/** Build the compact, single-line label used by activity steps. */
+export function activityStepText(item: AgentActivityItem): string {
+  const prefix = item.kind === "tool" ? "工具：" : "进度：";
+  const detail = plainActivitySummary(item.detail);
+  return `${prefix}${item.label}${detail ? ` · ${detail}` : ""}`;
+}
+
 function activityStatus(items: AgentActivityItem[]): AgentActivityItem["status"] {
   if (items.some((item) => item.status === "running")) return "running";
   if (items.some((item) => item.status === "failed")) return "failed";
