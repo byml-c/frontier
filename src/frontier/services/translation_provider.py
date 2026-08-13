@@ -10,6 +10,7 @@ from pathlib import Path
 import httpx
 
 from ..config import settings
+from .outbound_network import external_httpx_kwargs, outbound_proxy_for
 
 
 class TranslationProviderError(RuntimeError):
@@ -19,7 +20,7 @@ class TranslationProviderError(RuntimeError):
 _provider_lock = threading.Lock()
 _cached_config: tuple[Path, int, int, TranslationProviderConfig] | None = None
 _http_client: httpx.Client | None = None
-_http_client_key: tuple[str, str] | None = None
+_http_client_key: tuple[str, str, str | None] | None = None
 
 
 @dataclass(frozen=True)
@@ -90,7 +91,7 @@ def load_translation_provider_config() -> TranslationProviderConfig:
 
 def _client_for(config: TranslationProviderConfig) -> httpx.Client:
     global _http_client, _http_client_key
-    key = (config.base_url, config.api_key)
+    key = (config.base_url, config.api_key, outbound_proxy_for(config.base_url))
     with _provider_lock:
         if _http_client is None or _http_client_key != key:
             if _http_client is not None:
@@ -99,6 +100,7 @@ def _client_for(config: TranslationProviderConfig) -> httpx.Client:
                 timeout=httpx.Timeout(60, connect=8),
                 limits=httpx.Limits(max_connections=10, max_keepalive_connections=5),
                 headers={"Accept": "text/event-stream"},
+                **external_httpx_kwargs(config.base_url),
             )
             _http_client_key = key
         return _http_client

@@ -18,6 +18,7 @@ from ..config import settings
 from ..models import Paper, PaperVersion
 from ..schemas import PaperCreate
 from .common import log_operation, normalize_title, parse_arxiv_id
+from .outbound_network import external_httpx_kwargs
 
 USER_AGENT = "FrontierResearch/0.1 (personal research assistant)"
 ARXIV_API = "https://export.arxiv.org/api/query"
@@ -175,6 +176,7 @@ def search_arxiv(query: str, max_results: int = 50) -> list[PaperCreate]:
         headers={"User-Agent": USER_AGENT},
         timeout=45,
         follow_redirects=True,
+        **external_httpx_kwargs(ARXIV_API),
     )
     response.raise_for_status()
     feed = feedparser.parse(response.text)
@@ -262,11 +264,13 @@ def ingest_arxiv(session: Session, value: str, *, actor: str = "user") -> tuple[
         raise ValueError("Invalid arXiv ID or URL")
     arxiv_id, _version = parsed
     try:
+        source_url = f"https://arxiv.org/abs/{arxiv_id}"
         response = httpx.get(
-            f"https://arxiv.org/abs/{arxiv_id}",
+            source_url,
             headers={"User-Agent": USER_AGENT},
             timeout=15,
             follow_redirects=True,
+            **external_httpx_kwargs(source_url),
         )
         response.raise_for_status()
         payload = parse_arxiv_abs_html(response.text, arxiv_id)
@@ -288,6 +292,7 @@ def ingest_url(session: Session, url: str, *, actor: str = "user") -> tuple[Pape
         headers={"User-Agent": USER_AGENT},
         timeout=30,
         follow_redirects=True,
+        **external_httpx_kwargs(safe_url),
     )
     response.raise_for_status()
     content_type = response.headers.get("content-type", "")
@@ -375,6 +380,7 @@ def download_paper_pdf(session: Session, paper: Paper) -> Path:
         headers={"User-Agent": USER_AGENT},
         timeout=90,
         follow_redirects=True,
+        **external_httpx_kwargs(safe_url),
     )
     response.raise_for_status()
     if not response.content.startswith(b"%PDF"):

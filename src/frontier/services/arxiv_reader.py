@@ -12,6 +12,8 @@ from urllib.parse import urljoin, urlparse
 import httpx
 from bs4 import BeautifulSoup, Tag
 
+from .outbound_network import external_httpx_kwargs
+
 logger = logging.getLogger(__name__)
 
 ARXIV_HTML_BASE = "https://arxiv.org/html/"
@@ -43,7 +45,12 @@ def convert_from_arxiv_html(
     headers = {"User-Agent": "FrontierResearch/0.1 (personal research reader)"}
     if on_progress:
         on_progress("source", "正在读取 arXiv 源文档", 14, 2)
-    with httpx.Client(headers=headers, follow_redirects=True, timeout=30) as client:
+    with httpx.Client(
+        headers=headers,
+        follow_redirects=True,
+        timeout=30,
+        **external_httpx_kwargs(source_url),
+    ) as client:
         try:
             response = client.get(source_url)
         except httpx.HTTPError as exc:

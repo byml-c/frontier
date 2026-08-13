@@ -17,6 +17,7 @@ from .interactive_stream import register_codex_run, unregister_codex_run
 from .models import Brief, Conversation, Message, Paper, TaskRun, utcnow
 from .services.common import log_operation
 from .services.manual_recommendations import set_manual_analysis_state
+from .services.outbound_network import agent_environment
 from .services.translation_provider import stream_translation_prompt
 
 
@@ -363,11 +364,9 @@ def run_task(task_id: str) -> None:
                 command.extend(["-c", "sandbox_workspace_write.network_access=true"])
             command.append(prompt)
 
-    environment = os.environ.copy()
-    environment["FRONTIER_API_BASE_URL"] = settings.api_base_url
+    environment = agent_environment()
     uv_cache_dir = settings.task_dir / "uv-cache"
     uv_cache_dir.mkdir(parents=True, exist_ok=True)
-    environment["UV_CACHE_DIR"] = str(uv_cache_dir)
     try:
         with log_path.open("w", encoding="utf-8") as log_file:
             process = subprocess.Popen(

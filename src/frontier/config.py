@@ -25,6 +25,7 @@ class Settings(BaseSettings):
     api_base_url: str = "http://127.0.0.1:8000"
     codex_command: str = "codex"
     codex_profile: str | None = None
+    outbound_proxy: str | None = None
     codex_sandbox: str = "workspace-write"
     codex_network_access: bool = True
     translation_env_file: Path = PROJECT_ROOT / "translation.env"

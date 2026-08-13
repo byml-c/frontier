@@ -20,6 +20,14 @@ chmod 600 translation.env
 
 按服务器实际路径修改 `.env`。保持 `FRONTIER_CODEX_SANDBOX=workspace-write` 和
 `FRONTIER_CODEX_NETWORK_ACCESS=true`，使受限 Agent 能访问本机 Server 与论文来源。
+如果服务器通过本机代理访问外部网络，在 `.env` 中设置统一出站代理：
+
+```dotenv
+FRONTIER_OUTBOUND_PROXY=http://127.0.0.1:7890
+```
+
+该配置覆盖 Codex/OpenAI、翻译模型、arXiv API/HTML/PDF 和手动 URL 下载；
+Frontier 本机 API 会通过 `NO_PROXY` 保持直连。修改后需要重启 `frontier.service`。
 不要把 Codex API key 写进项目 `.env`；继续使用该用户已有的 Codex 配置。划词翻译的独立模型只写入 `translation.env`：
 
 ```dotenv

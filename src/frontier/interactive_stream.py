@@ -12,6 +12,7 @@ from collections.abc import Iterator
 from typing import Any
 
 from .config import PROJECT_ROOT, settings
+from .services.outbound_network import agent_environment
 
 
 class CodexStreamError(RuntimeError):
@@ -86,10 +87,7 @@ def _app_server_command() -> list[str]:
 
 
 def _environment() -> dict[str, str]:
-    environment = os.environ.copy()
-    environment["FRONTIER_API_BASE_URL"] = settings.api_base_url
-    environment["UV_CACHE_DIR"] = str(settings.task_dir / "uv-cache")
-    return environment
+    return agent_environment()
 
 
 def _stop_process(process: subprocess.Popen[str] | None) -> None:

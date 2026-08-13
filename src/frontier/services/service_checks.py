@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-import os
 import re
 import subprocess
 import tomllib
@@ -15,6 +14,7 @@ import httpx
 
 from ..config import PROJECT_ROOT, settings
 from .ingest import ARXIV_API, USER_AGENT
+from .outbound_network import agent_environment, external_httpx_kwargs
 from .translation_provider import load_translation_provider_config, stream_translation_prompt
 
 ServiceName = Literal["codex", "translation", "arxiv"]
@@ -140,9 +140,7 @@ def check_codex_service(timeout_seconds: float = 30) -> dict[str, Any]:
             started_at,
             "Codex Agent 已在服务器配置中停用",
         )
-    environment = os.environ.copy()
-    environment["FRONTIER_API_BASE_URL"] = settings.api_base_url
-    environment["UV_CACHE_DIR"] = str(settings.task_dir / "uv-cache")
+    environment = agent_environment()
     runtime = _codex_runtime_config(environment)
     try:
         completed = subprocess.run(
@@ -239,6 +237,7 @@ def check_arxiv_service(timeout_seconds: float = 15) -> dict[str, str | bool | i
             headers={"User-Agent": USER_AGENT},
             timeout=timeout_seconds,
             follow_redirects=True,
+            **external_httpx_kwargs(ARXIV_API),
         )
         response.raise_for_status()
         feed = feedparser.parse(response.content)
