@@ -80,6 +80,22 @@ def test_paper_commands_are_exposed_as_specific_activities() -> None:
         assert activity["label"] == expected
 
 
+def test_shell_page_placeholders_are_not_shown_as_page_numbers() -> None:
+    for command, expected in [
+        ("uv run frontier paper text paper-1 --page $page_num", "已读取论文正文"),
+        (
+            "uv run frontier paper render-page paper-1 ${page_num} --dpi 144",
+            "已读取论文页面图像",
+        ),
+    ]:
+        activity = _tool_activity(
+            {"id": command, "type": "commandExecution", "command": command, "exitCode": 0},
+            "completed",
+        )
+        assert activity is not None
+        assert activity["label"] == expected
+
+
 def test_arxiv_search_activity_includes_a_short_query() -> None:
     activity = _tool_activity(
         {

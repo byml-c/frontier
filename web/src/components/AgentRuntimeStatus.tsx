@@ -51,10 +51,10 @@ function ContextUsageRing({ current, window, percent, percentLabel }: { current:
         role="img"
         tabIndex={0}
         aria-label={tokenLabel}
-        sx={{ position: "relative", display: "inline-flex", flex: "0 0 auto", width: 26, height: 26, alignItems: "center", justifyContent: "center", outline: 0 }}
+        sx={{ position: "relative", display: "inline-flex", flex: "0 0 auto", width: 20, height: 20, alignItems: "center", justifyContent: "center", outline: 0 }}
       >
-        <CircularProgress variant="determinate" value={100} size={26} thickness={3.5} sx={{ color: "action.disabledBackground", position: "absolute" }} />
-        <CircularProgress variant="determinate" value={percent} size={26} thickness={3.5} sx={{ color: percent >= 85 ? "warning.main" : "primary.main", position: "absolute" }} />
+        <CircularProgress variant="determinate" value={100} size={20} thickness={4.4} sx={{ color: "action.disabledBackground", position: "absolute" }} />
+        <CircularProgress variant="determinate" value={percent} size={20} thickness={4.4} sx={{ color: percent >= 85 ? "warning.main" : "primary.main", position: "absolute" }} />
       </Box>
     </Tooltip>
   );

@@ -263,6 +263,13 @@ def _option_value(tokens: list[str], option: str) -> str | None:
     return value.strip("'\"") or None
 
 
+def _page_number(value: str | None) -> str | None:
+    """Keep only concrete positive page numbers for public activity labels."""
+    if value is None or not value.isascii() or not value.isdecimal():
+        return None
+    return value if int(value) > 0 else None
+
+
 def _arxiv_query(tokens: list[str]) -> str | None:
     values: list[str] = []
     for token in tokens[2:]:
@@ -307,13 +314,15 @@ def _frontier_command_actions(command: str, payload: Any = None) -> tuple[str, s
     group, action = tokens[:2]
     if group == "paper":
         if action == "text":
-            page = _option_value(tokens, "--page")
+            page = _page_number(_option_value(tokens, "--page"))
             target = f"论文第 {page} 页正文" if page else "论文正文"
             return f"正在读取{target}", f"已读取{target}"
         if action == "context":
             return "正在载入论文上下文", "已载入论文上下文"
         if action == "render-page":
-            page = tokens[3] if len(tokens) > 3 and not tokens[3].startswith("--") else None
+            page = _page_number(
+                tokens[3] if len(tokens) > 3 and not tokens[3].startswith("--") else None
+            )
             target = f"论文第 {page} 页图像" if page else "论文页面图像"
             return f"正在读取{target}", f"已读取{target}"
         if action == "resources":

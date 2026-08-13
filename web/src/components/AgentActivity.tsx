@@ -94,17 +94,21 @@ function ActivityPhase({ phase, pending, expanded, onToggle }: { phase: AgentAct
         component="button"
         type="button"
         direction="row"
-        alignItems="center"
+        alignItems="flex-start"
         spacing={1}
         aria-expanded={expanded}
         onClick={() => canCollapse && onToggle()}
         sx={{ width: "100%", border: 0, bgcolor: "transparent", color: "text.primary", p: 0, cursor: canCollapse ? "pointer" : "default", textAlign: "left" }}
       >
-        {running ? <CircularProgress size={14} /> : cancelled ? <StopCircleOutlined color="action" sx={{ fontSize: 17 }} /> : failed ? <ErrorOutlineRounded color="error" sx={{ fontSize: 17 }} /> : <PsychologyAltRounded color="action" sx={{ fontSize: 17 }} />}
-        <Typography variant="caption" fontWeight={700}>{phase.kind === "analysis" ? "分析" : "准备"}</Typography>
-        {canCollapse && <KeyboardArrowDownRounded color="action" sx={{ ml: "0!important", fontSize: 17, transition: "transform .18s ease", transform: expanded ? "rotate(180deg)" : "rotate(0deg)" }} />}
-        <Typography variant="caption" color="text.secondary" sx={{ minWidth: 0, flex: 1, whiteSpace: "pre-wrap", overflowWrap: "anywhere" }}>{summary}</Typography>
-        <Typography variant="caption" color={failed ? "error.main" : "text.secondary"} sx={{ ml: "auto!important" }}>{status}</Typography>
+        {running ? <CircularProgress size={14} sx={{ mt: .25, flex: "0 0 auto" }} /> : cancelled ? <StopCircleOutlined color="action" sx={{ fontSize: 17, mt: .1, flex: "0 0 auto" }} /> : failed ? <ErrorOutlineRounded color="error" sx={{ fontSize: 17, mt: .1, flex: "0 0 auto" }} /> : <PsychologyAltRounded color="action" sx={{ fontSize: 17, mt: .1, flex: "0 0 auto" }} />}
+        <Box sx={{ minWidth: 0, flex: 1 }}>
+          <Stack direction="row" alignItems="center" spacing={.5}>
+            <Typography variant="caption" fontWeight={700}>{phase.kind === "analysis" ? "分析" : "准备"}</Typography>
+            {canCollapse && <KeyboardArrowDownRounded color="action" sx={{ fontSize: 17, transition: "transform .18s ease", transform: expanded ? "rotate(180deg)" : "rotate(0deg)" }} />}
+            <Typography variant="caption" color={failed ? "error.main" : "text.secondary"} sx={{ ml: "auto!important", flex: "0 0 auto" }}>{status}</Typography>
+          </Stack>
+          <Typography variant="caption" color="text.secondary" sx={{ display: "block", mt: .15, whiteSpace: "pre-wrap", overflowWrap: "anywhere", wordBreak: "break-word" }}>{summary}</Typography>
+        </Box>
       </Stack>
       <Collapse in={expanded && canCollapse}>
         <Box sx={{ ml: .85, mt: .55, pl: 2, borderLeft: 1, borderColor: "divider" }}>
