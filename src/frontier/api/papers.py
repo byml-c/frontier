@@ -54,6 +54,7 @@ from ..services.document_reader import (
     document_asset,
     document_status,
     queue_document_conversion,
+    queue_document_conversions,
 )
 from ..services.ingest import (
     create_or_update_paper,
@@ -247,6 +248,7 @@ def add_arxiv(
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except Exception as exc:
         raise HTTPException(status_code=502, detail=f"arXiv ingestion failed: {exc}") from exc
+    background_tasks.add_task(queue_document_conversions, [paper.id], limit=1)
     if recommend:
         return _manual_ingest_result(
             session, paper, created, background_tasks, analyze=analyze
@@ -268,6 +270,7 @@ def add_url(
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except Exception as exc:
         raise HTTPException(status_code=502, detail=f"URL ingestion failed: {exc}") from exc
+    background_tasks.add_task(queue_document_conversions, [paper.id], limit=1)
     if recommend:
         return _manual_ingest_result(
             session, paper, created, background_tasks, analyze=analyze
@@ -294,6 +297,7 @@ async def add_pdf(
         paper, created = ingest_pdf_bytes(session, content, file.filename or "upload.pdf")
     except Exception as exc:
         raise HTTPException(status_code=400, detail=f"PDF ingestion failed: {exc}") from exc
+    background_tasks.add_task(queue_document_conversions, [paper.id], limit=1)
     if recommend:
         return _manual_ingest_result(
             session, paper, created, background_tasks, analyze=analyze

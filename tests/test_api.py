@@ -429,7 +429,12 @@ def test_brief_publish_prewarms_only_first_four_featured_papers(
     assert queued_batches == [featured_ids[:4]]
 
 
-def test_pdf_upload_and_extract(client: TestClient) -> None:
+def test_pdf_upload_and_extract(client: TestClient, monkeypatch) -> None:
+    queued_batches: list[tuple[list[str], int]] = []
+    monkeypatch.setattr(
+        "frontier.api.papers.queue_document_conversions",
+        lambda paper_ids, *, limit=4: queued_batches.append((list(paper_ids), limit)),
+    )
     document = pymupdf.open()
     page = document.new_page()
     page.insert_text((72, 72), "A Tactile Robot Paper")
@@ -442,6 +447,7 @@ def test_pdf_upload_and_extract(client: TestClient) -> None:
     )
     assert response.status_code == 200, response.text
     paper = response.json()["paper"]
+    assert queued_batches == [([paper["id"]], 1)]
     assert paper["pdf_version"]
     pdf_response = client.get(f"/api/papers/{paper['id']}/pdf?v={paper['pdf_version']}")
     assert pdf_response.status_code == 200
@@ -554,7 +560,13 @@ def test_docling_is_blocked_before_import_when_disabled(monkeypatch, tmp_path) -
 
 def test_manual_ingest_stages_daily_recommendation_and_metadata_edit(
     client: TestClient,
+    monkeypatch,
 ) -> None:
+    queued_batches: list[tuple[list[str], int]] = []
+    monkeypatch.setattr(
+        "frontier.api.papers.queue_document_conversions",
+        lambda paper_ids, *, limit=4: queued_batches.append((list(paper_ids), limit)),
+    )
     document = pymupdf.open()
     page = document.new_page()
     page.insert_text((72, 72), "A User Added Tactile Foundation Policy")
@@ -571,6 +583,7 @@ def test_manual_ingest_stages_daily_recommendation_and_metadata_edit(
     result = response.json()
     assert result["analysis_task_id"]
     assert result["paper"]["analysis_status"] == "queued"
+    assert queued_batches == [([result["paper"]["id"]], 1)]
 
     latest = client.get("/api/briefs/latest")
     assert latest.status_code == 200
@@ -616,7 +629,12 @@ def test_manual_ingest_stages_daily_recommendation_and_metadata_edit(
     assert manual["paper"]["summary"] == "A manually reviewed summary."
 
 
-def test_manual_ingest_can_defer_agent_analysis(client: TestClient) -> None:
+def test_manual_ingest_can_defer_agent_analysis(client: TestClient, monkeypatch) -> None:
+    queued_batches: list[tuple[list[str], int]] = []
+    monkeypatch.setattr(
+        "frontier.api.papers.queue_document_conversions",
+        lambda paper_ids, *, limit=4: queued_batches.append((list(paper_ids), limit)),
+    )
     document = pymupdf.open()
     page = document.new_page()
     page.insert_text((72, 72), "Deferred Agent Analysis Paper")
@@ -632,6 +650,7 @@ def test_manual_ingest_can_defer_agent_analysis(client: TestClient) -> None:
     result = response.json()
     assert result["analysis_task_id"] is None
     assert result["paper"]["analysis_status"] is None
+    assert queued_batches == [([result["paper"]["id"]], 1)]
     latest = client.get("/api/briefs/latest").json()
     assert any(item["paper"]["id"] == result["paper"]["id"] for item in latest["items"])
 

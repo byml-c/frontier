@@ -30,7 +30,6 @@ import type { Paper } from "../types";
 import { Modal } from "./Modal";
 import { MarkdownMessage } from "./MarkdownMessage";
 import { PaperMetadataDialog } from "./PaperMetadataDialog";
-import { ExpandablePaperText } from "./ExpandablePaperText";
 
 export function PaperCard({ paper, rank, featured = false }: { paper: Paper; rank?: number; featured?: boolean }) {
   const navigate = useNavigate();
@@ -52,7 +51,7 @@ export function PaperCard({ paper, rank, featured = false }: { paper: Paper; ran
       {paper.analysis_status === "failed" && <Alert severity="error" sx={{ mb: 1.25, py: .25 }}>处理失败：{paper.analysis_error || "请在任务页查看原因"}</Alert>}
       <Typography variant="h3" component="h2">{paper.title}</Typography>
       <Typography variant="body2" color="text.secondary" sx={{ mt: .5 }}>{paper.first_author || "作者信息待确认"}{paper.corresponding_author ? ` · 通讯作者 ${paper.corresponding_author}` : ""}{paper.primary_affiliation ? ` · ${paper.primary_affiliation}` : ""}</Typography>
-      <Box sx={{ mt: 1 }}><ExpandablePaperText>{paper.summary || paper.abstract || "简介正在整理中。"}</ExpandablePaperText></Box>
+      <Box color="text.secondary" sx={{ mt: 1, fontSize: ".875rem" }}><MarkdownMessage content={paper.summary || paper.abstract || "简介正在整理中。"} /></Box>
       <Divider sx={{ my: 1.25 }} />
       <Stack direction="row" spacing={1} alignItems="flex-start"><AutoAwesomeRounded color="action" sx={{ fontSize: 17, mt: .15 }} /><Box sx={{ minWidth: 0 }}><Typography variant="caption" fontWeight={700} color="text.secondary">推荐理由</Typography><Box sx={{ mt: .15, fontSize: ".875rem" }}><MarkdownMessage content={paper.agent_comment || paper.recommendation_reason || "等待全文分析后给出判断。"} /></Box></Box></Stack>
       {!!paper.nodes?.length && <Stack direction="row" flexWrap="wrap" gap={.75} sx={{ mt: 1.25 }}>{paper.nodes.map((node) => <Chip size="small" key={node.id} clickable onClick={() => navigate(`/graph/${node.id}`)} label={node.name} variant="outlined" color="primary" />)}</Stack>}

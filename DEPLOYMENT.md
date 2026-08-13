@@ -74,4 +74,28 @@ tailscale serve status
 - 每次升级先执行 `pnpm build`，再重启 `frontier` 服务；
 - Codex/provider 状态、额度和凭据由维护者负责，失败原因会留在任务页。
 
+## 5. 从开发机一键更新
+
+项目提供了固定部署到 SSH 别名 `Self_ALI` 的脚本。它会在服务器的
+`/home/byml/agent/frontier` 中执行仅快进拉取、同步前端依赖、构建 Web，随后重启并
+检查 `frontier.service`：
+
+```bash
+./deploy/deploy-self-ali.sh
+```
+
+脚本只部署已经提交并推送到 Git 远端的代码，不会自动提交或推送本机修改。服务器
+工作区若有未提交的受版本控制文件修改，部署会停止，避免覆盖服务器上的改动。
+
+若 `Self_ALI` 使用非 root 用户，需要允许其无交互地重启和检查该服务。使用
+`sudo visudo -f /etc/sudoers.d/frontier-deploy` 添加以下规则，并把 `byml` 替换为实际
+SSH 用户；可用 `command -v systemctl` 确认 systemctl 的绝对路径：
+
+```sudoers
+byml ALL=(root) NOPASSWD: /usr/bin/systemctl restart frontier.service, /usr/bin/systemctl is-active --quiet frontier.service, /usr/bin/systemctl --no-pager --full status frontier.service
+```
+
+部署脚本使用 `BatchMode`，因此 SSH 别名应提前配置密钥登录；它不会等待 SSH 密码或
+sudo 密码，避免无人值守部署永久卡住。
+
 首版没有应用层登录。若不用 Tailscale，必须在应用前增加等价的设备身份验证；不能直接把 8000 暴露到公网。
