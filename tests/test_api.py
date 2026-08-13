@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
+from itertools import pairwise
 from zoneinfo import ZoneInfo
 
 import pymupdf
@@ -285,6 +286,39 @@ def test_timestamps_are_serialized_in_beijing_time(client: TestClient) -> None:
         json={"kind": "agent_experience", "title": "Timezone", "content": "UTC storage"},
     ).json()
     assert memory["created_at"].endswith("+08:00")
+
+
+def test_subgraph_uses_node_budget_and_exposes_boundary_nodes(client: TestClient) -> None:
+    nodes = [
+        client.post(
+            "/api/graph/nodes",
+            json={"name": f"Budget node {index}", "core_question": f"Question {index}"},
+        ).json()
+        for index in range(5)
+    ]
+    for source, target in pairwise(nodes):
+        response = client.post(
+            "/api/graph/edges",
+            json={"source_id": source["id"], "target_id": target["id"]},
+        )
+        assert response.status_code == 200
+
+    response = client.get(
+        f"/api/graph/subgraph?focus_id={nodes[0]['id']}&limit=3"
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert {node["id"] for node in payload["nodes"]} == {
+        nodes[0]["id"],
+        nodes[1]["id"],
+        nodes[2]["id"],
+    }
+    boundary = next(
+        node for node in payload["boundary_nodes"] if node["id"] == nodes[3]["id"]
+    )
+    assert boundary["connects_to"] == [nodes[2]["id"]]
+    assert payload["has_more"] is True
 
 
 def test_graph_and_brief_snapshot(client: TestClient) -> None:

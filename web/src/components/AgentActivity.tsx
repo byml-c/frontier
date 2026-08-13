@@ -7,7 +7,7 @@ import StopCircleOutlined from "@mui/icons-material/StopCircleOutlined";
 import { Box, CircularProgress, Collapse, Divider, Stack, Typography } from "@mui/material";
 import { type ReactNode, useEffect, useMemo, useState } from "react";
 import { templateSurfaces } from "../theme";
-import { activityPhasesForDisplay, activityStepText, agentActivityOutcome, groupActivities, plainActivitySummary, topLevelActivityStatus, type AgentActivityItem, type AgentActivityPhase } from "./agentActivityState";
+import { activityPhasesForDisplay, agentActivityOutcome, groupActivities, plainActivitySummary, topLevelActivityStatus, type AgentActivityItem, type AgentActivityPhase } from "./agentActivityState";
 
 type Props = { items: AgentActivityItem[]; children?: ReactNode; pending?: boolean; autoCollapseWhenComplete?: boolean; turnStatus?: string };
 
@@ -122,11 +122,13 @@ function ActivityPhase({ phase, pending, expanded, onToggle }: { phase: AgentAct
 }
 
 function ActivityStep({ item }: { item: AgentActivityItem }) {
-  const text = activityStepText(item);
   return (
     <Stack direction="row" spacing={.8} alignItems="center" sx={{ minWidth: 0 }}>
       {item.status === "running" ? <CircularProgress size={13} sx={{ flex: "0 0 auto" }} /> : item.status === "cancelled" ? <StopCircleOutlined color="action" sx={{ fontSize: 15, flex: "0 0 auto" }} /> : item.status === "failed" ? <ErrorOutlineRounded color="error" sx={{ fontSize: 15, flex: "0 0 auto" }} /> : item.kind === "tool" ? <ConstructionRounded color="action" sx={{ fontSize: 15, flex: "0 0 auto" }} /> : <CheckCircleOutlineRounded color="action" sx={{ fontSize: 15, flex: "0 0 auto" }} />}
-      <Typography variant="caption" noWrap title={text} sx={{ minWidth: 0 }}>
+      <Typography
+        variant="caption"
+        sx={{ minWidth: 0, whiteSpace: "pre-wrap", overflowWrap: "anywhere", wordBreak: "break-word" }}
+      >
         <Box component="span" fontWeight={700}>{item.kind === "tool" ? "工具：" : "进度："}</Box>
         {item.label}
         {item.detail && <Box component="span" color="text.secondary"> · {plainActivitySummary(item.detail)}</Box>}

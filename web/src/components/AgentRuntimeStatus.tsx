@@ -27,7 +27,7 @@ export function AgentRuntimeStatus({ conversation, liveState }: { conversation?:
   const usage = contextUsageDetails(state.usage);
 
   return (
-    <Stack direction="row" alignItems="center" spacing={0.75} sx={{ minWidth: 0, height: 30 }}>
+    <Stack direction="row" alignItems="center" sx={{ minWidth: 0, height: 30 }}>
       {usage && <ContextUsageRing {...usage} />}
       <Tooltip title={`模型：${model} · 思考程度：${effort}`}>
         <Typography
@@ -51,10 +51,10 @@ function ContextUsageRing({ current, window, percent, percentLabel }: { current:
         role="img"
         tabIndex={0}
         aria-label={tokenLabel}
-        sx={{ position: "relative", display: "inline-flex", flex: "0 0 auto", width: 20, height: 20, alignItems: "center", justifyContent: "center", outline: 0 }}
+        sx={{ position: "relative", display: "inline-flex", flex: "0 0 auto", width: 20, height: 20, mr: "15px", alignItems: "center", justifyContent: "center", outline: 0 }}
       >
-        <CircularProgress variant="determinate" value={100} size={20} thickness={4.4} sx={{ color: "action.disabledBackground", position: "absolute" }} />
-        <CircularProgress variant="determinate" value={percent} size={20} thickness={4.4} sx={{ color: percent >= 85 ? "warning.main" : "primary.main", position: "absolute" }} />
+        <CircularProgress variant="determinate" value={100} size={20} thickness={8.8} sx={{ color: "action.disabledBackground", position: "absolute" }} />
+        <CircularProgress variant="determinate" value={percent} size={20} thickness={8.8} sx={{ color: percent >= 85 ? "warning.main" : "primary.main", position: "absolute" }} />
       </Box>
     </Tooltip>
   );

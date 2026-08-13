@@ -89,6 +89,8 @@ export type GraphData = {
   focus_id?: string | null;
   nodes: ResearchNode[];
   links: Array<{ id: string; source_id: string; target_id: string }>;
+  boundary_nodes?: Array<ResearchNode & { connects_to: string[] }>;
+  has_more?: boolean;
 };
 
 export type Annotation = {

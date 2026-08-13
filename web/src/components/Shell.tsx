@@ -61,6 +61,8 @@ function ShellLayout() {
   const { pathname, search } = useLocation();
   const pageHeader = usePageHeaderContent() ?? routeHeader(pathname);
   const readerRoute = pathname.startsWith("/paper/");
+  const graphRoute = pathname === "/graph" || pathname.startsWith("/graph/");
+  const fixedWorkspaceRoute = readerRoute || graphRoute;
   const [menuOpen, setMenuOpen] = useState(false);
   const [expandedMenus, setExpandedMenus] = useState<Record<string, boolean>>({});
   const [agentOpen, setAgentOpen] = useState(false);
@@ -84,7 +86,7 @@ function ShellLayout() {
     </Box>;
   })}</List>;
 
-  return <Box sx={readerRoute ? { position: "fixed", inset: 0, width: "100%", display: "flex", flexDirection: "column", overflow: "hidden", bgcolor: "background.default" } : { minHeight: "100vh" }}>
+  return <Box sx={fixedWorkspaceRoute ? { position: "fixed", inset: 0, width: "100%", display: "flex", flexDirection: "column", overflow: "hidden", bgcolor: "background.default" } : { minHeight: "100vh" }}>
     <Box component="header" sx={{ width: "100%", bgcolor: "background.paper", borderBottom: 1, borderColor: "divider" }}>
       <Box sx={{ px: { xs: 1.5, md: 3 } }}>
         <Toolbar variant="dense" disableGutters sx={{ gap: 1, minHeight: { xs: 52, md: 56 } }}>
@@ -112,7 +114,7 @@ function ShellLayout() {
       </Box>
     </Box>
     <Drawer open={menuOpen} onClose={() => setMenuOpen(false)} PaperProps={{ sx: { width: 280 } }}><Box sx={{ px: 2.5, py: 2 }}><Typography variant="h3">Frontier</Typography><Typography variant="caption" color="text.secondary">个人研究工作台</Typography></Box>{navigation}</Drawer>
-    <Box component="main" sx={{ flex: readerRoute ? 1 : undefined, minHeight: readerRoute ? 0 : undefined, overflow: readerRoute ? "hidden" : undefined, "& > .MuiContainer-root:has(> [data-page-header-anchor])": { pt: { xs: 2, md: 2.5 } }, ...(readerRoute ? { "& > *": { height: "100% !important" } } : {}) }}><Outlet /></Box>
+    <Box component="main" sx={{ flex: fixedWorkspaceRoute ? 1 : undefined, minHeight: fixedWorkspaceRoute ? 0 : undefined, overflow: fixedWorkspaceRoute ? "hidden" : undefined, "& > .MuiContainer-root:has(> [data-page-header-anchor])": { pt: { xs: 2, md: 2.5 } }, ...(fixedWorkspaceRoute ? { "& > *": { height: "100% !important" } } : {}) }}><Outlet /></Box>
     <AgentPanel open={agentOpen} onClose={() => setAgentOpen(false)} width={agentWidth} onWidthChange={updateWidth} />
   </Box>;
 }

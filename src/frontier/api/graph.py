@@ -306,26 +306,30 @@ def update_idea(
 def get_subgraph(
     session: Annotated[Session, Depends(get_session)],
     focus_id: str | None = None,
-    depth: int = Query(default=1, ge=0, le=3),
     limit: int = Query(default=80, ge=1, le=300),
 ) -> dict:
     all_edges = session.scalars(select(ResearchEdge)).all()
+    active_ids = set(
+        session.scalars(
+            select(ResearchNode.id).where(ResearchNode.is_active.is_(True))
+        ).all()
+    )
     if focus_id:
         _node_or_404(session, focus_id)
         adjacency: dict[str, set[str]] = {}
         for edge in all_edges:
+            if edge.source_id not in active_ids or edge.target_id not in active_ids:
+                continue
             adjacency.setdefault(edge.source_id, set()).add(edge.target_id)
             adjacency.setdefault(edge.target_id, set()).add(edge.source_id)
         selected = {focus_id}
-        queue: deque[tuple[str, int]] = deque([(focus_id, 0)])
+        queue: deque[str] = deque([focus_id])
         while queue and len(selected) < limit:
-            current, current_depth = queue.popleft()
-            if current_depth >= depth:
-                continue
+            current = queue.popleft()
             for neighbor in sorted(adjacency.get(current, set())):
                 if neighbor not in selected:
                     selected.add(neighbor)
-                    queue.append((neighbor, current_depth + 1))
+                    queue.append(neighbor)
                     if len(selected) >= limit:
                         break
     else:
@@ -341,8 +345,27 @@ def get_subgraph(
     edges = [
         edge for edge in all_edges if edge.source_id in selected and edge.target_id in selected
     ]
+    boundary_connections: dict[str, set[str]] = {}
+    for edge in all_edges:
+        if edge.source_id in selected and edge.target_id in active_ids - selected:
+            boundary_connections.setdefault(edge.target_id, set()).add(edge.source_id)
+        elif edge.target_id in selected and edge.source_id in active_ids - selected:
+            boundary_connections.setdefault(edge.source_id, set()).add(edge.target_id)
+    boundary_limit = min(24, max(6, limit // 3))
+    boundary_ids = sorted(boundary_connections)[:boundary_limit]
+    boundary_nodes = session.scalars(
+        select(ResearchNode).where(ResearchNode.id.in_(boundary_ids))
+    ).all()
     return {
         "focus_id": focus_id,
         "nodes": [_node_summary(session, node) for node in nodes],
         "links": [model_dict(edge) for edge in edges],
+        "boundary_nodes": [
+            {
+                **_node_summary(session, node),
+                "connects_to": sorted(boundary_connections[node.id]),
+            }
+            for node in boundary_nodes
+        ],
+        "has_more": len(selected) < len(active_ids),
     }
