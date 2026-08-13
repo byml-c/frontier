@@ -2,17 +2,22 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 from typing import Annotated
+from zoneinfo import ZoneInfo
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query
 from sqlalchemy import or_, select
 from sqlalchemy.orm import Session
 
+from ..config import settings
 from ..database import get_session
 from ..models import Brief, BriefItem, Paper, PaperNode, PaperTag, ResearchNode, Tag
 from ..schemas import BriefCreate, BriefItemCreate
 from ..services.common import get_setting, log_operation, model_dict
 from ..services.document_reader import queue_document_conversions
-from ..services.manual_recommendations import current_analysis_state
+from ..services.manual_recommendations import (
+    current_analysis_state,
+    is_daily_recommendation_eligible,
+)
 
 router = APIRouter(prefix="/api/briefs", tags=["briefs"])
 
@@ -67,9 +72,14 @@ def _paper_snapshot(session: Session, paper: Paper) -> dict:
 def _serialize_brief(session: Session, brief: Brief, *, detail: bool = True) -> dict:
     payload = model_dict(brief)
     if not detail:
-        payload["item_count"] = len(
-            session.scalars(select(BriefItem.id).where(BriefItem.brief_id == brief.id)).all()
+        statement = (
+            select(BriefItem.id)
+            .join(Paper, Paper.id == BriefItem.paper_id)
+            .where(BriefItem.brief_id == brief.id)
         )
+        if brief.brief_date == datetime.now(ZoneInfo(settings.timezone)).date():
+            statement = statement.where(Paper.status == "candidate")
+        payload["item_count"] = len(session.scalars(statement).all())
         return payload
     rows = session.execute(
         select(BriefItem, Paper)
@@ -77,6 +87,8 @@ def _serialize_brief(session: Session, brief: Brief, *, detail: bool = True) -> 
         .where(BriefItem.brief_id == brief.id)
         .order_by(BriefItem.rank)
     ).all()
+    if brief.brief_date == datetime.now(ZoneInfo(settings.timezone)).date():
+        rows = [row for row in rows if is_daily_recommendation_eligible(row[1])]
     payload["items"] = [
         {
             **model_dict(item),
@@ -169,6 +181,14 @@ def add_brief_item(
     paper = session.get(Paper, payload.paper_id)
     if not paper:
         raise HTTPException(status_code=404, detail="Paper not found")
+    if not is_daily_recommendation_eligible(paper):
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "Only unread candidate papers can be added to a daily brief "
+                f"(current status: {paper.status})"
+            ),
+        )
     existing = session.scalar(
         select(BriefItem).where(
             BriefItem.brief_id == brief_id, BriefItem.paper_id == payload.paper_id
@@ -221,8 +241,12 @@ def publish_brief(
         .where(BriefItem.brief_id == brief_id)
         .order_by(BriefItem.rank)
     ).all()
+    excluded_rows = [row for row in rows if not is_daily_recommendation_eligible(row[1])]
+    rows = [row for row in rows if is_daily_recommendation_eligible(row[1])]
     if not rows:
-        raise HTTPException(status_code=409, detail="Cannot publish an empty brief")
+        raise HTTPException(status_code=409, detail="Cannot publish a brief without unread papers")
+    for item, _paper in excluded_rows:
+        session.delete(item)
     for item, paper in rows:
         item.snapshot_json = _paper_snapshot(session, paper)
     brief.snapshot_json = {
@@ -244,6 +268,7 @@ def publish_brief(
         task_id=brief.task_id,
         detail={
             "item_count": len(rows),
+            "excluded_reading_count": len(excluded_rows),
             "text_cache_count": len(featured_paper_ids),
         },
     )

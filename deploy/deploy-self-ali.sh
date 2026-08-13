@@ -52,6 +52,14 @@ if [[ -n "$(git status --porcelain --untracked-files=no)" ]]; then
   exit 1
 fi
 
+# pnpm/Node are configured after the interactive-only guard in ~/.bashrc on
+# this server. Read the configured PATH from one short interactive shell, then
+# keep the actual deployment non-interactive and fail-fast.
+interactive_path="$(bash -ic 'printf "%s" "$PATH"' 2>/dev/null)"
+if [[ -n "${interactive_path}" ]]; then
+  export PATH="${interactive_path}"
+fi
+
 echo "[1/4] 拉取代码"
 before_commit="$(git rev-parse --short HEAD)"
 git pull --ff-only
@@ -83,10 +91,14 @@ else
 fi
 
 cd "${project_dir}"
+health_base_url="$(.venv/bin/python -c \
+  'from frontier.config import settings; print(settings.local_api_base_url)')"
+echo "健康检查：${health_base_url}/api/health"
 health_ok=false
+health_result=""
 for _attempt in {1..15}; do
-  if FRONTIER_API_BASE_URL="${FRONTIER_API_BASE_URL:-http://127.0.0.1:8000}" \
-    .venv/bin/frontier health >/dev/null 2>&1; then
+  if health_result="$(FRONTIER_API_BASE_URL="${health_base_url}" \
+    .venv/bin/frontier health 2>&1)"; then
     health_ok=true
     break
   fi
@@ -95,6 +107,10 @@ done
 
 if [[ ${health_ok} != true ]]; then
   echo "错误：服务已重启，但 15 秒内未通过健康检查。" >&2
+  echo "检查地址：${health_base_url}/api/health" >&2
+  if [[ -n "${health_result}" ]]; then
+    echo "最后一次检查结果：${health_result}" >&2
+  fi
   if [[ ${EUID} -eq 0 ]]; then
     systemctl --no-pager --full status "${service_name}" >&2 || true
   else

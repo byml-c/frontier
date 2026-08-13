@@ -96,6 +96,9 @@ byml ALL=(root) NOPASSWD: /usr/bin/systemctl restart frontier.service, /usr/bin/
 ```
 
 部署脚本使用 `BatchMode`，因此 SSH 别名应提前配置密钥登录；它不会等待 SSH 密码或
-sudo 密码，避免无人值守部署永久卡住。
+sudo 密码，避免无人值守部署永久卡住。脚本会通过一个短暂的交互 Bash 读取远端
+`~/.bashrc` 配置的 PATH，以支持安装在用户目录中的 Node.js 和 pnpm；实际拉取、构建
+和重启仍在非交互、遇错即停的 Shell 中执行。健康检查会读取远端 `.env` 中实际的
+`FRONTIER_HOST` 和 `FRONTIER_PORT`，不要求服务使用默认的 `127.0.0.1:8000`。
 
 首版没有应用层登录。若不用 Tailscale，必须在应用前增加等价的设备身份验证；不能直接把 8000 暴露到公网。

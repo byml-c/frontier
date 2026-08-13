@@ -41,6 +41,18 @@ class Settings(BaseSettings):
         return f"sqlite:///{(self.data_dir / 'frontier.db').as_posix()}"
 
     @property
+    def local_api_base_url(self) -> str:
+        """Return an endpoint that reaches this server from the same machine."""
+        host = self.host.strip()
+        if host in {"", "0.0.0.0"}:
+            host = "127.0.0.1"
+        elif host == "::":
+            host = "::1"
+        if ":" in host and not host.startswith("["):
+            host = f"[{host}]"
+        return f"http://{host}:{self.port}"
+
+    @property
     def pdf_dir(self) -> Path:
         return self.data_dir / "pdfs"
 

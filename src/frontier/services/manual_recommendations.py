@@ -10,6 +10,13 @@ from ..config import settings
 from ..models import Brief, BriefItem, Paper, TaskRun
 from .common import log_operation
 
+DAILY_RECOMMENDATION_STATUS = "candidate"
+
+
+def is_daily_recommendation_eligible(paper: Paper) -> bool:
+    """Only unread candidates may occupy a daily recommendation slot."""
+    return paper.status == DAILY_RECOMMENDATION_STATUS
+
 
 def _needs_analysis(paper: Paper) -> bool:
     return not all((paper.summary, paper.agent_comment, paper.recommendation_reason))

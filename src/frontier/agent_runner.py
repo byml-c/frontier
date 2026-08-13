@@ -141,7 +141,10 @@ def build_prompt(task: TaskRun) -> str:
 Run the daily paper workflow for {run_date}. Read relevant active memories and graph nodes first.
 Collect arXiv candidates using the research interests maintained in the graph. Respect the current
 limits returned by `frontier setting list`: abstracts, full texts, total brief items, and featured
-items. Read full PDF text for final candidates and update their paper analyses. Do not attach daily
+items. Before ranking or adding a paper, inspect its existing record and exclude every paper whose
+status is not `candidate`; papers in `reading`, `feedback_pending`, `completed`, or `ignored` status
+must never appear in the daily recommendations. Read full PDF text for final candidates and update
+their paper analyses. Do not attach daily
 or candidate papers to research nodes, create paper-backed node progress, or otherwise treat them
 as accumulated evidence: graph connection is allowed only after the user completes reading and
 confirms feedback, so the paper status is `completed`. You may describe probable graph relevance

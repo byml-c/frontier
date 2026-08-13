@@ -368,28 +368,113 @@ def test_graph_and_brief_snapshot(client: TestClient) -> None:
     assert detail["papers"][0]["id"] == paper["id"]
     assert detail["ideas"][0]["status"] == "to_explore"
 
+    brief_paper = create_paper(client, "Unread paper for brief snapshot")
     brief = client.post(
         "/api/briefs",
-        json={"brief_date": datetime.now(UTC).date().isoformat(), "title": "Test brief"},
+        json={"brief_date": "2026-07-29", "title": "Test brief"},
     ).json()
     assert (
         client.post(
             f"/api/briefs/{brief['id']}/items",
-            json={"paper_id": paper["id"], "rank": 1, "tier": "featured"},
+            json={"paper_id": brief_paper["id"], "rank": 1, "tier": "featured"},
         ).status_code
         == 200
     )
     published = client.post(f"/api/briefs/{brief['id']}/publish")
     assert published.status_code == 200
-    assert published.json()["items"][0]["paper"]["title"] == paper["title"]
-    assert published.json()["items"][0]["paper"]["completion_summary"] == "Reading complete."
+    assert published.json()["items"][0]["paper"]["title"] == brief_paper["title"]
+    assert client.post(
+        f"/api/papers/{brief_paper['id']}/finish",
+        json={"summary": "Reading complete after publication."},
+    ).status_code == 200
+    assert client.post(
+        f"/api/papers/{brief_paper['id']}/confirm-feedback",
+        json={"interested": False, "quality": False},
+    ).status_code == 200
+    historical = client.get(f"/api/briefs/{brief['id']}").json()
+    assert historical["items"][0]["paper"]["completion_summary"] == (
+        "Reading complete after publication."
+    )
     assert (
         client.post(
             f"/api/briefs/{brief['id']}/items",
-            json={"paper_id": paper["id"], "rank": 2, "tier": "related"},
+            json={"paper_id": brief_paper["id"], "rank": 2, "tier": "related"},
         ).status_code
         == 409
     )
+
+
+def test_daily_brief_excludes_papers_that_are_being_or_have_been_read(
+    client: TestClient,
+) -> None:
+    candidate = create_paper(client, "Unread daily candidate")
+    other_candidate = create_paper(client, "Second unread daily candidate")
+    reading = create_paper(client, "Already being read")
+    completed = create_paper(client, "Already completed")
+    assert client.post(f"/api/papers/{reading['id']}/start-reading").status_code == 200
+    assert client.post(f"/api/papers/{completed['id']}/finish", json={}).status_code == 200
+    assert client.post(
+        f"/api/papers/{completed['id']}/confirm-feedback",
+        json={"interested": False, "quality": False},
+    ).status_code == 200
+
+    today = datetime.now(ZoneInfo("Asia/Shanghai")).date().isoformat()
+    brief = client.post(
+        "/api/briefs",
+        json={"brief_date": today, "title": "Unread-only daily brief"},
+    ).json()
+    for rank, paper in enumerate((candidate, other_candidate), start=1):
+        assert client.post(
+            f"/api/briefs/{brief['id']}/items",
+            json={"paper_id": paper["id"], "rank": rank, "tier": "featured"},
+        ).status_code == 200
+    for paper in (reading, completed):
+        rejected = client.post(
+            f"/api/briefs/{brief['id']}/items",
+            json={"paper_id": paper["id"], "rank": 3, "tier": "related"},
+        )
+        assert rejected.status_code == 409
+        assert "Only unread candidate papers" in rejected.json()["detail"]
+
+    published = client.post(f"/api/briefs/{brief['id']}/publish")
+    assert published.status_code == 200, published.text
+    assert {item["paper"]["id"] for item in published.json()["items"]} == {
+        candidate["id"],
+        other_candidate["id"],
+    }
+
+    assert client.post(f"/api/papers/{candidate['id']}/start-reading").status_code == 200
+    current = client.get(f"/api/briefs/{brief['id']}").json()
+    assert [item["paper"]["id"] for item in current["items"]] == [other_candidate["id"]]
+
+    assert client.post(f"/api/papers/{candidate['id']}/cancel-reading").status_code == 200
+    restored = client.get(f"/api/briefs/{brief['id']}").json()
+    assert {item["paper"]["id"] for item in restored["items"]} == {
+        candidate["id"],
+        other_candidate["id"],
+    }
+
+
+def test_brief_publish_drops_papers_that_started_reading_after_ranking(
+    client: TestClient,
+) -> None:
+    stale = create_paper(client, "Candidate that starts reading before publish")
+    eligible = create_paper(client, "Candidate that remains unread")
+    brief = client.post(
+        "/api/briefs",
+        json={"brief_date": "2026-07-28", "title": "Publish race test"},
+    ).json()
+    for rank, paper in enumerate((stale, eligible), start=1):
+        assert client.post(
+            f"/api/briefs/{brief['id']}/items",
+            json={"paper_id": paper["id"], "rank": rank, "tier": "featured"},
+        ).status_code == 200
+    assert client.post(f"/api/papers/{stale['id']}/start-reading").status_code == 200
+
+    published = client.post(f"/api/briefs/{brief['id']}/publish")
+
+    assert published.status_code == 200, published.text
+    assert [item["paper"]["id"] for item in published.json()["items"]] == [eligible["id"]]
 
 
 def test_brief_publish_prewarms_only_first_four_featured_papers(
