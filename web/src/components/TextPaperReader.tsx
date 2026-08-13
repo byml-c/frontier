@@ -22,9 +22,17 @@ export type TextReaderSelection = {
   blockId: string;
   startOffset: number;
   endOffset: number;
+  segments: Array<{ blockId: string; startOffset: number; endOffset: number }>;
   rect: DOMRect;
   anchor: { x: number; y: number };
   pageContext: string;
+};
+
+type TextReaderActiveSelection = {
+  blockId?: string;
+  startOffset?: number;
+  endOffset?: number;
+  segments?: Array<{ blockId: string; startOffset: number; endOffset: number }>;
 };
 
 type Props = {
@@ -32,7 +40,7 @@ type Props = {
   annotations: Annotation[];
   mobile: boolean;
   toolsOpen: boolean;
-  activeSelection?: { blockId: string; startOffset: number; endOffset: number };
+  activeSelection?: TextReaderActiveSelection;
   onRetry: () => void;
   onModeToggle: () => void;
   onSelection: (selection: TextReaderSelection) => void;
@@ -73,31 +81,52 @@ export function TextPaperReader({ document, annotations, mobile, toolsOpen, acti
     const text = rawText.trim();
     if (!native || !text || native.rangeCount === 0) return;
     const range = native.getRangeAt(0);
-    const element = (range.commonAncestorContainer.nodeType === Node.ELEMENT_NODE ? range.commonAncestorContainer : range.commonAncestorContainer.parentElement) as Element | null;
-    const block = element?.closest<HTMLElement>("[data-text-block]");
-    if (!block || !block.contains(range.startContainer) || !block.contains(range.endContainer)) return;
-    const prefix = range.cloneRange();
-    prefix.selectNodeContents(block);
-    prefix.setEnd(range.startContainer, range.startOffset);
-    const leadingSpace = rawText.length - rawText.trimStart().length;
-    const startOffset = prefix.toString().length + leadingSpace;
-    const endOffset = startOffset + text.length;
+    const candidates = [...(scrollRef.current?.querySelectorAll<HTMLElement>("[data-text-block]") ?? [])];
+    const rawSegments = candidates.flatMap((block) => {
+      try {
+        if (!range.intersectsNode(block)) return [];
+      } catch {
+        return [];
+      }
+      const fullText = block.textContent || "";
+      const startOffset = block.contains(range.startContainer)
+        ? offsetWithin(block, range.startContainer, range.startOffset) ?? 0
+        : 0;
+      const endOffset = block.contains(range.endContainer)
+        ? offsetWithin(block, range.endContainer, range.endOffset) ?? fullText.length
+        : fullText.length;
+      if (endOffset <= startOffset) return [];
+      return [{ block, blockId: block.dataset.blockId || "", startOffset, endOffset }];
+    });
+    if (!rawSegments.length) return;
+    const firstRaw = rawSegments[0];
+    const lastRaw = rawSegments.at(-1)!;
+    firstRaw.startOffset += (firstRaw.block.textContent || "").slice(firstRaw.startOffset, firstRaw.endOffset).length
+      - (firstRaw.block.textContent || "").slice(firstRaw.startOffset, firstRaw.endOffset).trimStart().length;
+    lastRaw.endOffset -= (lastRaw.block.textContent || "").slice(lastRaw.startOffset, lastRaw.endOffset).length
+      - (lastRaw.block.textContent || "").slice(lastRaw.startOffset, lastRaw.endOffset).trimEnd().length;
+    const selectedSegments = rawSegments.filter((item) => item.blockId && item.endOffset > item.startOffset);
+    if (!selectedSegments.length) return;
+    const first = selectedSegments[0];
     const rect = range.getBoundingClientRect();
-    const fullText = block.textContent || "";
+    const pageContext = selectedSegments.map(({ block, startOffset, endOffset }) => {
+      const fullText = block.textContent || "";
+      return fullText.slice(Math.max(0, startOffset - 180), endOffset + 180);
+    }).join("\n\n");
     onSelection({
       text,
-      page: Number(block.dataset.pageNumber || 1),
-      blockId: block.dataset.blockId || "",
-      startOffset,
-      endOffset,
+      page: Number(first.block.dataset.pageNumber || 1),
+      blockId: first.blockId,
+      startOffset: first.startOffset,
+      endOffset: first.endOffset,
+      segments: selectedSegments.map(({ blockId, startOffset, endOffset }) => ({ blockId, startOffset, endOffset })),
       rect,
       anchor: anchor ?? { x: rect.right, y: rect.bottom },
-      pageContext: fullText.slice(Math.max(0, startOffset - 300), endOffset + 300),
+      pageContext,
     });
-    // Mobile Edge owns the native selection menu. Clearing the DOM selection
-    // after capturing it suppresses that menu; ReaderPage keeps the selection as
-    // a blue application-owned overlay while our toolbar remains available.
-    if (mobile) window.setTimeout(() => native.removeAllRanges(), 0);
+    // Persist one visual selection layer after React opens the toolbar. This also
+    // suppresses Edge's native menu on mobile without leaving a double highlight.
+    window.setTimeout(() => native.removeAllRanges(), 0);
   }
   function beginMobileSelection(event: React.PointerEvent<HTMLDivElement>) {
     if (!mobile || event.pointerType === "mouse" || (event.target as Element).closest("button, input, [role=button]")) return;
@@ -115,7 +144,8 @@ export function TextPaperReader({ document, annotations, mobile, toolsOpen, acti
       if (!range) return;
       const rect = range.getBoundingClientRect(); const text = range.toString(); const fullText = block.textContent || "";
       if (!text.trim()) return;
-      onSelection({ text, page: Number(block.dataset.pageNumber || 1), blockId: block.dataset.blockId || "", startOffset: bounds.start, endOffset: bounds.end, rect, anchor: { x: rect.right, y: rect.bottom }, pageContext: fullText.slice(Math.max(0, bounds.start - 300), bounds.end + 300) });
+      const blockId = block.dataset.blockId || "";
+      onSelection({ text, page: Number(block.dataset.pageNumber || 1), blockId, startOffset: bounds.start, endOffset: bounds.end, segments: [{ blockId, startOffset: bounds.start, endOffset: bounds.end }], rect, anchor: { x: rect.right, y: rect.bottom }, pageContext: fullText.slice(Math.max(0, bounds.start - 300), bounds.end + 300) });
       navigator.vibrate?.(12);
     }, 420);
   }
@@ -139,7 +169,7 @@ export function TextPaperReader({ document, annotations, mobile, toolsOpen, acti
   </Box>;
 }
 
-function ReaderBlocks({ blocks, scrollRoot, annotations, activeSelection, search, onOpenAsset }: { blocks: DocumentBlock[]; scrollRoot: React.RefObject<HTMLDivElement | null>; annotations: Annotation[]; activeSelection?: { blockId: string; startOffset: number; endOffset: number }; search: string; onOpenAsset: (asset: { url?: string; html?: string; title: string }) => void }) {
+function ReaderBlocks({ blocks, scrollRoot, annotations, activeSelection, search, onOpenAsset }: { blocks: DocumentBlock[]; scrollRoot: React.RefObject<HTMLDivElement | null>; annotations: Annotation[]; activeSelection?: TextReaderActiveSelection; search: string; onOpenAsset: (asset: { url?: string; html?: string; title: string }) => void }) {
   const rendered: React.ReactNode[] = [];
   for (let index = 0; index < blocks.length; index += 1) {
     const block = blocks[index];
@@ -155,7 +185,7 @@ function ReaderBlocks({ blocks, scrollRoot, annotations, activeSelection, search
   return rendered;
 }
 
-function ReferencesSection({ header, items, blocks, scrollRoot, annotations, activeSelection, search, onOpenAsset }: { header: DocumentBlock; items: DocumentBlock[]; blocks: DocumentBlock[]; scrollRoot: React.RefObject<HTMLDivElement | null>; annotations: Annotation[]; activeSelection?: { blockId: string; startOffset: number; endOffset: number }; search: string; onOpenAsset: (asset: { url?: string; html?: string; title: string }) => void }) {
+function ReferencesSection({ header, items, blocks, scrollRoot, annotations, activeSelection, search, onOpenAsset }: { header: DocumentBlock; items: DocumentBlock[]; blocks: DocumentBlock[]; scrollRoot: React.RefObject<HTMLDivElement | null>; annotations: Annotation[]; activeSelection?: TextReaderActiveSelection; search: string; onOpenAsset: (asset: { url?: string; html?: string; title: string }) => void }) {
   const [open, setOpen] = useState(false);
   useEffect(() => {
     const reveal = (event: Event) => {
@@ -191,11 +221,13 @@ function TextToolbar({ mobile, search, matches, matchIndex, fontSize, lineHeight
   return <Paper elevation={mobile ? 3 : 0} square sx={{ position: mobile ? "absolute" : "relative", zIndex: 6, top: 0, left: 0, right: 0, p: 1, px: { xs: 1, sm: 1.5 }, borderBottom: 1, borderColor: "divider" }}><Box sx={{ display: "grid", gridTemplateColumns: { xs: "auto minmax(0, 1fr)", sm: "auto minmax(0, 1fr) auto" }, gridTemplateAreas: { xs: '"search search" "mode controls"', sm: '"mode search controls"' }, gap: 1, alignItems: "center" }}><IconButton aria-label="切换到 PDF 模式" title="切换到 PDF 模式" onClick={onModeToggle} sx={{ ...controlSx, gridArea: "mode" }}><PictureAsPdfRounded sx={{ fontSize: mobile ? 18 : 20 }} /></IconButton><TextField size="small" value={search} onChange={(event) => onSearch(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter") onMatch(matchIndex + (event.shiftKey ? -1 : 1)); }} placeholder="搜索全文" sx={{ ...readerSearchFieldSx, gridArea: "search", width: "100%", minWidth: 0 }} InputProps={{ startAdornment: <InputAdornment position="start"><SearchRounded fontSize="small" /></InputAdornment>, endAdornment: <InputAdornment position="end"><Typography variant="caption">{matches ? matchIndex + 1 : 0}/{matches}</Typography><IconButton size="small" disabled={!matches} onClick={() => onMatch(matchIndex - 1)} sx={compactReaderControlSx}><KeyboardArrowUpRounded fontSize="small" /></IconButton><IconButton size="small" disabled={!matches} onClick={() => onMatch(matchIndex + 1)} sx={compactReaderControlSx}><KeyboardArrowDownRounded fontSize="small" /></IconButton></InputAdornment> }} /><Stack direction="row" justifyContent="flex-end" alignItems="center" spacing={1} sx={{ gridArea: "controls", minWidth: 0 }}><FormControl size="small"><Select value={fontSize} onChange={(event) => onFontSize(Number(event.target.value))} aria-label="正文字号" sx={{ ...readerSelectSx, minWidth: 82 }}>{[14, 15, 16, 17, 18].map((value) => <MenuItem key={value} value={value}>{value}px</MenuItem>)}</Select></FormControl><FormControl size="small"><Select value={lineHeight} onChange={(event) => onLineHeight(Number(event.target.value))} aria-label="正文行距" sx={{ ...readerSelectSx, minWidth: 108 }}>{[1.45, 1.6, 1.75, 1.9, 2.05].map((value) => <MenuItem key={value} value={value}>行距 {value}</MenuItem>)}</Select></FormControl></Stack></Box></Paper>;
 }
 
-function DocumentBlockView({ block, blocks, scrollRoot, annotations, activeSelection, search, onOpenAsset }: { block: DocumentBlock; blocks: DocumentBlock[]; scrollRoot: React.RefObject<HTMLDivElement | null>; annotations: Annotation[]; activeSelection?: { blockId: string; startOffset: number; endOffset: number }; search: string; onOpenAsset: (asset: { url?: string; html?: string; title: string }) => void }) {
+function DocumentBlockView({ block, blocks, scrollRoot, annotations, activeSelection, search, onOpenAsset }: { block: DocumentBlock; blocks: DocumentBlock[]; scrollRoot: React.RefObject<HTMLDivElement | null>; annotations: Annotation[]; activeSelection?: TextReaderActiveSelection; search: string; onOpenAsset: (asset: { url?: string; html?: string; title: string }) => void }) {
   const kind = block.kind.toLowerCase();
   const anchorProps = { id: block.anchor ? `reader-${block.anchor}` : undefined, "data-reader-anchor": block.anchor || undefined };
   const captionId = `${block.id}:caption`;
   const blockAnnotations = annotations.flatMap((item) => {
+    const segment = item.position_json.segments?.find((value) => value.block_id === block.id);
+    if (segment) return [{ ...item, position_json: { ...item.position_json, block_id: block.id, start_offset: segment.start_offset, end_offset: segment.end_offset } }];
     if (item.position_json.block_id === block.id) return [item];
     if (item.position_json.block_id || item.page_number !== block.page_number || !item.selected_text) return [];
     const selected = item.selected_text.trim();
@@ -203,8 +235,12 @@ function DocumentBlockView({ block, blocks, scrollRoot, annotations, activeSelec
     if (start < 0) return [];
     return [{ ...item, position_json: { ...item.position_json, block_id: block.id, start_offset: start, end_offset: start + selected.length } }];
   });
-  if (activeSelection?.blockId === block.id) blockAnnotations.push({ id: "active-selection", paper_id: "", kind: "highlight", page_number: block.page_number, position_json: { block_id: block.id, start_offset: activeSelection.startOffset, end_offset: activeSelection.endOffset }, color: "#85BEF2", created_at: "" });
+  const activeBlockSegment = activeSelection?.segments?.find((value) => value.blockId === block.id)
+    ?? (activeSelection?.blockId === block.id && activeSelection.startOffset != null && activeSelection.endOffset != null ? activeSelection : undefined);
+  if (activeBlockSegment) blockAnnotations.push({ id: "active-selection", paper_id: "", kind: "highlight", page_number: block.page_number, position_json: { block_id: block.id, start_offset: activeBlockSegment.startOffset, end_offset: activeBlockSegment.endOffset }, color: "#9CCCF4", created_at: "" });
   const captionAnnotations = annotations.flatMap((item) => {
+    const segment = item.position_json.segments?.find((value) => value.block_id === captionId);
+    if (segment) return [{ ...item, position_json: { ...item.position_json, block_id: captionId, start_offset: segment.start_offset, end_offset: segment.end_offset } }];
     if (item.position_json.block_id === captionId) return [item];
     if (item.position_json.block_id || item.page_number !== block.page_number || !item.selected_text || !block.caption) return [];
     const selected = item.selected_text.trim();
@@ -212,7 +248,9 @@ function DocumentBlockView({ block, blocks, scrollRoot, annotations, activeSelec
     if (start < 0) return [];
     return [{ ...item, position_json: { ...item.position_json, block_id: captionId, start_offset: start, end_offset: start + selected.length } }];
   });
-  if (activeSelection?.blockId === captionId) captionAnnotations.push({ id: "active-caption-selection", paper_id: "", kind: "highlight", page_number: block.page_number, position_json: { block_id: captionId, start_offset: activeSelection.startOffset, end_offset: activeSelection.endOffset }, color: "#85BEF2", created_at: "" });
+  const activeCaptionSegment = activeSelection?.segments?.find((value) => value.blockId === captionId)
+    ?? (activeSelection?.blockId === captionId && activeSelection.startOffset != null && activeSelection.endOffset != null ? activeSelection : undefined);
+  if (activeCaptionSegment) captionAnnotations.push({ id: "active-caption-selection", paper_id: "", kind: "highlight", page_number: block.page_number, position_json: { block_id: captionId, start_offset: activeCaptionSegment.startOffset, end_offset: activeCaptionSegment.endOffset }, color: "#9CCCF4", created_at: "" });
   if (kind === "caption") return null;
   if (kind === "formula" && block.html) return <Box {...anchorProps} data-text-block data-block-id={block.id} data-page-number={block.page_number} onClick={(event) => followRichReference(event, blocks, scrollRoot.current)} sx={{ my: 2, overflowX: "auto", py: .5, textAlign: "center", "& .katex-display": { m: 0 }, "& .ltx_eqn_table": { width: "100%" } }} dangerouslySetInnerHTML={{ __html: renderArxivHtml(block.html, blockAnnotations, search, block.id) }} />;
   if (["picture", "table", "formula"].includes(kind)) {
@@ -225,7 +263,7 @@ function DocumentBlockView({ block, blocks, scrollRoot, annotations, activeSelec
   const richProps = rich ? { onClick: (event: React.MouseEvent<HTMLElement>) => followRichReference(event, blocks, scrollRoot.current), dangerouslySetInnerHTML: { __html: rich } } : {};
   if (headingLevel) return <Typography {...anchorProps} data-text-block data-block-id={block.id} data-page-number={block.page_number} component={headingLevel === 1 ? "h1" : "h2"} sx={{ mt: headingLevel === 1 ? 1 : 3.5, mb: 1.5, fontSize: headingLevel === 1 ? "1.7em" : "1.3em", lineHeight: 1.35, fontWeight: 750, fontFamily: "inherit" }} {...richProps}>{rich ? undefined : content}</Typography>;
   if (kind.includes("list") || kind === "bibliography_item") return <Typography {...anchorProps} data-text-block data-block-id={block.id} data-page-number={block.page_number} component="li" sx={{ mb: 1, pl: .5, fontFamily: "inherit", fontSize: kind === "bibliography_item" ? ".88em" : "inherit", lineHeight: 1.55, "& .ltx_bib_key": { display: "none" }, "& .ltx_bibblock": { display: "inline" }, "& .ltx_bibblock + .ltx_bibblock": { ml: .5 } }} {...richProps}>{rich ? undefined : content}</Typography>;
-  return <Typography {...anchorProps} data-text-block data-block-id={block.id} data-page-number={block.page_number} component="p" sx={{ mb: 1.4, textAlign: { xs: "left", sm: "justify" }, hyphens: "auto", WebkitHyphens: "auto", overflowWrap: "break-word", wordBreak: "normal", fontFamily: "inherit", fontSize: "inherit", lineHeight: "inherit", "& a": { color: "primary.main", textDecorationColor: "rgba(25,118,210,.4)", cursor: "pointer" }, "& .katex": { fontSize: "1em" } }} {...richProps}>{rich ? undefined : content}</Typography>;
+  return <Typography {...anchorProps} data-text-block data-block-id={block.id} data-page-number={block.page_number} component="p" sx={{ mb: "1lh", textAlign: { xs: "left", sm: "justify" }, hyphens: "auto", WebkitHyphens: "auto", overflowWrap: "break-word", wordBreak: "normal", fontFamily: "inherit", fontSize: "inherit", lineHeight: "inherit", "& a": { color: "primary.main", textDecorationColor: "rgba(25,118,210,.4)", cursor: "pointer" }, "& .katex": { fontSize: "1em" } }} {...richProps}>{rich ? undefined : content}</Typography>;
 }
 
 function renderArxivHtml(html: string, annotations: Annotation[] = [], search = "", blockId = "") {

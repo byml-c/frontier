@@ -98,7 +98,13 @@ export type Annotation = {
   page_number: number;
   selected_text?: string | null;
   content?: string | null;
-  position_json: { rects?: number[][]; block_id?: string; start_offset?: number; end_offset?: number };
+  position_json: {
+    rects?: number[][];
+    block_id?: string;
+    start_offset?: number;
+    end_offset?: number;
+    segments?: Array<{ block_id: string; start_offset: number; end_offset: number }>;
+  };
   color?: string | null;
   created_at: string;
 };
