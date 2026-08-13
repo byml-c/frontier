@@ -59,7 +59,8 @@ export function MarkdownMessage({
         "& table": { display: "block", maxWidth: "100%", overflowX: "auto", borderCollapse: "collapse", my: 1.25 },
         "& th, & td": { border: "1px solid", borderColor: inverted ? "rgba(255,255,255,.35)" : "divider", px: 1.25, py: 0.75, textAlign: "left" },
         "& th": { bgcolor: inverted ? "rgba(0,0,0,.12)" : "action.hover" },
-        "& .katex-display": { my: 1.25, overflowX: "auto", overflowY: "hidden", py: 0.25 },
+        "& .katex": { lineHeight: 1.2 },
+        "& .katex-display": { my: 1.25, overflowX: "auto", overflowY: "visible", py: 0.5 },
       }}
     >
       <ReactMarkdown
