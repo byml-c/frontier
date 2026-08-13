@@ -76,7 +76,7 @@ tailscale serve status
 
 ## 5. 从开发机一键更新
 
-项目提供了固定部署到 SSH 别名 `Self_ALI` 的脚本。它会在服务器的
+项目提供了固定部署到 SSH 别名 `SelfALI` 的脚本。它会在服务器的
 `/home/byml/agent/frontier` 中执行仅快进拉取、同步前端依赖、构建 Web，随后重启并
 检查 `frontier.service`：
 

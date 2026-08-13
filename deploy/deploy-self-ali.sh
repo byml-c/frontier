@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-readonly REMOTE_HOST="Self_ALI"
+readonly REMOTE_HOST="SelfALI"
 readonly REMOTE_PROJECT="/home/byml/agent/frontier"
 readonly SYSTEMD_SERVICE="frontier.service"
 
@@ -16,6 +16,7 @@ echo "注意：脚本只会部署已经提交并推送到 Git 远端的代码。
 ssh \
   -o BatchMode=yes \
   -o ConnectTimeout=10 \
+  -o ClearAllForwardings=yes \
   "${REMOTE_HOST}" \
   "bash -se -- '${REMOTE_PROJECT}' '${SYSTEMD_SERVICE}'" <<'REMOTE_SCRIPT'
 set -Eeuo pipefail
