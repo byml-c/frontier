@@ -17,6 +17,22 @@ export type AgentActivityPhase = {
   toolCount: number;
 };
 
+/** Remove paired strong delimiters because activity summaries are plain UI text, not Markdown. */
+export function plainActivitySummary(value?: string): string {
+  if (!value) return "";
+  let cursor = 0;
+  let result = "";
+  while (cursor < value.length) {
+    const start = value.indexOf("**", cursor);
+    if (start < 0) return (result + value.slice(cursor)).trim();
+    const end = value.indexOf("**", start + 2);
+    if (end < 0) return (result + value.slice(cursor)).trim();
+    result += value.slice(cursor, start) + value.slice(start + 2, end).trim();
+    cursor = end + 2;
+  }
+  return result.trim();
+}
+
 function activityStatus(items: AgentActivityItem[]): AgentActivityItem["status"] {
   if (items.some((item) => item.status === "running")) return "running";
   if (items.some((item) => item.status === "failed")) return "failed";
@@ -89,6 +105,22 @@ export function topLevelActivityStatus(items: AgentActivityItem[]): AgentActivit
   const beforeReasoning = items.slice(0, reasoningIndex < 0 ? items.length : reasoningIndex);
   return beforeReasoning.find((item) => item.id === "agent-startup")
     ?? beforeReasoning.filter((item) => item.kind === "status").at(-1);
+}
+
+export function agentActivityOutcome(
+  items: AgentActivityItem[],
+  pending: boolean,
+  turnStatus?: string,
+  completionConfirmed = false,
+): "running" | "completed" | "failed" {
+  if (pending || items.some((item) => item.status === "running")) return "running";
+  if (turnStatus === "completed" || completionConfirmed) return "completed";
+  if (
+    turnStatus === "failed"
+    || turnStatus === "interrupted"
+    || items.some((item) => item.status === "failed")
+  ) return "failed";
+  return "completed";
 }
 
 export function updateActivities(

@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 import os
+import re
+import shlex
 import subprocess
 from collections.abc import Iterator
 from typing import Any
@@ -126,6 +128,132 @@ def _short_public_text(value: Any, limit: int = 600) -> str:
     return text if len(text) <= limit else f"{text[: limit - 1]}…"
 
 
+def _command_tokens(command: str) -> list[str]:
+    """Return the Frontier CLI portion of a shell command without exposing wrappers."""
+    match = re.search(r"\bfrontier\s+", command)
+    if not match:
+        return []
+    try:
+        return shlex.split(command[match.end() :])
+    except ValueError:
+        return command[match.end() :].split()
+
+
+def _option_value(tokens: list[str], option: str) -> str | None:
+    try:
+        value = tokens[tokens.index(option) + 1]
+    except (ValueError, IndexError):
+        return None
+    return value.strip("'\"") or None
+
+
+def _arxiv_query(tokens: list[str]) -> str | None:
+    values: list[str] = []
+    for token in tokens[2:]:
+        if token.startswith("--"):
+            break
+        values.append(token)
+    query = _short_public_text(" ".join(values).strip("'\""), 56)
+    return query or None
+
+
+def _command_output_payload(item: dict[str, Any]) -> Any:
+    output = item.get("aggregatedOutput")
+    if not isinstance(output, str) or not output.strip():
+        return None
+    decoder = json.JSONDecoder()
+    for marker in ("{", "["):
+        start = output.find(marker)
+        if start < 0:
+            continue
+        try:
+            value, _ = decoder.raw_decode(output[start:])
+        except json.JSONDecodeError:
+            continue
+        return value
+    return None
+
+
+def _paper_title(payload: Any) -> str | None:
+    if not isinstance(payload, dict):
+        return None
+    title = payload.get("title")
+    if not isinstance(title, str) and isinstance(payload.get("paper"), dict):
+        title = payload["paper"].get("title")
+    return _short_public_text(title, 76) if isinstance(title, str) and title.strip() else None
+
+
+def _frontier_command_actions(command: str, payload: Any = None) -> tuple[str, str] | None:
+    """Describe a Frontier CLI command as running/completed user-facing actions."""
+    tokens = _command_tokens(command)
+    if len(tokens) < 2:
+        return None
+    group, action = tokens[:2]
+    if group == "paper":
+        if action == "text":
+            page = _option_value(tokens, "--page")
+            target = f"论文第 {page} 页正文" if page else "论文正文"
+            return f"正在读取{target}", f"已读取{target}"
+        if action == "context":
+            return "正在载入论文上下文", "已载入论文上下文"
+        if action == "render-page":
+            page = tokens[3] if len(tokens) > 3 and not tokens[3].startswith("--") else None
+            target = f"论文第 {page} 页图像" if page else "论文页面图像"
+            return f"正在读取{target}", f"已读取{target}"
+        if action == "resources":
+            kind = _option_value(tokens, "--kind")
+            resource = {
+                "formula": "公式 TeX",
+                "figure": "图片",
+                "table": "表格",
+                "reference": "引用关系",
+            }.get(kind or "", "结构化内容")
+            return f"正在读取论文{resource}", f"已读取论文{resource}"
+        actions = {
+            "get": ("正在读取论文元信息", "已读取论文元信息"),
+            "list": ("正在查询论文库", "已查询论文库"),
+            "download": ("正在下载论文原文", "已下载论文原文"),
+            "update": ("正在更新论文元信息", "已更新论文元信息"),
+            "finish": ("正在整理精读结论", "已整理精读结论"),
+            "upload": ("正在上传论文", "已上传论文"),
+        }
+        if action in {"add-arxiv", "add-url", "create"}:
+            supplied = tokens[2] if len(tokens) > 2 and not tokens[2].startswith("--") else None
+            target = _paper_title(payload) or (
+                _short_public_text(supplied, 76) if supplied else "待识别论文"
+            )
+            return f"正在添加论文：{target}", f"已添加论文：{target}"
+        return actions.get(action, ("正在处理论文资料", "已处理论文资料"))
+    if group == "source" and action == "arxiv-search":
+        query = _arxiv_query(tokens)
+        suffix = f" · 关键词：{query}" if query else ""
+        return f"正在搜索 arXiv 论文{suffix}", f"已搜索 arXiv 论文{suffix}"
+    if group == "graph":
+        return "正在读取或更新研究图谱", "已完成研究图谱操作"
+    if group == "memory":
+        return "正在读取或更新研究记忆", "已完成研究记忆操作"
+    return None
+
+
+def _frontier_result_detail(command: str, payload: Any) -> str | None:
+    tokens = _command_tokens(command)
+    if tokens[:2] != ["source", "arxiv-search"] or not isinstance(payload, dict):
+        return None
+    items = payload.get("items")
+    if not isinstance(items, list):
+        return None
+    titles = [
+        _short_public_text(item.get("title"), 68)
+        for item in items
+        if isinstance(item, dict) and isinstance(item.get("title"), str)
+    ]
+    if not titles:
+        return "未找到匹配论文"
+    visible = "；".join(titles[:3])
+    remaining = len(titles) - 3
+    return f"找到 {len(titles)} 篇：{visible}" + (f"；另有 {remaining} 篇" if remaining > 0 else "")
+
+
 def _tool_activity(item: dict[str, Any], status: str) -> dict[str, Any] | None:
     item_type = item.get("type")
     activity_id = str(item.get("id") or f"tool-{id(item)}")
@@ -133,28 +261,20 @@ def _tool_activity(item: dict[str, Any], status: str) -> dict[str, Any] | None:
     failed = status == "failed"
     if item_type == "commandExecution":
         command = str(item.get("command") or "")
-        if "frontier paper context" in command or "frontier paper show" in command:
-            subject = "论文资料"
-        elif "frontier paper" in command:
-            subject = "论文信息"
-        elif "frontier graph" in command:
-            subject = "研究图谱"
-        elif "frontier memory" in command:
-            subject = "研究记忆"
-        elif "uv run python" in command or command.lstrip().startswith("python"):
-            subject = "计算工具"
-        else:
-            subject = "研究工具"
+        output_payload = _command_output_payload(item)
+        actions = _frontier_command_actions(command, output_payload)
+        if actions is None and (
+            "uv run python" in command or command.lstrip().startswith("python")
+        ):
+            actions = ("正在运行数据计算", "已完成数据计算")
+        if actions is None:
+            actions = ("正在使用研究工具", "已完成研究工具调用")
         exit_code = item.get("exitCode")
         duration = item.get("durationMs")
         failed = failed or (exit_code is not None and exit_code != 0)
-        label = (
-            f"正在读取{subject}"
-            if status == "running"
-            else f"{subject}调用失败" if failed else f"已完成{subject}调用"
-        )
+        label = actions[0] if status == "running" else f"{actions[0].removeprefix('正在')}失败" if failed else actions[1]
         if status != "running":
-            detail = "调用失败" if failed else "调用成功"
+            detail = "调用失败" if failed else _frontier_result_detail(command, output_payload) or "调用成功"
             if isinstance(duration, int):
                 detail += f" · {duration / 1000:.1f} 秒"
     elif item_type in {"mcpToolCall", "dynamicToolCall"}:
@@ -261,6 +381,9 @@ def _stream_turn(
                 "text": (recovery_prompt or prompt) if recovered else prompt,
             }
         ],
+        # Request the provider-supported public reasoning summary. Raw
+        # `item/reasoning/textDelta` content is intentionally not forwarded.
+        "summary": "concise",
     }
     if reasoning_effort:
         turn_params["effort"] = reasoning_effort

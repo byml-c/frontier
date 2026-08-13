@@ -6,31 +6,26 @@ import PsychologyAltRounded from "@mui/icons-material/PsychologyAltRounded";
 import { Box, CircularProgress, Collapse, Divider, Stack, Typography } from "@mui/material";
 import { type ReactNode, useEffect, useMemo, useState } from "react";
 import { templateSurfaces } from "../theme";
-import { activityPhasesForDisplay, groupActivities, topLevelActivityStatus, type AgentActivityItem, type AgentActivityPhase } from "./agentActivityState";
+import { activityPhasesForDisplay, agentActivityOutcome, groupActivities, plainActivitySummary, topLevelActivityStatus, type AgentActivityItem, type AgentActivityPhase } from "./agentActivityState";
 
-type Props = { items: AgentActivityItem[]; children?: ReactNode; pending?: boolean; autoCollapseWhenComplete?: boolean };
+type Props = { items: AgentActivityItem[]; children?: ReactNode; pending?: boolean; autoCollapseWhenComplete?: boolean; turnStatus?: string };
 
-export function AgentActivity({ items, children, pending = false, autoCollapseWhenComplete = false }: Props) {
+export function AgentActivity({ items, children, pending = false, autoCollapseWhenComplete = false, turnStatus }: Props) {
   const groupedPhases = useMemo(() => groupActivities(items), [items]);
-  const running = items.some((item) => item.status === "running");
-  const failed = !running && items.some((item) => item.status === "failed");
-  const active = running || pending;
+  const outcome = agentActivityOutcome(items, pending, turnStatus, autoCollapseWhenComplete);
+  const active = outcome === "running";
+  const failed = outcome === "failed";
   const phases = useMemo(() => activityPhasesForDisplay(groupedPhases, active), [active, groupedPhases]);
   const connectionStatus = useMemo(() => topLevelActivityStatus(items), [items]);
   const hasOutput = Boolean(children);
   const latestPhaseId = phases.at(-1)?.id;
   const [expanded, setExpanded] = useState(() => active || !hasOutput);
-  const [expandedPhaseId, setExpandedPhaseId] = useState<string | null>(() => active ? latestPhaseId ?? null : null);
+  const [collapsedPhaseIds, setCollapsedPhaseIds] = useState<Set<string>>(() => new Set());
 
   useEffect(() => {
     if (active) setExpanded(true);
     else if (hasOutput || autoCollapseWhenComplete) setExpanded(false);
   }, [active, autoCollapseWhenComplete, hasOutput]);
-
-  useEffect(() => {
-    if (active && latestPhaseId) setExpandedPhaseId(latestPhaseId);
-    else if (hasOutput || autoCollapseWhenComplete) setExpandedPhaseId(null);
-  }, [active, autoCollapseWhenComplete, hasOutput, latestPhaseId]);
 
   if (!items.length && !hasOutput && !pending) return null;
   const statusLabel = active ? "处理中" : failed ? "处理未完成" : "处理完成";
@@ -61,8 +56,13 @@ export function AgentActivity({ items, children, pending = false, autoCollapseWh
                 key={phase.id}
                 phase={phase}
                 pending={active && phase.id === latestPhaseId}
-                expanded={expandedPhaseId === phase.id}
-                onToggle={() => setExpandedPhaseId((value) => value === phase.id ? null : phase.id)}
+                expanded={!collapsedPhaseIds.has(phase.id)}
+                onToggle={() => setCollapsedPhaseIds((value) => {
+                  const next = new Set(value);
+                  if (next.has(phase.id)) next.delete(phase.id);
+                  else next.add(phase.id);
+                  return next;
+                })}
               />
             ))}
             {!phases.length && pending && <Stack direction="row" alignItems="center" spacing={1} sx={{ px: .5, py: .75 }}><CircularProgress size={14} /><Typography variant="caption" color="text.secondary">正在启动 Agent…</Typography></Stack>}
@@ -82,9 +82,11 @@ function ActivityPhase({ phase, pending, expanded, onToggle }: { phase: AgentAct
   const failed = !running && phase.status === "failed";
   const status = running ? "处理中" : failed ? "未完成" : "完成";
   const secondaryItems = phase.kind === "analysis" ? phase.items.filter((item) => item.kind !== "reasoning") : phase.items;
+  const summary = plainActivitySummary(phase.detail) || (phase.kind === "analysis" && running ? "Agent 正在分析，暂未提供可展示的摘要…" : status);
+  const canCollapse = secondaryItems.length > 0;
 
   return (
-    <Box sx={{ border: 1, borderColor: "divider", borderRadius: 1.5, overflow: "hidden", bgcolor: "rgba(255,255,255,.45)" }}>
+    <Box sx={{ px: .5, py: .35 }}>
       <Stack
         component="button"
         type="button"
@@ -92,19 +94,17 @@ function ActivityPhase({ phase, pending, expanded, onToggle }: { phase: AgentAct
         alignItems="center"
         spacing={1}
         aria-expanded={expanded}
-        onClick={onToggle}
-        sx={{ width: "100%", border: 0, bgcolor: "transparent", color: "text.primary", px: 1.25, py: .9, cursor: "pointer", textAlign: "left" }}
+        onClick={() => canCollapse && onToggle()}
+        sx={{ width: "100%", border: 0, bgcolor: "transparent", color: "text.primary", p: 0, cursor: canCollapse ? "pointer" : "default", textAlign: "left" }}
       >
         {running ? <CircularProgress size={14} /> : failed ? <ErrorOutlineRounded color="error" sx={{ fontSize: 17 }} /> : <PsychologyAltRounded color="action" sx={{ fontSize: 17 }} />}
         <Typography variant="caption" fontWeight={700}>{phase.kind === "analysis" ? "分析" : "准备"}</Typography>
-        {phase.toolCount > 0 && <Typography variant="caption" color="text.secondary">{phase.toolCount} 次工具调用</Typography>}
+        {canCollapse && <KeyboardArrowDownRounded color="action" sx={{ ml: "0!important", fontSize: 17, transition: "transform .18s ease", transform: expanded ? "rotate(180deg)" : "rotate(0deg)" }} />}
+        <Typography variant="caption" color="text.secondary" sx={{ minWidth: 0, flex: 1, whiteSpace: "pre-wrap", overflowWrap: "anywhere" }}>{summary}</Typography>
         <Typography variant="caption" color={failed ? "error.main" : "text.secondary"} sx={{ ml: "auto!important" }}>{status}</Typography>
-        <KeyboardArrowDownRounded color="action" sx={{ fontSize: 18, transition: "transform .18s ease", transform: expanded ? "rotate(180deg)" : "rotate(0deg)" }} />
       </Stack>
-      <Collapse in={expanded}>
-        <Box sx={{ mx: 1.25, mb: 1.1, pl: 1.25, borderLeft: 2, borderColor: "divider" }}>
-          {phase.detail && <Typography variant="caption" color="text.secondary" display="block" sx={{ pb: secondaryItems.length ? .85 : 0, whiteSpace: "pre-wrap", overflowWrap: "anywhere" }}>{phase.detail}</Typography>}
-          {!phase.detail && phase.kind === "analysis" && running && <Typography variant="caption" color="text.secondary" display="block" sx={{ pb: secondaryItems.length ? .85 : 0 }}>正在梳理信息…</Typography>}
+      <Collapse in={expanded && canCollapse}>
+        <Box sx={{ ml: .85, mt: .55, pl: 2, borderLeft: 1, borderColor: "divider" }}>
           <Stack spacing={.8}>
             {secondaryItems.map((item) => <ActivityStep item={item} key={item.id} />)}
           </Stack>
@@ -119,7 +119,7 @@ function ActivityStep({ item }: { item: AgentActivityItem }) {
     <Stack direction="row" spacing={.8} alignItems="flex-start">
       {item.status === "running" ? <CircularProgress size={13} sx={{ mt: .25 }} /> : item.status === "failed" ? <ErrorOutlineRounded color="error" sx={{ fontSize: 15, mt: .1 }} /> : item.kind === "tool" ? <ConstructionRounded color="action" sx={{ fontSize: 15, mt: .1 }} /> : <CheckCircleOutlineRounded color="action" sx={{ fontSize: 15, mt: .1 }} />}
       <Box sx={{ minWidth: 0 }}>
-        <Typography variant="caption" fontWeight={600} display="block">{item.label}</Typography>
+        <Typography variant="caption" display="block"><Box component="span" fontWeight={700}>{item.kind === "tool" ? "工具：" : "进度："}</Box>{item.label}</Typography>
         {item.detail && <Typography variant="caption" color="text.secondary" display="block" sx={{ whiteSpace: "pre-wrap", overflowWrap: "anywhere" }}>{item.detail}</Typography>}
       </Box>
     </Stack>

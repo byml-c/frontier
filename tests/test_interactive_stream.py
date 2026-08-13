@@ -18,7 +18,7 @@ def test_failed_command_is_exposed_as_failed_activity() -> None:
 
     assert activity is not None
     assert activity["status"] == "failed"
-    assert activity["label"] == "论文资料调用失败"
+    assert activity["label"] == "载入论文上下文失败"
 
 
 def test_python_command_is_exposed_as_computation_activity() -> None:
@@ -34,13 +34,88 @@ def test_python_command_is_exposed_as_computation_activity() -> None:
     )
 
     assert activity is not None
-    assert activity["label"] == "已完成计算工具调用"
+    assert activity["label"] == "已完成数据计算"
     assert activity["status"] == "completed"
+
+
+def test_paper_commands_are_exposed_as_specific_activities() -> None:
+    cases = [
+        ("uv run frontier paper text paper-1", "已读取论文正文"),
+        ("uv run frontier paper text paper-1 --page 7", "已读取论文第 7 页正文"),
+        (
+            "uv run frontier paper resources paper-1 --kind formula",
+            "已读取论文公式 TeX",
+        ),
+        (
+            "uv run frontier paper resources paper-1 --kind figure --block-id fig-2",
+            "已读取论文图片",
+        ),
+        ("uv run frontier paper resources paper-1 --kind table", "已读取论文表格"),
+        (
+            "uv run frontier paper resources paper-1 --kind reference",
+            "已读取论文引用关系",
+        ),
+        ("uv run frontier paper render-page paper-1 12 --dpi 144", "已读取论文第 12 页图像"),
+    ]
+
+    for command, expected in cases:
+        activity = _tool_activity(
+            {"id": command, "type": "commandExecution", "command": command, "exitCode": 0},
+            "completed",
+        )
+        assert activity is not None
+        assert activity["label"] == expected
+
+
+def test_arxiv_search_activity_includes_a_short_query() -> None:
+    activity = _tool_activity(
+        {
+            "id": "search-1",
+            "type": "commandExecution",
+            "command": (
+                "uv run frontier source arxiv-search "
+                "'ti:JEPA-WAM AND au:Smith' --max-results 10 --no-ingest"
+            ),
+            "aggregatedOutput": (
+                '{"count": 2, "items": ['
+                '{"title": "JEPA-WAM: World Models for Action"}, '
+                '{"title": "A Comparison Baseline"}]}'
+            ),
+            "exitCode": 0,
+        },
+        "completed",
+    )
+
+    assert activity is not None
+    assert activity["label"] == "已搜索 arXiv 论文 · 关键词：ti:JEPA-WAM AND au:Smith"
+    assert activity["detail"] == (
+        "找到 2 篇：JEPA-WAM: World Models for Action；A Comparison Baseline"
+    )
+
+
+def test_added_paper_activity_uses_returned_title() -> None:
+    activity = _tool_activity(
+        {
+            "id": "add-1",
+            "type": "commandExecution",
+            "command": "uv run frontier paper add-arxiv 2608.10232",
+            "aggregatedOutput": (
+                'warning before json\n{"id": "paper-1", '
+                '"title": "A Generalist Tactile Policy"}'
+            ),
+            "exitCode": 0,
+        },
+        "completed",
+    )
+
+    assert activity is not None
+    assert activity["label"] == "已添加论文：A Generalist Tactile Policy"
 
 
 def test_stream_turn_exposes_public_activity_without_mixing_commentary(
     monkeypatch,
 ) -> None:
+    writes: list[dict] = []
     responses = iter([{"thread": {"id": "thread-1"}}, {}])
     messages = iter(
         [
@@ -117,7 +192,11 @@ def test_stream_turn_exposes_public_activity_without_mixing_commentary(
             {"method": "turn/completed", "params": {"turn": {"status": "completed"}}},
         ]
     )
-    monkeypatch.setattr(interactive_stream, "_write_message", lambda *_args: None)
+    monkeypatch.setattr(
+        interactive_stream,
+        "_write_message",
+        lambda _process, message: writes.append(message),
+    )
     monkeypatch.setattr(interactive_stream, "_await_response", lambda *_args: next(responses))
     monkeypatch.setattr(interactive_stream, "_read_message", lambda *_args: next(messages))
 
@@ -127,6 +206,8 @@ def test_stream_turn_exposes_public_activity_without_mixing_commentary(
         event["type"] == "activity" and event.get("kind") == "commentary" for event in events
     )
     assert [event["delta"] for event in events if event["type"] == "delta"] == ["**结论** 正文"]
+    turn_start = next(message for message in writes if message.get("method") == "turn/start")
+    assert turn_start["params"]["summary"] == "concise"
 
 
 def test_stream_turn_recovers_missing_rollout_with_new_thread(monkeypatch) -> None:

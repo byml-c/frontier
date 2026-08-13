@@ -4,7 +4,9 @@ import test from "node:test";
 import {
   activitiesFromContext,
   activityPhasesForDisplay,
+  agentActivityOutcome,
   groupActivities,
+  plainActivitySummary,
   topLevelActivityStatus,
   type AgentActivityItem,
   updateActivities,
@@ -48,6 +50,14 @@ test("a failed tool marks its analysis phase as failed", () => {
 
   assert.equal(phase.status, "failed");
   assert.equal(phase.toolCount, 1);
+});
+
+test("activity summaries render as plain text instead of Markdown source", () => {
+  assert.equal(
+    plainActivitySummary("**Comparing SLIM to JEPA-WAM** **Reviewing details**"),
+    "Comparing SLIM to JEPA-WAM Reviewing details",
+  );
+  assert.equal(plainActivitySummary("保留没有配对的 ** 标记"), "保留没有配对的 ** 标记");
 });
 
 test("live and persisted activity histories are not truncated to eight items", () => {
@@ -100,4 +110,15 @@ test("connection lifecycle is shown at the top instead of a preparation card", (
 
   assert.equal(topLevelActivityStatus(items)?.label, "Agent 已连接");
   assert.deepEqual(phases.map((phase) => phase.id), ["analysis-reason-1"]);
+});
+
+test("a recovered tool failure does not fail a completed turn", () => {
+  const items = [
+    activity({ id: "tool-failed", kind: "tool", status: "failed" }),
+    activity({ id: "tool-recovered", kind: "tool", status: "completed" }),
+  ];
+
+  assert.equal(agentActivityOutcome(items, false, "completed"), "completed");
+  assert.equal(agentActivityOutcome(items, false, "failed"), "failed");
+  assert.equal(agentActivityOutcome(items, true, "completed"), "running");
 });

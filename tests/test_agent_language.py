@@ -29,6 +29,14 @@ def test_persisted_agent_workflows_require_simplified_chinese(
     assert "Simplified Chinese" in prompt
 
 
+@pytest.mark.parametrize("kind", ["paper_chat", "global_chat"])
+def test_interactive_agent_requires_chinese_public_reasoning(kind: str) -> None:
+    prompt = build_prompt(TaskRun(id="task-chat", kind=kind, payload_json={"message": "test"}))
+
+    assert "final answer and every public progress or reasoning summary" in prompt
+    assert "Simplified Chinese" in prompt
+
+
 @pytest.mark.parametrize(
     ("kind", "payload", "ambiguity_action"),
     [
