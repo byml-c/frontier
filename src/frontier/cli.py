@@ -8,6 +8,7 @@ from typing import Any
 import httpx
 import typer
 
+from .auth import INTERNAL_TOKEN_HEADER, internal_api_token
 from .services.generated_content import (
     PAPER_ANALYSIS_PROSE_FIELDS,
     non_chinese_prose_fields,
@@ -54,6 +55,7 @@ class ApiClient:
                     method,
                     f"{self.base_url}{path}",
                     timeout=kwargs.pop("timeout", 120),
+                    headers={INTERNAL_TOKEN_HEADER: internal_api_token(), **kwargs.pop("headers", {})},
                     **kwargs,
                 )
             response.raise_for_status()

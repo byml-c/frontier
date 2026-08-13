@@ -16,7 +16,7 @@ export async function api<T>(path: string, options: RequestInit = {}): Promise<T
   if (options.body && !(options.body instanceof FormData) && !headers.has("Content-Type")) {
     headers.set("Content-Type", "application/json");
   }
-  const response = await fetch(`${API_ROOT}${path}`, { ...options, headers });
+  const response = await fetch(`${API_ROOT}${path}`, { credentials: "include", ...options, headers });
   if (!response.ok) {
     const text = await response.text();
     let detail: unknown = text || response.statusText;
@@ -59,6 +59,7 @@ export async function streamApi(
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(payload),
     signal,
+    credentials: "include",
   });
   if (!response.ok) {
     const body = await response.json().catch(() => ({ detail: response.statusText }));

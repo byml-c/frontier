@@ -9,6 +9,7 @@ import PsychologyRounded from "@mui/icons-material/PsychologyRounded";
 import SettingsRounded from "@mui/icons-material/SettingsRounded";
 import StorageRounded from "@mui/icons-material/StorageRounded";
 import TaskAltRounded from "@mui/icons-material/TaskAltRounded";
+import StarRounded from "@mui/icons-material/StarRounded";
 import { Box, Button, Collapse, Drawer, IconButton, List, ListItemButton, ListItemIcon, ListItemText, Stack, Toolbar, Typography, useMediaQuery, useTheme } from "@mui/material";
 import { useEffect, useState } from "react";
 import { NavLink, Outlet, useLocation } from "react-router-dom";
@@ -26,6 +27,7 @@ const navItems: NavItem[] = [
     { to: "/briefs", label: "往期简报", active: (path) => path.startsWith("/briefs") },
   ] },
   { to: "/graph", label: "研究图谱", icon: HubRounded },
+  { to: "/daily", label: "每日精选", icon: StarRounded },
   { to: "/library", label: "论文", icon: AutoStoriesRounded, children: [
     { to: "/library?view=papers", label: "论文库", active: (path, search) => path === "/library" && new URLSearchParams(search).get("view") !== "collection" },
     { to: "/library?view=collection", label: "积累库", active: (path, search) => path === "/library" && new URLSearchParams(search).get("view") === "collection" },

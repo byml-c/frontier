@@ -6,10 +6,11 @@ import uvicorn
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
-from .api import briefs, conversations, graph, papers, system
+from .api import auth, briefs, conversations, daily, graph, papers, system
+from .auth import request_is_internal, request_is_trusted
 from .config import settings
 from .database import SessionLocal, create_tables
 from .scheduler import start_scheduler, stop_scheduler
@@ -42,6 +43,29 @@ app.add_middleware(GZipMiddleware, minimum_size=1000, compresslevel=6)
 
 
 @app.middleware("http")
+async def protect_private_api(request: Request, call_next):  # type: ignore[no-untyped-def]
+    path = request.url.path
+    public_api = (
+        request.method == "OPTIONS"
+        or path == "/api/health"
+        or path == "/api/auth/status"
+        or path == "/api/auth/login"
+        or (request.method == "GET" and path == "/api/daily")
+    )
+    protected_service_path = path == "/api" or path.startswith("/api/") or path in {
+        "/docs", "/redoc", "/openapi.json"
+    }
+    if (
+        protected_service_path
+        and not public_api
+        and not request_is_trusted(request)
+        and not request_is_internal(request)
+    ):
+        return JSONResponse(status_code=401, content={"detail": "请先验证此设备"})
+    return await call_next(request)
+
+
+@app.middleware("http")
 async def static_cache_headers(request: Request, call_next):  # type: ignore[no-untyped-def]
     response = await call_next(request)
     if request.url.path.startswith("/assets/") and response.status_code == 200:
@@ -50,6 +74,8 @@ async def static_cache_headers(request: Request, call_next):  # type: ignore[no-
 
 
 app.include_router(system.router)
+app.include_router(auth.router)
+app.include_router(daily.router)
 app.include_router(papers.router)
 app.include_router(papers.tags_router)
 app.include_router(graph.router)

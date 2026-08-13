@@ -111,6 +111,17 @@ export type Annotation = {
   created_at: string;
 };
 
+export type DailyAnnotation = Pick<Annotation, "id" | "kind" | "page_number" | "selected_text" | "content" | "color" | "created_at">;
+export type DailyPayload = {
+  date: string;
+  available_dates: string[];
+  selection: null | {
+    date: string;
+    paper: Paper & { arxiv_id?: string | null };
+    annotations: DailyAnnotation[];
+  };
+};
+
 export type DocumentBlock = {
   id: string;
   anchor?: string | null;

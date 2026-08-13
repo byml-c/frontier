@@ -186,6 +186,15 @@ class BriefItem(Base, TimestampMixin):
     snapshot_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
 
 
+class DailySelection(Base, TimestampMixin):
+    __tablename__ = "daily_selections"
+
+    selection_date: Mapped[date] = mapped_column(Date, primary_key=True)
+    paper_id: Mapped[str] = mapped_column(
+        ForeignKey("papers.id", ondelete="CASCADE"), index=True
+    )
+
+
 class Tag(Base, TimestampMixin):
     __tablename__ = "tags"
 

@@ -20,6 +20,11 @@ cd web && pnpm install && pnpm build && cd ..
 uv run frontier-server
 ```
 
+Web 默认只公开 `/daily` 每日精选页。其他页面首次访问时需要输入
+`.env` 中的 `FRONTIER_ACCESS_PASSWORD`（默认 `byml-frontier`），验证成功后会在该设备
+写入长期 HttpOnly 信任 Cookie。公网部署应修改默认密码；启用 HTTPS 后同时设置
+`FRONTIER_TRUSTED_COOKIE_SECURE=true`。
+
 访问 `http://127.0.0.1:8000`。OpenAPI 文档位于 `/docs`。
 
 文本模式默认只读取轻量的 arXiv HTML，不会启动 Docling。arXiv 未提供 HTML
@@ -68,4 +73,4 @@ uv run pytest -q
 cd web && pnpm lint && pnpm build
 ```
 
-阿里云常驻服务与 Tailscale 受信设备访问见 [DEPLOYMENT.md](DEPLOYMENT.md)。首版没有应用账号体系，切勿直接将 8000 端口开放到公网。
+阿里云常驻服务与受信设备访问见 [DEPLOYMENT.md](DEPLOYMENT.md)。公开 `/daily` 时应通过 HTTPS 反向代理暴露服务，不要直接将明文 HTTP 的 8000 端口开放到公网。

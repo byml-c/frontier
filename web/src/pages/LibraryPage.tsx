@@ -3,6 +3,7 @@ import CloudUploadRounded from "@mui/icons-material/CloudUploadRounded";
 import EditNoteRounded from "@mui/icons-material/EditNoteRounded";
 import HubRounded from "@mui/icons-material/HubRounded";
 import SearchRounded from "@mui/icons-material/SearchRounded";
+import StarRounded from "@mui/icons-material/StarRounded";
 import UndoRounded from "@mui/icons-material/UndoRounded";
 import {
   Alert,
@@ -19,6 +20,7 @@ import {
   Link as MuiLink,
   MenuItem,
   Select,
+  Snackbar,
   Stack,
   Tab,
   Tabs,
@@ -36,7 +38,7 @@ import { PageHeader } from "../components/PageHeader";
 import { PaperMetadataDialog } from "../components/PaperMetadataDialog";
 import { Empty, ErrorState, Loading } from "../components/States";
 import { ExpandablePaperText } from "../components/ExpandablePaperText";
-import type { Paper, Tag } from "../types";
+import type { DailyPayload, Paper, Tag } from "../types";
 
 type LibraryTab = "papers" | "collection";
 
@@ -59,6 +61,7 @@ export function LibraryPage() {
   const [ingestOpen, setIngestOpen] = useState(false);
   const [metadataId, setMetadataId] = useState<string | null>(null);
   const [cancelPaper, setCancelPaper] = useState<Paper | null>(null);
+  const [dailyNotice, setDailyNotice] = useState("");
 
   const scopeFilter = scope === "quality"
     ? "&quality=true"
@@ -74,6 +77,7 @@ export function LibraryPage() {
       `/api/papers?limit=100&q=${encodeURIComponent(search)}&tag_id=${encodeURIComponent(tag)}${libraryFilter}${scopeFilter}`,
     ),
   });
+  const daily = useQuery({ queryKey: ["daily", "today"], queryFn: () => api<DailyPayload>("/api/daily") });
   const tags = useQuery({ queryKey: ["tags"], queryFn: () => api<Tag[]>("/api/tags") });
   const cancelReading = useMutation({
     mutationFn: (paperId: string) => api(`/api/papers/${paperId}/cancel-reading`, { method: "POST" }),
@@ -81,6 +85,18 @@ export function LibraryPage() {
       setCancelPaper(null);
       queryClient.invalidateQueries({ queryKey: ["papers"] });
     },
+  });
+  const setDaily = useMutation({
+    mutationFn: (paper: Paper) => api(`/api/daily/${daily.data?.date}`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ paper_id: paper.id }),
+    }),
+    onSuccess: (_, paper) => {
+      setDailyNotice(`已将《${paper.title}》设为今日精选`);
+      queryClient.invalidateQueries({ queryKey: ["daily"] });
+    },
+    onError: (error) => setDailyNotice(`设置失败：${error.message}`),
   });
 
   function changeTab(next: LibraryTab) {
@@ -156,6 +172,10 @@ export function LibraryPage() {
               onTagClick={setTag}
               onMetadata={() => setMetadataId(paper.id)}
               onCancelReading={() => setCancelPaper(paper)}
+              isDaily={daily.data?.selection?.paper.id === paper.id}
+              onSetDaily={() => setDaily.mutate(paper)}
+              settingDaily={setDaily.isPending && setDaily.variables?.id === paper.id}
+              dailyReady={Boolean(daily.data?.date)}
             />
           ))}
         </Stack>
@@ -182,6 +202,7 @@ export function LibraryPage() {
           </Stack>
         </Stack>
       </Modal>
+      <Snackbar open={Boolean(dailyNotice)} autoHideDuration={3200} onClose={() => setDailyNotice("")} message={dailyNotice} />
     </Container>
   );
 }
@@ -193,6 +214,10 @@ function PaperCard({
   onTagClick,
   onMetadata,
   onCancelReading,
+  isDaily,
+  onSetDaily,
+  settingDaily,
+  dailyReady,
 }: {
   paper: Paper;
   accumulated: boolean;
@@ -200,6 +225,10 @@ function PaperCard({
   onTagClick: (tagId: string) => void;
   onMetadata: () => void;
   onCancelReading: () => void;
+  isDaily: boolean;
+  onSetDaily: () => void;
+  settingDaily: boolean;
+  dailyReady: boolean;
 }) {
   function openFromCard(event: MouseEvent<HTMLElement> | KeyboardEvent<HTMLElement>) {
     const target = event.target as Element;
@@ -237,8 +266,11 @@ function PaperCard({
               </MuiLink>
             </Box>
           ))}
-          {(["reading", "feedback_pending", "completed"] as string[]).includes(paper.status) && <Tooltip title="取消精读状态"><IconButton size="small" color="warning" aria-label="取消精读状态" onClick={onCancelReading} sx={{ ml: "auto!important" }}><UndoRounded fontSize="small" /></IconButton></Tooltip>}
-          <Tooltip title="查看和编辑论文信息"><IconButton size="small" color="primary" aria-label="论文信息" onClick={onMetadata} sx={{ ml: (["reading", "feedback_pending", "completed"] as string[]).includes(paper.status) ? undefined : "auto!important" }}><EditNoteRounded fontSize="small" /></IconButton></Tooltip>
+          <Box sx={{ flex: 1 }} />
+          <Tooltip title={isDaily ? "已是今日推荐" : "设为今日推荐"}><span><IconButton size="small" color={isDaily ? "warning" : "primary"} aria-label={isDaily ? "已是今日推荐" : "设为今日推荐"} disabled={isDaily || settingDaily || !dailyReady} onClick={onSetDaily} sx={{ display: { xs: "inline-flex", sm: "none" } }}><StarRounded fontSize="small" /></IconButton></span></Tooltip>
+          <Button size="small" color={isDaily ? "warning" : "primary"} startIcon={<StarRounded />} disabled={isDaily || settingDaily || !dailyReady} onClick={onSetDaily} sx={{ display: { xs: "none", sm: "inline-flex" } }}>{isDaily ? "今日推荐" : "设为今日推荐"}</Button>
+          {(["reading", "feedback_pending", "completed"] as string[]).includes(paper.status) && <Tooltip title="取消精读状态"><IconButton size="small" color="warning" aria-label="取消精读状态" onClick={onCancelReading}><UndoRounded fontSize="small" /></IconButton></Tooltip>}
+          <Tooltip title="查看和编辑论文信息"><IconButton size="small" color="primary" aria-label="论文信息" onClick={onMetadata}><EditNoteRounded fontSize="small" /></IconButton></Tooltip>
         </Stack>
         {accumulated && (
           <Stack

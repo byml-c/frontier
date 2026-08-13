@@ -1,6 +1,7 @@
 import { lazy, Suspense } from "react";
 import { Navigate, Route, Routes } from "react-router-dom";
 import { Shell } from "./components/Shell";
+import { DailyAccessLayout, ProtectedAccess } from "./components/AccessGate";
 import { Loading } from "./components/States";
 import { ArchivePage } from "./pages/ArchivePage";
 import { BriefPage } from "./pages/BriefPage";
@@ -8,6 +9,7 @@ import { LibraryPage } from "./pages/LibraryPage";
 import { MemoryPage } from "./pages/MemoryPage";
 import { SettingsPage } from "./pages/SettingsPage";
 import { TasksPage } from "./pages/TasksPage";
+import { DailyPage } from "./pages/DailyPage";
 
 const GraphPage = lazy(() => import("./pages/GraphPage").then((module) => ({ default: module.GraphPage })));
 const ReaderPage = lazy(() => import("./pages/ReaderPage").then((module) => ({ default: module.ReaderPage })));
@@ -15,7 +17,8 @@ const ReaderPage = lazy(() => import("./pages/ReaderPage").then((module) => ({ d
 export default function App() {
   return (
     <Routes>
-      <Route element={<Shell />}>
+      <Route element={<DailyAccessLayout />}><Route path="/daily" element={<DailyPage />} /></Route>
+      <Route element={<ProtectedAccess />}><Route element={<Shell />}>
         <Route path="/" element={<BriefPage />} />
         <Route path="/briefs" element={<ArchivePage />} />
         <Route path="/briefs/:briefId" element={<BriefPage />} />
@@ -27,7 +30,7 @@ export default function App() {
         <Route path="/tasks" element={<TasksPage />} />
         <Route path="/settings" element={<SettingsPage />} />
         <Route path="*" element={<Navigate to="/" replace />} />
-      </Route>
+      </Route></Route>
     </Routes>
   );
 }

@@ -13,6 +13,7 @@ TEST_DATA_DIR = Path(tempfile.mkdtemp(prefix="frontier-tests-"))
 os.environ["FRONTIER_DATA_DIR"] = str(TEST_DATA_DIR)
 os.environ["FRONTIER_ENABLE_SCHEDULER"] = "false"
 os.environ["FRONTIER_ENABLE_CODEX_RUNS"] = "false"
+os.environ["FRONTIER_ACCESS_PASSWORD"] = ""
 
 app = import_module("frontier.main").app
 
