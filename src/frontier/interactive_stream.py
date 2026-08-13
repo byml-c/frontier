@@ -4,7 +4,10 @@ import json
 import os
 import re
 import shlex
+import signal
 import subprocess
+import threading
+import time
 from collections.abc import Iterator
 from typing import Any
 
@@ -13,6 +16,55 @@ from .config import PROJECT_ROOT, settings
 
 class CodexStreamError(RuntimeError):
     pass
+
+
+class CodexRunCancelled(CodexStreamError):
+    pass
+
+
+_ACTIVE_RUNS: dict[str, subprocess.Popen[str]] = {}
+_CANCELLED_RUNS: dict[str, float] = {}
+_RUNS_LOCK = threading.Lock()
+_CANCEL_MARK_TTL_SECONDS = 600
+
+
+def _prune_cancelled_runs(now: float) -> None:
+    expired = [
+        run_id
+        for run_id, cancelled_at in _CANCELLED_RUNS.items()
+        if now - cancelled_at > _CANCEL_MARK_TTL_SECONDS
+    ]
+    for run_id in expired:
+        _CANCELLED_RUNS.pop(run_id, None)
+
+
+def cancel_codex_run(run_id: str) -> bool:
+    """Stop a running Codex process and remember early cancellation races."""
+    with _RUNS_LOCK:
+        now = time.monotonic()
+        _prune_cancelled_runs(now)
+        _CANCELLED_RUNS[run_id] = now
+        process = _ACTIVE_RUNS.pop(run_id, None)
+    _stop_process(process)
+    return process is not None
+
+
+def register_codex_run(run_id: str, process: subprocess.Popen[str]) -> None:
+    with _RUNS_LOCK:
+        _prune_cancelled_runs(time.monotonic())
+        cancelled = run_id in _CANCELLED_RUNS
+        if not cancelled:
+            _ACTIVE_RUNS[run_id] = process
+    if cancelled:
+        _stop_process(process)
+        raise CodexRunCancelled("Agent 工作流已由用户中断")
+
+
+def unregister_codex_run(run_id: str, process: subprocess.Popen[str]) -> None:
+    with _RUNS_LOCK:
+        if _ACTIVE_RUNS.get(run_id) is process:
+            _ACTIVE_RUNS.pop(run_id, None)
+        _CANCELLED_RUNS.pop(run_id, None)
 
 
 def is_missing_codex_thread_error(error: BaseException | str) -> bool:
@@ -43,11 +95,23 @@ def _environment() -> dict[str, str]:
 def _stop_process(process: subprocess.Popen[str] | None) -> None:
     if process is None or process.poll() is not None:
         return
-    process.terminate()
+    try:
+        if os.name == "posix":
+            os.killpg(process.pid, signal.SIGTERM)
+        else:
+            process.terminate()
+    except ProcessLookupError:
+        return
     try:
         process.wait(timeout=3)
     except subprocess.TimeoutExpired:
-        process.kill()
+        if os.name == "posix":
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                return
+        else:
+            process.kill()
         process.wait(timeout=3)
 
 
@@ -61,6 +125,7 @@ def _start_process() -> subprocess.Popen[str]:
         stderr=subprocess.DEVNULL,
         text=True,
         bufsize=1,
+        start_new_session=os.name == "posix",
     )
     _write_message(
         process,
@@ -500,9 +565,12 @@ def stream_codex_prompt(
     recovery_prompt: str | None = None,
     reasoning_effort: str | None = None,
     ephemeral: bool = False,
+    run_id: str | None = None,
 ) -> Iterator[dict[str, Any]]:
     process = _start_process()
     try:
+        if run_id:
+            register_codex_run(run_id, process)
         yield from _stream_turn(
             process,
             prompt,
@@ -512,4 +580,6 @@ def stream_codex_prompt(
             ephemeral=ephemeral,
         )
     finally:
+        if run_id:
+            unregister_codex_run(run_id, process)
         _stop_process(process)

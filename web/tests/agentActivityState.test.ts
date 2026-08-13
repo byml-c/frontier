@@ -122,3 +122,8 @@ test("a recovered tool failure does not fail a completed turn", () => {
   assert.equal(agentActivityOutcome(items, false, "failed"), "failed");
   assert.equal(agentActivityOutcome(items, true, "completed"), "running");
 });
+
+test("an explicit cancellation is a neutral terminal outcome", () => {
+  assert.equal(agentActivityOutcome([], false, "cancelled"), "cancelled");
+  assert.equal(agentActivityOutcome([activity({ id: "tool", kind: "tool", status: "cancelled" })], false), "cancelled");
+});

@@ -48,6 +48,8 @@ type ServiceCheck = {
   latency_ms: number;
   message: string;
   checked_at: string;
+  model?: string;
+  reasoning_effort?: string;
 };
 type LatestServiceChecks = Record<ServiceName, ServiceCheck | null>;
 
@@ -141,10 +143,19 @@ function ServiceCheckRow({ service, label, icon, previous }: { service: ServiceN
         <Typography variant="body2" color={result && !result.ok ? "error.main" : "text.secondary"}>
           {check.error ? check.error.message : result ? `${result.message} · ${result.latency_ms} ms · ${formatDate(result.checked_at, true)}` : "尚未检测"}
         </Typography>
+        {service === "codex" && result && (result.model || result.reasoning_effort) && (
+          <Typography variant="caption" color="text.secondary" sx={{ display: "block", mt: 0.25 }}>
+            模型：{result.model ?? "未报告"} · 思考程度：{reasoningEffortLabel(result.reasoning_effort)}
+          </Typography>
+        )}
       </Box>
       <Button variant="outlined" onClick={() => check.mutate()} disabled={check.isPending} startIcon={check.isPending ? <CircularProgress size={16} /> : undefined}>
         {check.isPending ? "检测中" : "检测"}
       </Button>
     </Stack>
   );
+}
+
+function reasoningEffortLabel(value?: string): string {
+  return ({ minimal: "最简", low: "低", medium: "中", high: "高", xhigh: "极高" } as Record<string, string>)[value ?? ""] ?? value ?? "未报告";
 }

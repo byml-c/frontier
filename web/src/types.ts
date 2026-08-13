@@ -168,7 +168,7 @@ export type Conversation = {
 export type TaskRun = {
   id: string;
   kind: string;
-  status: "queued" | "running" | "completed" | "failed";
+  status: "queued" | "running" | "completed" | "failed" | "cancelled";
   payload_json: Record<string, unknown>;
   result_json: { response?: string };
   error?: string | null;

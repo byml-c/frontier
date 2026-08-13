@@ -4,7 +4,9 @@ import json
 import os
 import re
 import subprocess
+import tomllib
 from collections.abc import Callable
+from pathlib import Path
 from time import perf_counter
 from typing import Any, Literal
 
@@ -24,7 +26,7 @@ def _result(
     status: ServiceStatus,
     started_at: float,
     message: str,
-) -> dict[str, str | bool | int]:
+) -> dict[str, Any]:
     return {
         "service": service,
         "ok": status == "ok",
@@ -56,7 +58,37 @@ def _environment_secrets(environment: dict[str, str]) -> tuple[str, ...]:
     )
 
 
-def _codex_command() -> list[str]:
+def _load_toml(path: Path) -> dict[str, Any]:
+    try:
+        with path.open("rb") as stream:
+            value = tomllib.load(stream)
+    except (OSError, tomllib.TOMLDecodeError):
+        return {}
+    return value if isinstance(value, dict) else {}
+
+
+def _codex_runtime_config(environment: dict[str, str]) -> dict[str, str]:
+    """Resolve the model settings that the service-check command will use."""
+    home = Path(environment.get("CODEX_HOME") or Path(environment.get("HOME", "~")).expanduser() / ".codex")
+    base = _load_toml(home / "config.toml")
+    resolved: dict[str, Any] = dict(base)
+    profile = settings.codex_profile
+    if profile:
+        inline_profiles = base.get("profiles")
+        if isinstance(inline_profiles, dict) and isinstance(inline_profiles.get(profile), dict):
+            resolved.update(inline_profiles[profile])
+        resolved.update(_load_toml(home / f"{profile}.config.toml"))
+    result: dict[str, str] = {}
+    model = resolved.get("model")
+    reasoning_effort = resolved.get("model_reasoning_effort")
+    if isinstance(model, str) and model.strip():
+        result["model"] = model.strip()
+    if isinstance(reasoning_effort, str) and reasoning_effort.strip():
+        result["reasoning_effort"] = reasoning_effort.strip()
+    return result
+
+
+def _codex_command(runtime: dict[str, str] | None = None) -> list[str]:
     command = [
         settings.codex_command,
         "exec",
@@ -71,6 +103,13 @@ def _codex_command() -> list[str]:
     ]
     if settings.codex_profile:
         command.extend(["--profile", settings.codex_profile])
+    runtime = runtime or {}
+    if runtime.get("model"):
+        command.extend(["--model", runtime["model"]])
+    if runtime.get("reasoning_effort"):
+        command.extend(
+            ["--config", f'model_reasoning_effort="{runtime["reasoning_effort"]}"']
+        )
     command.append("Reply with exactly OK. Do not use tools.")
     return command
 
@@ -92,7 +131,7 @@ def _has_codex_response(stdout: str) -> bool:
     return False
 
 
-def check_codex_service(timeout_seconds: float = 30) -> dict[str, str | bool | int]:
+def check_codex_service(timeout_seconds: float = 30) -> dict[str, Any]:
     started_at = perf_counter()
     if not settings.enable_codex_runs:
         return _result(
@@ -104,9 +143,10 @@ def check_codex_service(timeout_seconds: float = 30) -> dict[str, str | bool | i
     environment = os.environ.copy()
     environment["FRONTIER_API_BASE_URL"] = settings.api_base_url
     environment["UV_CACHE_DIR"] = str(settings.task_dir / "uv-cache")
+    runtime = _codex_runtime_config(environment)
     try:
         completed = subprocess.run(
-            _codex_command(),
+            _codex_command(runtime),
             cwd=PROJECT_ROOT,
             env=environment,
             capture_output=True,
@@ -154,7 +194,10 @@ def check_codex_service(timeout_seconds: float = 30) -> dict[str, str | bool | i
             started_at,
             "Codex 已退出，但没有返回模型响应",
         )
-    return _result("codex", "ok", started_at, "Codex 可正常调用")
+    return {
+        **_result("codex", "ok", started_at, "Codex 可正常调用"),
+        **runtime,
+    }
 
 
 def check_translation_service(timeout_seconds: float = 15) -> dict[str, str | bool | int]:

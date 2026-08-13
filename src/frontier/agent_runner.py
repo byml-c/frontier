@@ -8,11 +8,12 @@ from datetime import datetime
 from typing import Any
 from zoneinfo import ZoneInfo
 
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.orm import Session
 
 from .config import PROJECT_ROOT, settings
 from .database import SessionLocal
+from .interactive_stream import register_codex_run, unregister_codex_run
 from .models import Brief, Conversation, Message, Paper, TaskRun, utcnow
 from .services.common import log_operation
 from .services.manual_recommendations import set_manual_analysis_state
@@ -90,10 +91,18 @@ def build_conversation_recovery_prompt(
     for item in reversed(messages):
         if item.id == exclude_message_id:
             continue
+        if (item.context_json or {}).get("turn_cancelled"):
+            continue
         role = "用户" if item.role == "user" else "Agent"
         context = ""
         if item.role == "user" and item.context_json:
-            context = f"\n页面上下文：{json.dumps(item.context_json, ensure_ascii=False)}"
+            public_context = {
+                key: value
+                for key, value in item.context_json.items()
+                if key not in {"task_id", "turn_cancelled"}
+            }
+            if public_context:
+                context = f"\n页面上下文：{json.dumps(public_context, ensure_ascii=False)}"
         block = f"{role}：{item.content}{context}"
         if used + len(block) > max_chars:
             remaining = max_chars - used
@@ -270,7 +279,7 @@ def _run_translation_task(task_id: str) -> None:
     try:
         with SessionLocal() as session:
             task = session.get(TaskRun, task_id)
-            if not task or task.status == "running":
+            if not task or task.status != "queued":
                 return
             task.status = "running"
             task.started_at = utcnow()
@@ -279,7 +288,7 @@ def _run_translation_task(task_id: str) -> None:
         content = "".join(stream_translation_prompt(prompt))
         with SessionLocal() as session:
             task = session.get(TaskRun, task_id)
-            if not task:
+            if not task or task.status == "cancelled":
                 return
             task.status = "completed"
             task.result_json = {"response": content}
@@ -288,7 +297,7 @@ def _run_translation_task(task_id: str) -> None:
     except Exception as exc:  # noqa: BLE001
         with SessionLocal() as session:
             task = session.get(TaskRun, task_id)
-            if task:
+            if task and task.status != "cancelled":
                 task.status = "failed"
                 task.error = str(exc)
                 task.finished_at = utcnow()
@@ -304,7 +313,7 @@ def run_task(task_id: str) -> None:
         return
     with SessionLocal() as session:
         task = session.get(TaskRun, task_id)
-        if not task or task.status == "running":
+        if not task or task.status != "queued":
             return
         task.status = "running"
         task.started_at = utcnow()
@@ -369,22 +378,29 @@ def run_task(task_id: str) -> None:
                 stderr=subprocess.STDOUT,
                 text=True,
                 bufsize=1,
+                start_new_session=os.name == "posix",
             )
-            session_id = None
-            assert process.stdout is not None
-            for line in process.stdout:
-                log_file.write(line)
-                log_file.flush()
-                try:
-                    event = json.loads(line)
-                except json.JSONDecodeError:
-                    continue
-                session_id = session_id or _find_session_id(event)
-            return_code = process.wait()
+            try:
+                register_codex_run(task_id, process)
+                session_id = None
+                assert process.stdout is not None
+                for line in process.stdout:
+                    log_file.write(line)
+                    log_file.flush()
+                    try:
+                        event = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+                    session_id = session_id or _find_session_id(event)
+                return_code = process.wait()
+            finally:
+                unregister_codex_run(task_id, process)
         response = output_path.read_text(encoding="utf-8") if output_path.exists() else ""
         with SessionLocal() as session:
             task = session.get(TaskRun, task_id)
             if not task:
+                return
+            if task.status == "cancelled":
                 return
             task.codex_session_id = session_id
             daily_brief = None
@@ -392,35 +408,43 @@ def run_task(task_id: str) -> None:
                 daily_brief = session.scalar(
                     select(Brief).where(Brief.task_id == task.id, Brief.status == "published")
                 )
+            final_status = "completed"
+            final_error = None
+            final_result = {"response": response}
             if return_code != 0:
-                task.status = "failed"
-                task.error = f"Codex exited with status {return_code}. See {log_path}."
+                final_status = "failed"
+                final_error = f"Codex exited with status {return_code}. See {log_path}."
             elif task.kind == "daily_brief" and daily_brief is None:
-                task.status = "failed"
-                task.error = "Agent finished without publishing the required daily brief."
-                task.result_json = {"response": response}
+                final_status = "failed"
+                final_error = "Agent finished without publishing the required daily brief."
             elif task.kind in {"manual_paper_analysis", "paper_metadata_analysis"}:
                 paper = session.get(Paper, task.payload_json.get("paper_id"))
                 if not paper or not all(
                     (paper.summary, paper.agent_comment, paper.recommendation_reason)
                 ):
-                    task.status = "failed"
-                    task.error = "Agent finished without saving the required paper analysis fields."
-                    task.result_json = {"response": response}
-                else:
-                    task.status = "completed"
-                    task.result_json = {"response": response}
-            else:
-                task.status = "completed"
-                task.result_json = {"response": response}
+                    final_status = "failed"
+                    final_error = "Agent finished without saving the required paper analysis fields."
+            transition = session.execute(
+                update(TaskRun)
+                .where(TaskRun.id == task_id, TaskRun.status == "running")
+                .values(
+                    status=final_status,
+                    error=final_error,
+                    result_json=final_result,
+                    codex_session_id=session_id,
+                    finished_at=utcnow(),
+                )
+            )
+            if transition.rowcount != 1:
+                session.rollback()
+                return
             if task.kind in {"manual_paper_analysis", "paper_metadata_analysis"}:
                 set_manual_analysis_state(
                     session,
                     task,
-                    "completed" if task.status == "completed" else "failed",
-                    error=task.error,
+                    "completed" if final_status == "completed" else "failed",
+                    error=final_error,
                 )
-            task.finished_at = utcnow()
             conversation_id = task.payload_json.get("conversation_id")
             if conversation_id:
                 conversation = session.get(Conversation, conversation_id)
@@ -441,7 +465,7 @@ def run_task(task_id: str) -> None:
             log_operation(
                 session,
                 actor="system",
-                action=f"task.{task.status}",
+                action=f"task.{final_status}",
                 entity_type="task",
                 entity_id=task.id,
                 task_id=task.id,
@@ -450,7 +474,7 @@ def run_task(task_id: str) -> None:
     except Exception as exc:  # noqa: BLE001 - persist all runner failures for the user
         with SessionLocal() as session:
             task = session.get(TaskRun, task_id)
-            if task:
+            if task and task.status != "cancelled":
                 task.status = "failed"
                 task.error = str(exc)
                 task.finished_at = utcnow()

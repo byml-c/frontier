@@ -1,28 +1,32 @@
 import CloseRounded from "@mui/icons-material/CloseRounded";
 import PsychologyRounded from "@mui/icons-material/PsychologyRounded";
 import SendRounded from "@mui/icons-material/SendRounded";
+import StopRounded from "@mui/icons-material/StopRounded";
 import {
   Alert,
   Avatar,
   Box,
+  CircularProgress,
   Drawer,
   IconButton,
   Paper,
   Stack,
   TextField,
   Typography,
+  Tooltip,
   useMediaQuery,
   useTheme,
 } from "@mui/material";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { FormEvent, useEffect, useState } from "react";
+import { FormEvent, useEffect, useRef, useState } from "react";
 import { useLocation } from "react-router-dom";
-import { api, jsonBody, streamApi } from "../api";
+import { api, cancelTask, jsonBody, streamApi } from "../api";
 import type { Conversation } from "../types";
 import { AgentActivity } from "./AgentActivity";
 import { activitiesFromContext, type AgentActivityItem, failRunningActivities, updateActivities } from "./agentActivityState";
 import { submitChatOnEnter } from "./chatInput";
 import { ConversationScroller } from "./ConversationScroller";
+import { activeConversationTask, isRequestAbort } from "./conversationTask";
 import { MarkdownMessage } from "./MarkdownMessage";
 
 type Props = { open: boolean; onClose: () => void; width: number; onWidthChange: (value: number) => void };
@@ -38,6 +42,10 @@ export function AgentPanel({ open, onClose, width, onWidthChange }: Props) {
   const [sending, setSending] = useState(false);
   const [activities, setActivities] = useState<AgentActivityItem[]>([]);
   const [error, setError] = useState("");
+  const [liveTaskId, setLiveTaskId] = useState<string | null>(null);
+  const [cancelling, setCancelling] = useState(false);
+  const streamController = useRef<AbortController | null>(null);
+  const cancellingRef = useRef(false);
   const conversation = useQuery({
     queryKey: ["global-conversation"],
     queryFn: async () => {
@@ -48,6 +56,9 @@ export function AgentPanel({ open, onClose, width, onWidthChange }: Props) {
     enabled: open,
     refetchInterval: (query) => hasActiveConversationTurn(query.state.data) ? 1200 : false,
   });
+  const persistedTask = activeConversationTask(conversation.data);
+  const activeTaskId = liveTaskId ?? persistedTask?.id ?? null;
+  const active = sending || Boolean(persistedTask);
 
   useEffect(() => {
     const addContext = (event: Event) => {
@@ -61,20 +72,44 @@ export function AgentPanel({ open, onClose, width, onWidthChange }: Props) {
   async function submit(event: FormEvent) {
     event.preventDefault();
     const content = text.trim();
-    if (!content || !conversation.data || sending) return;
-    setText(""); setLiveUser(content); setStreaming(""); setActivities([]); setError(""); setSending(true);
+    if (!content || !conversation.data || active) return;
+    const controller = new AbortController();
+    streamController.current = controller;
+    cancellingRef.current = false;
+    setText(""); setLiveUser(content); setStreaming(""); setActivities([]); setError(""); setLiveTaskId(null); setSending(true);
     try {
       await streamApi(`/api/conversations/${conversation.data.id}/messages/stream`, { content, context_json: { path: location.pathname } }, (streamEvent) => {
+        if (streamEvent.type === "meta" && typeof streamEvent.task_id === "string") setLiveTaskId(streamEvent.task_id);
         if (streamEvent.type === "delta") setStreaming((value) => value + String(streamEvent.delta ?? ""));
         if (streamEvent.type === "activity") setActivities((value) => updateActivities(value, streamEvent));
-      });
+      }, controller.signal);
     } catch (cause) {
-      setActivities((value) => failRunningActivities(value));
-      setError(cause instanceof Error ? cause.message : String(cause));
+      if (!cancellingRef.current && !isRequestAbort(cause)) {
+        setActivities((value) => failRunningActivities(value));
+        setError(cause instanceof Error ? cause.message : String(cause));
+      }
     } finally {
+      streamController.current = null;
       setSending(false);
       await queryClient.invalidateQueries({ queryKey: ["global-conversation"] });
-      setLiveUser(""); setStreaming(""); setActivities([]);
+      setLiveUser(""); setStreaming(""); setActivities([]); setLiveTaskId(null);
+    }
+  }
+
+  async function stopAgent() {
+    if (!activeTaskId || cancelling) return;
+    cancellingRef.current = true;
+    setCancelling(true);
+    setError("");
+    try {
+      await cancelTask(activeTaskId);
+      streamController.current?.abort();
+      await queryClient.invalidateQueries({ queryKey: ["global-conversation"] });
+    } catch (cause) {
+      cancellingRef.current = false;
+      setError(cause instanceof Error ? cause.message : String(cause));
+    } finally {
+      setCancelling(false);
     }
   }
 
@@ -99,20 +134,17 @@ export function AgentPanel({ open, onClose, width, onWidthChange }: Props) {
         {!conversation.data?.messages.length && !liveUser && <Paper sx={{ p: 2.5, bgcolor: "background.default" }}><Typography fontWeight={700}>可以从这里开始</Typography><Typography variant="body2" color="text.secondary" sx={{ mt: .75 }}>询问近期研究进展、比较论文，或直接要求整理当前图谱。</Typography></Paper>}
         {conversation.data?.messages.map((message) => <ChatBubble key={message.id} role={message.role} content={message.content} activities={activitiesFromContext(message.context_json)} pending={message.context_json.stream_status === "queued" || message.context_json.stream_status === "running"} turnStatus={typeof message.context_json.stream_status === "string" ? message.context_json.stream_status : undefined} />)}
         {liveUser && <ChatBubble role="user" content={liveUser} />}
-        {(streaming || sending || activities.length > 0) && <Box sx={{ alignSelf: "stretch" }}><AgentActivity items={activities} pending={sending}>{streaming ? <MarkdownMessage content={streaming} /> : undefined}</AgentActivity></Box>}
+        {(streaming || sending || activities.length > 0) && <Box sx={{ alignSelf: "stretch" }}><AgentActivity items={activities} pending={sending && !cancelling}>{streaming ? <MarkdownMessage content={streaming} /> : undefined}</AgentActivity></Box>}
         {error && <Alert severity="error">{error}</Alert>}
       </ConversationScroller>
       <Box component="form" onSubmit={submit} sx={{ p: 2, borderTop: 1, borderColor: "divider" }}>
-        <TextField fullWidth multiline maxRows={6} minRows={2} value={text} onChange={(event) => setText(event.target.value)} onKeyDown={submitChatOnEnter} placeholder="输入研究问题或整理指令" disabled={sending} InputProps={{ endAdornment: <IconButton color="primary" type="submit" disabled={!text.trim() || sending}><SendRounded /></IconButton> }} />
+        <TextField fullWidth multiline maxRows={6} minRows={2} value={text} onChange={(event) => setText(event.target.value)} onKeyDown={active ? undefined : submitChatOnEnter} placeholder={active ? "可以先输入修正后的消息，停止后重新发送" : "输入研究问题或整理指令"} InputProps={{ endAdornment: active ? <Tooltip title="停止 Agent"><span><IconButton color="error" aria-label="停止 Agent" onClick={stopAgent} disabled={!activeTaskId || cancelling} sx={{ width: 44, height: 44 }}>{cancelling ? <CircularProgress size={20} /> : <StopRounded />}</IconButton></span></Tooltip> : <IconButton color="primary" type="submit" disabled={!text.trim()}><SendRounded /></IconButton> }} />
       </Box>
     </Stack>
   </Drawer>;
 }
 
-function hasActiveConversationTurn(conversation?: Conversation): boolean {
-  const status = conversation?.messages.at(-1)?.context_json.stream_status;
-  return status === "queued" || status === "running";
-}
+function hasActiveConversationTurn(conversation?: Conversation): boolean { return Boolean(activeConversationTask(conversation)); }
 
 function ChatBubble({ role, content, activities = [], pending = false, turnStatus }: { role: "user" | "assistant"; content: string; activities?: AgentActivityItem[]; pending?: boolean; turnStatus?: string }) {
   if (role === "assistant") return <Box sx={{ alignSelf: "stretch" }}><AgentActivity items={activities} pending={pending} turnStatus={turnStatus}>{content ? <MarkdownMessage content={content} /> : undefined}</AgentActivity></Box>;

@@ -5,7 +5,7 @@ from typing import Annotated
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
 from fastapi.responses import StreamingResponse
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.orm import Session
 
 from ..agent_runner import (
@@ -21,6 +21,7 @@ from ..interactive_stream import encode_stream_event, stream_codex_prompt
 from ..models import Conversation, Message, Paper, TaskRun, utcnow
 from ..schemas import ConversationCreate, MessageCreate
 from ..services.common import model_dict
+from ..services.task_control import cancelled_activities
 
 router = APIRouter(prefix="/api/conversations", tags=["conversations"])
 
@@ -92,6 +93,8 @@ def _persist_stream_snapshot(
     with SessionLocal() as snapshot_session:
         task = snapshot_session.get(TaskRun, task_id)
         assistant = snapshot_session.get(Message, assistant_id)
+        if task and task.status == "cancelled":
+            return
         if task:
             task.result_json = snapshot
             if thread_id:
@@ -224,6 +227,8 @@ def send_message(
     if conversation.kind == "paper":
         task_payload["paper_id"] = conversation.reference_id
     task_id = enqueue_task(task_kind, task_payload)
+    message.context_json = {**context, "task_id": task_id}
+    session.commit()
     if settings.enable_codex_runs:
         background_tasks.add_task(run_task, task_id)
     return {"message": model_dict(message), "task_id": task_id, "status": "queued"}
@@ -260,6 +265,7 @@ def stream_message(
     task = TaskRun(kind=task_kind, payload_json=task_payload)
     session.add(task)
     session.flush()
+    message.context_json = {**context, "task_id": task.id}
     session_id = conversation.codex_session_id
     paper_id = conversation.reference_id if conversation.kind == "paper" else None
     prompt = build_prompt(task)
@@ -351,14 +357,17 @@ def stream_message(
                 raise RuntimeError("Agent 运行已在服务器设置中停用")
             with SessionLocal() as runner_session:
                 running = runner_session.get(TaskRun, task.id)
+                if running and running.status == "cancelled":
+                    raise RuntimeError("Agent 工作流已由用户中断")
                 if running:
                     running.status = "running"
                     running.started_at = utcnow()
                     runner_session.commit()
             for event in stream_codex_prompt(
-                prompt,
+                recovery_prompt if session_id is None else prompt,
                 session_id=session_id,
                 recovery_prompt=recovery_prompt,
+                run_id=task.id,
             ):
                 if event["type"] == "thread":
                     thread_id = event["thread_id"]
@@ -388,9 +397,35 @@ def stream_message(
                 current_conversation = runner_session.get(Conversation, conversation_id)
                 running = runner_session.get(TaskRun, task.id)
                 assistant = runner_session.get(Message, assistant_id)
+                if running and running.status == "cancelled":
+                    terminal = True
+                    yield encode_stream_event("cancelled", task_id=task.id)
+                    return
                 completed_activities = _completed_activities(activity_log)
                 if not assistant:
                     raise RuntimeError("Agent 回复草稿不存在")
+                transition = runner_session.execute(
+                    update(TaskRun)
+                    .where(TaskRun.id == task.id, TaskRun.status == "running")
+                    .values(
+                        status="completed",
+                        codex_session_id=thread_id,
+                        result_json={
+                            "response": content,
+                            "activities": completed_activities,
+                            "stream_status": "completed",
+                        },
+                        finished_at=utcnow(),
+                    )
+                )
+                if transition.rowcount != 1:
+                    runner_session.rollback()
+                    current = runner_session.get(TaskRun, task.id)
+                    if current and current.status == "cancelled":
+                        terminal = True
+                        yield encode_stream_event("cancelled", task_id=task.id)
+                        return
+                    raise RuntimeError("Agent 任务状态已变化，未覆盖其终态")
                 assistant.content = content
                 assistant.citations_json = _parse_citations(content, paper_id)
                 assistant.context_json = {
@@ -400,24 +435,35 @@ def stream_message(
                 }
                 if current_conversation:
                     current_conversation.codex_session_id = thread_id
-                if running:
-                    running.status = "completed"
-                    running.codex_session_id = thread_id
-                    running.result_json = {
-                        "response": content,
-                        "activities": completed_activities,
-                        "stream_status": "completed",
-                    }
-                    running.finished_at = utcnow()
                 runner_session.commit()
                 assistant_payload = model_dict(assistant)
             terminal = True
             yield encode_stream_event("done", message=assistant_payload)
         except Exception as exc:  # noqa: BLE001
-            failed_activities = _failed_activities(activity_log, str(exc))
             with SessionLocal() as runner_session:
                 running = runner_session.get(TaskRun, task.id)
-                if running:
+                cancelled = bool(running and running.status == "cancelled")
+                if cancelled:
+                    cancelled_activity_log = cancelled_activities(activity_log)
+                    cancelled_assistant = runner_session.get(Message, assistant_id)
+                    if cancelled_assistant:
+                        cancelled_assistant.content = content
+                        cancelled_assistant.context_json = {
+                            **(cancelled_assistant.context_json or {}),
+                            "task_id": task.id,
+                            "stream_status": "cancelled",
+                            "activities": cancelled_activity_log,
+                        }
+                    if running:
+                        running.result_json = {
+                            "response": content,
+                            "activities": cancelled_activity_log,
+                            "stream_status": "cancelled",
+                        }
+                    runner_session.commit()
+                else:
+                    failed_activities = _failed_activities(activity_log, str(exc))
+                if running and not cancelled:
                     running.status = "failed"
                     running.error = str(exc)
                     running.result_json = {
@@ -427,7 +473,7 @@ def stream_message(
                     }
                     running.finished_at = utcnow()
                 failed_assistant = runner_session.get(Message, assistant_id)
-                if failed_assistant:
+                if failed_assistant and not cancelled:
                     failed_assistant.content = content
                     failed_assistant.context_json = {
                         "task_id": task.id,
@@ -437,14 +483,18 @@ def stream_message(
                     }
                 runner_session.commit()
             terminal = True
-            yield encode_stream_event("error", message=str(exc))
+            if cancelled:
+                yield encode_stream_event("cancelled", task_id=task.id)
+            else:
+                yield encode_stream_event("error", message=str(exc))
         finally:
             if not terminal:
                 interruption = "浏览器连接已中断；已保留此前生成的内容和调用记录。"
                 interrupted_activities = _failed_activities(activity_log, interruption)
                 with SessionLocal() as runner_session:
                     running = runner_session.get(TaskRun, task.id)
-                    if running and running.status in {"queued", "running"}:
+                    cancelled = bool(running and running.status == "cancelled")
+                    if running and not cancelled and running.status in {"queued", "running"}:
                         running.status = "failed"
                         running.error = interruption
                         running.result_json = {
@@ -454,7 +504,7 @@ def stream_message(
                         }
                         running.finished_at = utcnow()
                     interrupted_assistant = runner_session.get(Message, assistant_id)
-                    if interrupted_assistant:
+                    if interrupted_assistant and not cancelled:
                         interrupted_assistant.content = content
                         interrupted_assistant.context_json = {
                             "task_id": task.id,

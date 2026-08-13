@@ -45,7 +45,7 @@ def test_service_check_api_returns_structured_result(client: TestClient, monkeyp
     assert client.post("/api/service-checks/unknown").status_code == 422
 
 
-def test_codex_check_runs_a_real_ephemeral_turn(monkeypatch) -> None:
+def test_codex_check_runs_a_real_ephemeral_turn(monkeypatch, tmp_path) -> None:
     captured: dict = {}
 
     def run(command, **kwargs):
@@ -58,6 +58,7 @@ def test_codex_check_runs_a_real_ephemeral_turn(monkeypatch) -> None:
         return subprocess.CompletedProcess(command, 0, stdout=json.dumps(event), stderr="")
 
     monkeypatch.setattr(settings, "enable_codex_runs", True)
+    monkeypatch.setenv("CODEX_HOME", str(tmp_path))
     monkeypatch.setattr(service_checks.subprocess, "run", run)
 
     result = service_checks.check_codex_service()
@@ -68,6 +69,42 @@ def test_codex_check_runs_a_real_ephemeral_turn(monkeypatch) -> None:
     assert "--ephemeral" in captured["command"]
     assert "read-only" in captured["command"]
     assert captured["timeout"] == 30
+
+
+def test_codex_check_reports_and_pins_profile_model_settings(monkeypatch, tmp_path) -> None:
+    (tmp_path / "config.toml").write_text(
+        'model = "base-model"\nmodel_reasoning_effort = "medium"\n',
+        encoding="utf-8",
+    )
+    (tmp_path / "research.config.toml").write_text(
+        'model = "profile-model"\nmodel_reasoning_effort = "high"\n',
+        encoding="utf-8",
+    )
+    captured: dict = {}
+
+    def run(command, **_kwargs):
+        captured["command"] = command
+        event = {
+            "type": "item.completed",
+            "item": {"type": "agent_message", "text": "OK"},
+        }
+        return subprocess.CompletedProcess(command, 0, stdout=json.dumps(event), stderr="")
+
+    monkeypatch.setenv("CODEX_HOME", str(tmp_path))
+    monkeypatch.setattr(settings, "enable_codex_runs", True)
+    monkeypatch.setattr(settings, "codex_profile", "research")
+    monkeypatch.setattr(service_checks.subprocess, "run", run)
+
+    result = service_checks.check_codex_service()
+
+    assert result["model"] == "profile-model"
+    assert result["reasoning_effort"] == "high"
+    assert captured["command"][-5:-1] == [
+        "--model",
+        "profile-model",
+        "--config",
+        'model_reasoning_effort="high"',
+    ]
 
 
 def test_codex_check_reports_disabled_without_starting_process(monkeypatch) -> None:

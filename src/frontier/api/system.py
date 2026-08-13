@@ -6,7 +6,7 @@ from zoneinfo import ZoneInfo
 
 from fastapi import APIRouter, BackgroundTasks, Depends, File, HTTPException, Query, UploadFile
 from fastapi.responses import StreamingResponse
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.orm import Session
 
 from ..agent_runner import build_prompt, enqueue_task, run_task
@@ -20,6 +20,7 @@ from ..services.bootstrap import import_bibtex
 from ..services.common import log_operation, model_dict
 from ..services.ingest import create_or_update_paper, search_arxiv
 from ..services.service_checks import check_service
+from ..services.task_control import ACTIVE_TASK_STATUSES, cancel_task_run
 from ..services.translation_provider import stream_translation_prompt
 
 router = APIRouter(prefix="/api", tags=["system"])
@@ -252,6 +253,28 @@ def get_task(task_id: str, session: Annotated[Session, Depends(get_session)]) ->
     return model_dict(item)
 
 
+@router.post("/tasks/{task_id}/cancel")
+def cancel_task(
+    task_id: str,
+    session: Annotated[Session, Depends(get_session)],
+) -> dict:
+    item = session.get(TaskRun, task_id)
+    if not item:
+        raise HTTPException(status_code=404, detail="Task not found")
+    if item.status == "cancelled":
+        return {**model_dict(item), "process_stopped": False}
+    if item.status not in ACTIVE_TASK_STATUSES:
+        raise HTTPException(status_code=409, detail="只有正在运行的任务可以中断")
+    if item.kind == "translate":
+        raise HTTPException(status_code=409, detail="翻译请求暂不支持任务级中断")
+    process_stopped = cancel_task_run(session, item)
+    if process_stopped is None:
+        if item.status == "cancelled":
+            return {**model_dict(item), "process_stopped": False}
+        raise HTTPException(status_code=409, detail="任务已经结束，无法再中断")
+    return {**model_dict(item), "process_stopped": process_stopped}
+
+
 @router.post("/tasks")
 def create_task(payload: TaskCreate, background_tasks: BackgroundTasks) -> dict:
     allowed = {
@@ -303,6 +326,9 @@ def stream_task(payload: TaskCreate) -> StreamingResponse:
                 task = runner_session.get(TaskRun, task_id)
                 if not task:
                     raise RuntimeError("任务不存在")
+                if task.status == "cancelled":
+                    yield encode_stream_event("cancelled", task_id=task_id)
+                    return
                 task.status = "running"
                 task.started_at = utcnow()
                 prompt = build_prompt(task)
@@ -312,7 +338,7 @@ def stream_task(payload: TaskCreate) -> StreamingResponse:
                     content += delta
                     yield encode_stream_event("delta", delta=delta)
             else:
-                for event in stream_codex_prompt(prompt):
+                for event in stream_codex_prompt(prompt, run_id=task_id):
                     if event["type"] == "thread":
                         thread_id = event["thread_id"]
                         yield encode_stream_event(
@@ -330,22 +356,46 @@ def stream_task(payload: TaskCreate) -> StreamingResponse:
                         yield encode_stream_event("activity", **activity)
             with SessionLocal() as runner_session:
                 task = runner_session.get(TaskRun, task_id)
+                if task and task.status == "cancelled":
+                    yield encode_stream_event("cancelled", task_id=task_id)
+                    return
                 if task:
-                    task.status = "completed"
-                    task.codex_session_id = thread_id
-                    task.result_json = {"response": content}
-                    task.finished_at = utcnow()
+                    transition = runner_session.execute(
+                        update(TaskRun)
+                        .where(TaskRun.id == task_id, TaskRun.status == "running")
+                        .values(
+                            status="completed",
+                            codex_session_id=thread_id,
+                            result_json={"response": content},
+                            finished_at=utcnow(),
+                        )
+                    )
+                    if transition.rowcount != 1:
+                        runner_session.rollback()
+                        current = runner_session.get(TaskRun, task_id)
+                        if current and current.status == "cancelled":
+                            yield encode_stream_event("cancelled", task_id=task_id)
+                            return
+                        raise RuntimeError("Agent 任务状态已变化，未覆盖其终态")
                     runner_session.commit()
             yield encode_stream_event("done", task_id=task_id, content=content)
         except Exception as exc:  # noqa: BLE001
             with SessionLocal() as runner_session:
                 task = runner_session.get(TaskRun, task_id)
-                if task:
+                if task and task.status != "cancelled":
                     task.status = "failed"
                     task.error = str(exc)
                     task.finished_at = utcnow()
                     runner_session.commit()
-            yield encode_stream_event("error", message=str(exc), task_id=task_id)
+            with SessionLocal() as runner_session:
+                cancelled = bool(
+                    (task := runner_session.get(TaskRun, task_id))
+                    and task.status == "cancelled"
+                )
+            if cancelled:
+                yield encode_stream_event("cancelled", task_id=task_id)
+            else:
+                yield encode_stream_event("error", message=str(exc), task_id=task_id)
 
     return StreamingResponse(
         generate(),

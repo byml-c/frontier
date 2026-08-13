@@ -34,8 +34,12 @@ export function jsonBody(value: unknown): RequestInit {
   return { method: "POST", body: JSON.stringify(value) };
 }
 
+export function cancelTask(taskId: string): Promise<{ status: string }> {
+  return api(`/api/tasks/${taskId}/cancel`, jsonBody({}));
+}
+
 export type StreamEvent = {
-  type: "meta" | "delta" | "done" | "error" | string;
+  type: "meta" | "delta" | "done" | "error" | "cancelled" | string;
   delta?: string;
   content?: string;
   message?: unknown;
@@ -74,6 +78,10 @@ export async function streamApi(
       const event = JSON.parse(line) as StreamEvent;
       onEvent(event);
       if (event.type === "error") throw new Error(String(event.message || "Agent 响应失败"));
+      if (event.type === "cancelled") {
+        await reader.cancel();
+        return;
+      }
     }
     if (done) break;
   }
@@ -105,6 +113,7 @@ export function statusLabel(status: string): string {
     queued: "排队中",
     running: "运行中",
     failed: "失败",
+    cancelled: "已中断",
     published: "已发布",
   }[status] ?? status;
 }

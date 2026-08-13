@@ -3,6 +3,7 @@ import ConstructionRounded from "@mui/icons-material/ConstructionRounded";
 import ErrorOutlineRounded from "@mui/icons-material/ErrorOutlineRounded";
 import KeyboardArrowDownRounded from "@mui/icons-material/KeyboardArrowDownRounded";
 import PsychologyAltRounded from "@mui/icons-material/PsychologyAltRounded";
+import StopCircleOutlined from "@mui/icons-material/StopCircleOutlined";
 import { Box, CircularProgress, Collapse, Divider, Stack, Typography } from "@mui/material";
 import { type ReactNode, useEffect, useMemo, useState } from "react";
 import { templateSurfaces } from "../theme";
@@ -15,6 +16,7 @@ export function AgentActivity({ items, children, pending = false, autoCollapseWh
   const outcome = agentActivityOutcome(items, pending, turnStatus, autoCollapseWhenComplete);
   const active = outcome === "running";
   const failed = outcome === "failed";
+  const cancelled = outcome === "cancelled";
   const phases = useMemo(() => activityPhasesForDisplay(groupedPhases, active), [active, groupedPhases]);
   const connectionStatus = useMemo(() => topLevelActivityStatus(items), [items]);
   const hasOutput = Boolean(children);
@@ -28,7 +30,7 @@ export function AgentActivity({ items, children, pending = false, autoCollapseWh
   }, [active, autoCollapseWhenComplete, hasOutput]);
 
   if (!items.length && !hasOutput && !pending) return null;
-  const statusLabel = active ? "处理中" : failed ? "处理未完成" : "处理完成";
+  const statusLabel = active ? "处理中" : cancelled ? "已中断" : failed ? "处理未完成" : "处理完成";
 
   return (
     <Box sx={{ ...templateSurfaces.assistantMessage, borderRadius: 2, overflow: "hidden" }}>
@@ -43,7 +45,7 @@ export function AgentActivity({ items, children, pending = false, autoCollapseWh
           onClick={() => setExpanded((value) => !value)}
           sx={{ width: "100%", border: 0, bgcolor: "transparent", color: "text.primary", px: 1.5, py: 1.1, cursor: "pointer", textAlign: "left" }}
         >
-          {active ? <CircularProgress size={15} /> : failed ? <ErrorOutlineRounded color="error" sx={{ fontSize: 18 }} /> : <CheckCircleOutlineRounded color="success" sx={{ fontSize: 18 }} />}
+          {active ? <CircularProgress size={15} /> : cancelled ? <StopCircleOutlined color="action" sx={{ fontSize: 18 }} /> : failed ? <ErrorOutlineRounded color="error" sx={{ fontSize: 18 }} /> : <CheckCircleOutlineRounded color="success" sx={{ fontSize: 18 }} />}
           <Typography variant="body2" fontWeight={650}>{statusLabel}</Typography>
           {connectionStatus && <Typography variant="caption" color="text.secondary">· {connectionStatus.label}</Typography>}
           <Box sx={{ flex: 1, borderTop: 1, borderColor: "divider" }} />
@@ -80,7 +82,8 @@ export function AgentActivity({ items, children, pending = false, autoCollapseWh
 function ActivityPhase({ phase, pending, expanded, onToggle }: { phase: AgentActivityPhase; pending: boolean; expanded: boolean; onToggle: () => void }) {
   const running = phase.status === "running" || pending;
   const failed = !running && phase.status === "failed";
-  const status = running ? "处理中" : failed ? "未完成" : "完成";
+  const cancelled = !running && phase.status === "cancelled";
+  const status = running ? "处理中" : cancelled ? "已中断" : failed ? "未完成" : "完成";
   const secondaryItems = phase.kind === "analysis" ? phase.items.filter((item) => item.kind !== "reasoning") : phase.items;
   const summary = plainActivitySummary(phase.detail) || (phase.kind === "analysis" && running ? "Agent 正在分析，暂未提供可展示的摘要…" : status);
   const canCollapse = secondaryItems.length > 0;
@@ -97,7 +100,7 @@ function ActivityPhase({ phase, pending, expanded, onToggle }: { phase: AgentAct
         onClick={() => canCollapse && onToggle()}
         sx={{ width: "100%", border: 0, bgcolor: "transparent", color: "text.primary", p: 0, cursor: canCollapse ? "pointer" : "default", textAlign: "left" }}
       >
-        {running ? <CircularProgress size={14} /> : failed ? <ErrorOutlineRounded color="error" sx={{ fontSize: 17 }} /> : <PsychologyAltRounded color="action" sx={{ fontSize: 17 }} />}
+        {running ? <CircularProgress size={14} /> : cancelled ? <StopCircleOutlined color="action" sx={{ fontSize: 17 }} /> : failed ? <ErrorOutlineRounded color="error" sx={{ fontSize: 17 }} /> : <PsychologyAltRounded color="action" sx={{ fontSize: 17 }} />}
         <Typography variant="caption" fontWeight={700}>{phase.kind === "analysis" ? "分析" : "准备"}</Typography>
         {canCollapse && <KeyboardArrowDownRounded color="action" sx={{ ml: "0!important", fontSize: 17, transition: "transform .18s ease", transform: expanded ? "rotate(180deg)" : "rotate(0deg)" }} />}
         <Typography variant="caption" color="text.secondary" sx={{ minWidth: 0, flex: 1, whiteSpace: "pre-wrap", overflowWrap: "anywhere" }}>{summary}</Typography>
@@ -117,7 +120,7 @@ function ActivityPhase({ phase, pending, expanded, onToggle }: { phase: AgentAct
 function ActivityStep({ item }: { item: AgentActivityItem }) {
   return (
     <Stack direction="row" spacing={.8} alignItems="flex-start">
-      {item.status === "running" ? <CircularProgress size={13} sx={{ mt: .25 }} /> : item.status === "failed" ? <ErrorOutlineRounded color="error" sx={{ fontSize: 15, mt: .1 }} /> : item.kind === "tool" ? <ConstructionRounded color="action" sx={{ fontSize: 15, mt: .1 }} /> : <CheckCircleOutlineRounded color="action" sx={{ fontSize: 15, mt: .1 }} />}
+      {item.status === "running" ? <CircularProgress size={13} sx={{ mt: .25 }} /> : item.status === "cancelled" ? <StopCircleOutlined color="action" sx={{ fontSize: 15, mt: .1 }} /> : item.status === "failed" ? <ErrorOutlineRounded color="error" sx={{ fontSize: 15, mt: .1 }} /> : item.kind === "tool" ? <ConstructionRounded color="action" sx={{ fontSize: 15, mt: .1 }} /> : <CheckCircleOutlineRounded color="action" sx={{ fontSize: 15, mt: .1 }} />}
       <Box sx={{ minWidth: 0 }}>
         <Typography variant="caption" display="block"><Box component="span" fontWeight={700}>{item.kind === "tool" ? "工具：" : "进度："}</Box>{item.label}</Typography>
         {item.detail && <Typography variant="caption" color="text.secondary" display="block" sx={{ whiteSpace: "pre-wrap", overflowWrap: "anywhere" }}>{item.detail}</Typography>}

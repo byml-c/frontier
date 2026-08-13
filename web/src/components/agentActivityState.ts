@@ -5,7 +5,7 @@ export type AgentActivityItem = {
   kind: string;
   label: string;
   detail?: string;
-  status: "running" | "completed" | "failed";
+  status: "running" | "completed" | "failed" | "cancelled";
 };
 
 export type AgentActivityPhase = {
@@ -36,6 +36,7 @@ export function plainActivitySummary(value?: string): string {
 function activityStatus(items: AgentActivityItem[]): AgentActivityItem["status"] {
   if (items.some((item) => item.status === "running")) return "running";
   if (items.some((item) => item.status === "failed")) return "failed";
+  if (items.some((item) => item.status === "cancelled")) return "cancelled";
   return "completed";
 }
 
@@ -112,8 +113,9 @@ export function agentActivityOutcome(
   pending: boolean,
   turnStatus?: string,
   completionConfirmed = false,
-): "running" | "completed" | "failed" {
+): "running" | "completed" | "failed" | "cancelled" {
   if (pending || items.some((item) => item.status === "running")) return "running";
+  if (turnStatus === "cancelled" || items.some((item) => item.status === "cancelled")) return "cancelled";
   if (turnStatus === "completed" || completionConfirmed) return "completed";
   if (
     turnStatus === "failed"
@@ -134,7 +136,7 @@ export function updateActivities(
     kind: String(event.kind || "status"),
     label: String(event.label || "Agent 正在处理"),
     detail: event.detail ? String(event.detail) : undefined,
-    status: event.status === "failed" || event.status === "completed" ? event.status : "running",
+    status: event.status === "failed" || event.status === "completed" || event.status === "cancelled" ? event.status : "running",
   };
   const index = current.findIndex((item) => item.id === next.id);
   if (index < 0) {
@@ -159,7 +161,7 @@ export function activitiesFromContext(context: Record<string, unknown>): AgentAc
       kind: String(item.kind || "status"),
       label: String(item.label),
       detail: item.detail ? String(item.detail) : undefined,
-      status: item.status === "failed" || item.status === "running" ? item.status : "completed",
+      status: item.status === "failed" || item.status === "running" || item.status === "cancelled" ? item.status : "completed",
     } satisfies AgentActivityItem];
   });
 }

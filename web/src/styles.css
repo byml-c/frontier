@@ -39,7 +39,11 @@ body { overflow-x: hidden; }
 }
 .pdf-scroll.desktop-reader-selection .textLayer span::selection {
   color: transparent !important;
-  background: Highlight !important;
+  background: rgba(156, 204, 244, .34) !important;
+}
+.pdf-scroll.desktop-reader-selection .textLayer span::-moz-selection {
+  color: transparent !important;
+  background: rgba(156, 204, 244, .34) !important;
 }
 .pdf-search-mark {
   color: inherit;
@@ -66,7 +70,8 @@ body { overflow-x: hidden; }
 }
 .annotation-mark--active {
   opacity: 1;
-  background: rgba(133, 190, 242, .5);
+  background: rgba(156, 204, 244, .3);
+  mix-blend-mode: multiply;
 }
 
 .mobile-reader-selection,
