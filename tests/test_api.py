@@ -604,6 +604,78 @@ def test_document_reader_estimate_scales_with_page_count() -> None:
     assert long[1] > short[1]
 
 
+def test_document_resources_api_exposes_cached_arxiv_semantics(
+    client: TestClient,
+    monkeypatch,
+    tmp_path,
+) -> None:
+    from frontier.api import papers
+
+    paper = create_paper(client, "Structured resource API")
+    image = tmp_path / "figure.png"
+    image.write_bytes(b"image")
+    monkeypatch.setattr(
+        papers,
+        "document_status",
+        lambda _session, item: {
+            "paper_id": item.id,
+            "version": "v1",
+            "status": "ready",
+            "reader_source": "arxiv_html",
+            "blocks": [
+                {
+                    "id": "formula",
+                    "kind": "formula",
+                    "page_number": 2,
+                    "html": '<span data-reader-tex="E=mc^2" data-reader-display="block"></span>',
+                },
+                {
+                    "id": "figure",
+                    "kind": "picture",
+                    "page_number": 3,
+                    "caption": "Figure 1",
+                    "image_url": f"/api/papers/{item.id}/document/assets/figure.png",
+                },
+            ],
+        },
+    )
+    monkeypatch.setattr(papers, "document_asset", lambda _paper_id, _filename: image)
+
+    response = client.get(
+        f"/api/papers/{paper['id']}/document/resources", params={"kind": "formula"}
+    )
+
+    assert response.status_code == 200, response.text
+    assert response.json()["formulas"][0]["tex"] == "E=mc^2"
+    assert "figures" not in response.json()
+
+
+def test_document_resources_api_reports_not_ready_without_partial_data(
+    client: TestClient,
+    monkeypatch,
+) -> None:
+    from frontier.api import papers
+
+    paper = create_paper(client, "Pending structured resources")
+    queued: list[str] = []
+    monkeypatch.setattr(
+        papers,
+        "document_status",
+        lambda _session, item: {"paper_id": item.id, "status": "missing"},
+    )
+    monkeypatch.setattr(
+        papers,
+        "queue_document_conversion",
+        lambda paper_id: queued.append(paper_id) or True,
+    )
+
+    response = client.get(f"/api/papers/{paper['id']}/document/resources")
+
+    assert response.status_code == 409
+    assert queued == [paper["id"]]
+    assert response.json()["detail"]["document_status"]["status"] == "missing"
+
+
 def test_document_reader_detects_stale_queued_status() -> None:
     fresh = datetime.now(UTC).isoformat()
     stale = (datetime.now(UTC) - timedelta(minutes=2)).isoformat()
@@ -805,6 +877,7 @@ def test_streamed_conversation_persists_activity_with_answer(
     detail = client.get(f"/api/conversations/{conversation['id']}").json()
     assistant = detail["messages"][-1]
     assert assistant["content"] == "**结论** 正文"
+    assert assistant["context_json"]["stream_status"] == "completed"
     activities = assistant["context_json"]["activities"]
     assert next(item for item in activities if item["id"] == "tool-1") == {
         "id": "tool-1",
@@ -812,6 +885,101 @@ def test_streamed_conversation_persists_activity_with_answer(
         "label": "已读取论文",
         "status": "completed",
     }
+    task = client.get(f"/api/tasks/{assistant['context_json']['task_id']}").json()
+    assert task["result_json"] == {
+        "response": "**结论** 正文",
+        "activities": activities,
+        "stream_status": "completed",
+    }
+
+
+def test_streamed_conversation_persists_partial_answer_and_failed_activity(
+    client: TestClient,
+    monkeypatch,
+) -> None:
+    from frontier.api import conversations
+
+    monkeypatch.setattr(conversations.settings, "enable_codex_runs", True)
+
+    def fake_stream(*_args, **_kwargs):
+        yield {"type": "thread", "thread_id": "thread-partial"}
+        yield {
+            "type": "activity",
+            "activity_id": "reason-1",
+            "kind": "reasoning",
+            "label": "已完成分析",
+            "detail": "已经找到关键证据",
+            "status": "completed",
+        }
+        yield {"type": "delta", "delta": "已经生成的部分回答"}
+        raise RuntimeError("模型连接中断")
+
+    monkeypatch.setattr(conversations, "stream_codex_prompt", fake_stream)
+    conversation = client.post(
+        "/api/conversations", json={"kind": "global", "title": "Partial persistence"}
+    ).json()
+    response = client.post(
+        f"/api/conversations/{conversation['id']}/messages/stream",
+        json={"content": "请分析"},
+    )
+    assert response.status_code == 200, response.text
+
+    detail = client.get(f"/api/conversations/{conversation['id']}").json()
+    assistant = detail["messages"][-1]
+    assert assistant["content"] == "已经生成的部分回答"
+    assert assistant["context_json"]["stream_status"] == "failed"
+    assert assistant["context_json"]["stream_error"] == "模型连接中断"
+    assert assistant["context_json"]["activities"][-1]["status"] == "failed"
+    assert assistant["context_json"]["activities"][-1]["label"] == "Agent 响应未完成"
+    task = client.get(f"/api/tasks/{assistant['context_json']['task_id']}").json()
+    assert task["status"] == "failed"
+    assert task["result_json"]["response"] == "已经生成的部分回答"
+
+
+def test_service_startup_marks_orphaned_conversation_draft_as_interrupted(
+    client: TestClient,
+) -> None:
+    from frontier.api.conversations import mark_orphaned_conversation_streams
+    from frontier.database import SessionLocal
+    from frontier.models import Message, TaskRun
+
+    conversation = client.post(
+        "/api/conversations", json={"kind": "global", "title": "Restart recovery"}
+    ).json()
+    with SessionLocal() as session:
+        task = TaskRun(kind="global_chat", status="running", payload_json={})
+        session.add(task)
+        session.flush()
+        assistant = Message(
+            conversation_id=conversation["id"],
+            role="assistant",
+            content="重启前生成的内容",
+            context_json={
+                "task_id": task.id,
+                "stream_status": "running",
+                "activities": [
+                    {
+                        "id": "tool-1",
+                        "kind": "tool",
+                        "label": "正在读取资料",
+                        "status": "running",
+                    }
+                ],
+            },
+        )
+        session.add(assistant)
+        session.commit()
+        task_id = task.id
+
+    assert mark_orphaned_conversation_streams() == 1
+    detail = client.get(f"/api/conversations/{conversation['id']}").json()
+    recovered = detail["messages"][-1]
+    assert recovered["content"] == "重启前生成的内容"
+    assert recovered["context_json"]["stream_status"] == "interrupted"
+    assert recovered["context_json"]["activities"][0]["status"] == "failed"
+    task = client.get(f"/api/tasks/{task_id}").json()
+    assert task["status"] == "failed"
+    assert task["result_json"]["stream_status"] == "interrupted"
 
 
 def test_metadata_generation_can_be_requested_without_adding_a_brief_item(

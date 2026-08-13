@@ -22,6 +22,7 @@ async def lifespan(_app: FastAPI):
     create_tables()
     with SessionLocal() as session:
         ensure_default_settings(session)
+    conversations.mark_orphaned_conversation_streams()
     warm_translation_provider()
     start_scheduler()
     yield

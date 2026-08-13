@@ -141,13 +141,20 @@ def _tool_activity(item: dict[str, Any], status: str) -> dict[str, Any] | None:
             subject = "研究图谱"
         elif "frontier memory" in command:
             subject = "研究记忆"
+        elif "uv run python" in command or command.lstrip().startswith("python"):
+            subject = "计算工具"
         else:
             subject = "研究工具"
-        label = f"正在读取{subject}" if status == "running" else f"已完成{subject}调用"
         exit_code = item.get("exitCode")
         duration = item.get("durationMs")
+        failed = failed or (exit_code is not None and exit_code != 0)
+        label = (
+            f"正在读取{subject}"
+            if status == "running"
+            else f"{subject}调用失败" if failed else f"已完成{subject}调用"
+        )
         if status != "running":
-            detail = "调用失败" if failed or exit_code not in (None, 0) else "调用成功"
+            detail = "调用失败" if failed else "调用成功"
             if isinstance(duration, int):
                 detail += f" · {duration / 1000:.1f} 秒"
     elif item_type in {"mcpToolCall", "dynamicToolCall"}:

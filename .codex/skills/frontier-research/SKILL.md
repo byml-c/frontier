@@ -5,7 +5,7 @@ description: Operate the Frontier personal paper-research system through its CLI
 
 # Frontier Research
 
-Use the `frontier` CLI as the only data interface. Let the Server own files and persistence; never edit `data/`, SQLite, or exported JSON directly.
+Use the `frontier` CLI as the only application-data interface. Let the Server own files and persistence; never edit SQLite, exported JSON, or other application data directly. The only filesystem exception is task-scoped temporary computation material under `data/tasks/<task_id>/`.
 
 ## Start every task
 
@@ -31,6 +31,24 @@ Use the `frontier` CLI as the only data interface. Let the Server own files and 
 
 Do not invent author roles, affiliations, experimental results, or limitations. Use `null`, “未标注”, or a concrete failure when evidence is absent.
 
+## Identify a specified paper
+
+When a user or task names a paper that is not already available, especially for comparison:
+
+1. Search without changing the library first: `uv run frontier source arxiv-search '<focused title/author query>' --max-results 10 --no-ingest`.
+2. Compare title, authors, year, and arXiv ID. If these do not identify exactly one paper reliably, show the plausible result or results and ask the user which paper they mean before ingesting anything.
+3. When the match is unique, ingest it only if the requested work needs saved metadata or full text, then use `paper download` and read the evidence needed for the comparison.
+4. A unique arXiv ID is already sufficient identification. Do not force a confirmation for a clear exact match or for broad topic discovery; broad discovery may follow the normal candidate workflow.
+
+Never silently choose between ambiguous papers or claim to have compared full texts after reading only search metadata.
+
+## Computation
+
+- Run Python as `uv run python`. NumPy, SciPy, scikit-learn, pandas, and opencv-python are declared project dependencies.
+- Put temporary scripts, inputs, and outputs only under `data/tasks/<task_id>/`. Do not use this exception to modify application-owned task records or other persisted data.
+- Never run `uv add`, install undeclared dependencies, or access SQLite directly. Data mutations still go through `uv run frontier`.
+- Prefer a short, reproducible calculation. Report the inputs, formula or metric definition, sample size, and missing-value handling with the result.
+
 ## User-added recommendation
 
 When a task identifies one user-added paper and a brief date:
@@ -43,7 +61,7 @@ When a task identifies one user-added paper and a brief date:
 
 ## Paper discussion
 
-Load the paper, PDF pages, annotations, reading progress, and existing paper conversation. Answer through problem decomposition and mutual inquiry. Cite every material PDF claim as `[[page:N]]` so the Web can jump to the source.
+Load the paper, PDF pages, annotations, reading progress, and existing paper conversation. Use `paper resources` when exact formula TeX, original figures, tables, bibliography entries, or internal citation targets matter. Answer through problem decomposition and mutual inquiry. Cite every material PDF claim as `[[page:N]]` so the Web can jump to the source.
 
 Keep simple word or sentence translations out of the Agent conversation. When the user asks about selected text, use its saved page and selection context.
 

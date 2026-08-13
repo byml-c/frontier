@@ -8,10 +8,93 @@ export type AgentActivityItem = {
   status: "running" | "completed" | "failed";
 };
 
+export type AgentActivityPhase = {
+  id: string;
+  kind: "preparation" | "analysis";
+  detail?: string;
+  items: AgentActivityItem[];
+  status: AgentActivityItem["status"];
+  toolCount: number;
+};
+
+function activityStatus(items: AgentActivityItem[]): AgentActivityItem["status"] {
+  if (items.some((item) => item.status === "running")) return "running";
+  if (items.some((item) => item.status === "failed")) return "failed";
+  return "completed";
+}
+
+/**
+ * A reasoning event starts an analysis phase. Every following public status or
+ * tool event belongs to that phase until the next reasoning event arrives.
+ * Keeping this transformation separate from the component makes live and
+ * persisted conversations use exactly the same presentation rules.
+ */
+export function groupActivities(items: AgentActivityItem[]): AgentActivityPhase[] {
+  const phases: Array<{ id: string; kind: "preparation" | "analysis"; detail?: string; items: AgentActivityItem[] }> = [];
+  let current: (typeof phases)[number] | undefined;
+
+  for (const item of items) {
+    if (item.kind === "reasoning") {
+      current = {
+        id: `analysis-${item.id}`,
+        kind: "analysis",
+        detail: item.detail,
+        items: [item],
+      };
+      phases.push(current);
+      continue;
+    }
+    if (!current) {
+      current = { id: `preparation-${item.id}`, kind: "preparation", items: [] };
+      phases.push(current);
+    }
+    current.items.push(item);
+  }
+
+  return phases.map((phase) => ({
+    ...phase,
+    status: activityStatus(phase.items),
+    toolCount: phase.items.filter((item) => item.kind === "tool").length,
+  }));
+}
+
+/** Hide the final reasoning-only phase once it has become the visible answer. */
+export function activityPhasesForDisplay(
+  phases: AgentActivityPhase[],
+  active: boolean,
+): AgentActivityPhase[] {
+  const visible = phases.flatMap((phase) => {
+    if (phase.kind !== "preparation") return [phase];
+    const items = phase.items.filter((item) => item.kind !== "status");
+    if (items.length === 0) return [];
+    return [{
+      ...phase,
+      items,
+      status: activityStatus(items),
+      toolCount: items.filter((item) => item.kind === "tool").length,
+    }];
+  });
+  if (active || visible.length === 0) return visible;
+  const last = visible.at(-1);
+  if (
+    last?.kind === "analysis"
+    && last.items.every((item) => item.kind === "reasoning")
+  ) return visible.slice(0, -1);
+  return visible;
+}
+
+/** Return the connection lifecycle status that belongs in the outer header. */
+export function topLevelActivityStatus(items: AgentActivityItem[]): AgentActivityItem | undefined {
+  const reasoningIndex = items.findIndex((item) => item.kind === "reasoning");
+  const beforeReasoning = items.slice(0, reasoningIndex < 0 ? items.length : reasoningIndex);
+  return beforeReasoning.find((item) => item.id === "agent-startup")
+    ?? beforeReasoning.filter((item) => item.kind === "status").at(-1);
+}
+
 export function updateActivities(
   current: AgentActivityItem[],
   event: StreamEvent,
-  maxItems: number | null = 8,
+  maxItems: number | null = null,
 ): AgentActivityItem[] {
   if (event.type !== "activity") return current;
   const next: AgentActivityItem = {
@@ -46,5 +129,5 @@ export function activitiesFromContext(context: Record<string, unknown>): AgentAc
       detail: item.detail ? String(item.detail) : undefined,
       status: item.status === "failed" || item.status === "running" ? item.status : "completed",
     } satisfies AgentActivityItem];
-  }).slice(-8);
+  });
 }

@@ -118,11 +118,36 @@ Current request:
 
 def build_prompt(task: TaskRun) -> str:
     payload = task.payload_json
+    ambiguous_paper_action = (
+        "ask the user to confirm the intended paper before importing anything"
+        if task.kind in {"paper_chat", "global_chat", "graph_maintenance"}
+        else "do not import it; report that user confirmation is required"
+    )
+    research_capabilities = (
+        "When the task or user names a specific paper that is not already available, especially "
+        "for a comparison, first search arXiv without importing it using `uv run frontier source "
+        "arxiv-search '<focused title/author query>' --max-results 10 --no-ingest`. If title, "
+        "author, and year do not identify one result reliably, "
+        f"{ambiguous_paper_action}. If there is one reliable match, import and download it "
+        "only when its metadata or full text is needed. Do not impose this confirmation step on "
+        "broad topic discovery or a uniquely identified arXiv ID. "
+        "Use `uv run frontier paper resources PAPER_ID` when exact formula TeX, original figures, "
+        "tables, bibliography entries, or internal citation targets are needed; inspect a returned "
+        "local asset path with the image viewer. "
+        "You may calculate with `uv run python`; NumPy, SciPy, scikit-learn, pandas, and "
+        "opencv-python are installed project dependencies. Put task-specific temporary scripts and "
+        f"artifacts only under `data/tasks/{task.id}/`. Never run `uv add`, install undeclared "
+        "dependencies, modify application data files, or access the database directly. Report the "
+        "calculation inputs, formula or metric definition, sample size, and missing-value handling."
+    )
     workflow_common = (
         "Use the project-local `frontier-research` skill. "
         "Operate application data only through `uv run frontier` CLI commands. "
-        "Never edit the SQLite database or data files directly. "
-        f"The task id is {task.id}."
+        "Never edit the SQLite database or application data files directly. "
+        "Write every persisted user-facing Agent-generated prose field in concise Simplified "
+        "Chinese, even when the paper and source material are in English. Keep technical terms, "
+        "formulas, and proper names in their original language when that improves precision. "
+        f"The task id is {task.id}. {research_capabilities}"
     )
     interactive_common = (
         "You are the Frontier research assistant. Respond directly without announcing a plan, "
@@ -130,7 +155,7 @@ def build_prompt(task: TaskRun) -> str:
         "application context or a requested mutation requires it; never edit data files directly. "
         "Format responses with concise Markdown. Use standard LaTeX delimiters for mathematical "
         "expressions when formulas materially improve the explanation. "
-        f"The task id is {task.id}."
+        f"The task id is {task.id}. {research_capabilities}"
     )
     if task.kind == "daily_brief":
         run_date = (
@@ -144,7 +169,8 @@ limits returned by `frontier setting list`: abstracts, full texts, total brief i
 items. Before ranking or adding a paper, inspect its existing record and exclude every paper whose
 status is not `candidate`; papers in `reading`, `feedback_pending`, `completed`, or `ignored` status
 must never appear in the daily recommendations. Read full PDF text for final candidates and update
-their paper analyses. Do not attach daily
+their paper analyses. Paper summaries, Agent comments, recommendation reasons, problem, innovation,
+experiment, and limitation fields must be written in Simplified Chinese. Do not attach daily
 or candidate papers to research nodes, create paper-backed node progress, or otherwise treat them
 as accumulated evidence: graph connection is allowed only after the user completes reading and
 confirms feedback, so the paper status is `completed`. You may describe probable graph relevance
@@ -166,8 +192,9 @@ Process paper {paper_id} {destination}. Load its current metadata, download the 
 making a recommendation. Use rendered pages when figures, tables, or layout carry material evidence.
 Verify and update author names, first author, corresponding author, primary affiliation, source and
 publication metadata when the evidence supports them; never invent missing roles or affiliations.
-Save a concise one-line summary, one-line Agent comment, problem, innovation, experiment evidence,
-limitations, research score, relevance score, recommendation reason, and `suggested_tags` with
+Save a concise Simplified-Chinese one-line summary, one-line Agent comment, problem, innovation,
+experiment evidence, limitations, research score, relevance score, recommendation reason, and
+`suggested_tags` with
 `frontier paper update`. Use explicit unavailable/evidence-insufficient wording for fields that cannot
 be established. Do not attach the paper to the graph or add node progress before user-confirmed
 reading is completed. Finish with a short summary of fields updated and any concrete source failure.
@@ -177,8 +204,9 @@ reading is completed. Finish with a short summary of fields updated and any conc
         return f"""{workflow_common}
 
 Prepare the completion summary for paper {paper_id}. Load the paper, extracted PDF pages,
-annotations, notes, and its paper conversation. Summarize the question, evidence, contribution,
-experiment, limitations, the user's apparent attitude, and suggested tags. Every material paper
+annotations, notes, and its paper conversation. Write the complete saved summary in Simplified
+Chinese and summarize the question, evidence, contribution, experiment, limitations, the user's
+apparent attitude, and suggested tags. Every material paper
 claim must cite a page as [[page:N]]. Save only suggestions with `frontier paper finish`; do not
 confirm interest, quality, tags, or node creation on the user's behalf.
 After saving, return only one concise Chinese sentence confirming completion. Do not narrate loaded

@@ -46,6 +46,7 @@ export function AgentPanel({ open, onClose, width, onWidthChange }: Props) {
       return api<Conversation>("/api/conversations", jsonBody({ kind: "global", title: "研究助手" }));
     },
     enabled: open,
+    refetchInterval: (query) => hasActiveConversationTurn(query.state.data) ? 1200 : false,
   });
 
   useEffect(() => {
@@ -67,12 +68,14 @@ export function AgentPanel({ open, onClose, width, onWidthChange }: Props) {
         if (streamEvent.type === "delta") setStreaming((value) => value + String(streamEvent.delta ?? ""));
         if (streamEvent.type === "activity") setActivities((value) => updateActivities(value, streamEvent));
       });
-      await queryClient.invalidateQueries({ queryKey: ["global-conversation"] });
-      setLiveUser(""); setStreaming(""); setActivities([]);
     } catch (cause) {
       setActivities((value) => failRunningActivities(value));
       setError(cause instanceof Error ? cause.message : String(cause));
-    } finally { setSending(false); }
+    } finally {
+      setSending(false);
+      await queryClient.invalidateQueries({ queryKey: ["global-conversation"] });
+      setLiveUser(""); setStreaming(""); setActivities([]);
+    }
   }
 
   function startResize(event: React.PointerEvent) {
@@ -94,9 +97,9 @@ export function AgentPanel({ open, onClose, width, onWidthChange }: Props) {
       </Stack>
       <ConversationScroller contentVersion={`${open}:${conversation.data?.messages.length ?? 0}:${liveUser.length}:${streaming.length}:${activities.map((item) => item.status).join(",")}:${sending}`}>
         {!conversation.data?.messages.length && !liveUser && <Paper sx={{ p: 2.5, bgcolor: "background.default" }}><Typography fontWeight={700}>可以从这里开始</Typography><Typography variant="body2" color="text.secondary" sx={{ mt: .75 }}>询问近期研究进展、比较论文，或直接要求整理当前图谱。</Typography></Paper>}
-        {conversation.data?.messages.map((message) => <ChatBubble key={message.id} role={message.role} content={message.content} activities={activitiesFromContext(message.context_json)} />)}
+        {conversation.data?.messages.map((message) => <ChatBubble key={message.id} role={message.role} content={message.content} activities={activitiesFromContext(message.context_json)} pending={message.context_json.stream_status === "queued" || message.context_json.stream_status === "running"} />)}
         {liveUser && <ChatBubble role="user" content={liveUser} />}
-        {(streaming || sending || activities.length > 0) && <Box sx={{ alignSelf: "stretch" }}><AgentActivity items={activities} pending={sending && !streaming}>{streaming ? <MarkdownMessage content={streaming} /> : undefined}</AgentActivity></Box>}
+        {(streaming || sending || activities.length > 0) && <Box sx={{ alignSelf: "stretch" }}><AgentActivity items={activities} pending={sending}>{streaming ? <MarkdownMessage content={streaming} /> : undefined}</AgentActivity></Box>}
         {error && <Alert severity="error">{error}</Alert>}
       </ConversationScroller>
       <Box component="form" onSubmit={submit} sx={{ p: 2, borderTop: 1, borderColor: "divider" }}>
@@ -106,7 +109,12 @@ export function AgentPanel({ open, onClose, width, onWidthChange }: Props) {
   </Drawer>;
 }
 
-function ChatBubble({ role, content, activities = [] }: { role: "user" | "assistant"; content: string; activities?: AgentActivityItem[] }) {
-  if (role === "assistant") return <Box sx={{ alignSelf: "stretch" }}><AgentActivity items={activities}><MarkdownMessage content={content} /></AgentActivity></Box>;
+function hasActiveConversationTurn(conversation?: Conversation): boolean {
+  const status = conversation?.messages.at(-1)?.context_json.stream_status;
+  return status === "queued" || status === "running";
+}
+
+function ChatBubble({ role, content, activities = [], pending = false }: { role: "user" | "assistant"; content: string; activities?: AgentActivityItem[]; pending?: boolean }) {
+  if (role === "assistant") return <Box sx={{ alignSelf: "stretch" }}><AgentActivity items={activities} pending={pending}>{content ? <MarkdownMessage content={content} /> : undefined}</AgentActivity></Box>;
   return <Box sx={{ alignSelf: "flex-end", maxWidth: "85%" }}><Paper elevation={0} sx={{ px: 1.75, py: 1.25, bgcolor: "primary.main", border: 0, color: "primary.contrastText", borderRadius: "16px 16px 4px 16px" }}><MarkdownMessage content={content} inverted /></Paper></Box>;
 }

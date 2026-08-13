@@ -1,6 +1,8 @@
 import { Box, Link as MuiLink } from "@mui/material";
 import ReactMarkdown from "react-markdown";
 import rehypeKatex from "rehype-katex";
+import remarkCjkFriendly from "remark-cjk-friendly/parseOnly";
+import remarkCjkFriendlyGfmStrikethrough from "remark-cjk-friendly-gfm-strikethrough/parseOnly";
 import remarkGfm from "remark-gfm";
 import remarkMath from "remark-math";
 import "katex/dist/katex.min.css";
@@ -61,7 +63,12 @@ export function MarkdownMessage({
       }}
     >
       <ReactMarkdown
-        remarkPlugins={[remarkGfm, remarkMath]}
+        remarkPlugins={[
+          remarkGfm,
+          remarkCjkFriendly,
+          remarkCjkFriendlyGfmStrikethrough,
+          remarkMath,
+        ]}
         rehypePlugins={[rehypeKatex]}
         components={{
           a: ({ href = "", children }) => {

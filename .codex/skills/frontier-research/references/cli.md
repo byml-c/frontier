@@ -16,19 +16,33 @@ uv run frontier paper download PAPER_ID
 uv run frontier paper text PAPER_ID
 uv run frontier paper text PAPER_ID --page 7
 uv run frontier paper render-page PAPER_ID 7 --dpi 144
+uv run frontier paper resources PAPER_ID
+uv run frontier paper resources PAPER_ID --kind formula
+uv run frontier paper resources PAPER_ID --kind figure --block-id BLOCK_ID
 uv run frontier paper context PAPER_ID
 uv run frontier paper finish PAPER_ID --data '{"summary":"...","suggested_interested":true,"suggested_quality":true,"suggested_create_node":false,"suggested_tags":["VLA"]}'
 ```
 
 Use `paper context` for reading completion and paper chat. It returns metadata, annotations, progress, conversations, and page-separated PDF text. If a claim depends on a figure, table, equation layout, or visual result, use `paper render-page`; the returned absolute PNG path can be opened with the Agent's image-viewing tool.
 
+Use `paper resources` for the cached structured arXiv HTML representation. It returns formula TeX,
+figure and table captions plus local asset paths, searchable table text, bibliography entries, and
+source-to-target anchor links. Filter with `--kind formula|figure|table|reference` or `--block-id`.
+When a figure/table has `asset_path`, inspect that local file with the image-viewing tool. A 409
+response means conversion is still pending; retry later rather than treating the partial result as
+the complete paper.
+
 ## arXiv
 
 ```bash
 uv run frontier source arxiv-search 'cat:cs.RO AND (all:"vision language action" OR all:VLA)' --max-results 50
+uv run frontier source arxiv-search 'ti:"exact paper title" AND au:"author surname"' --max-results 10 --no-ingest
 ```
 
 Search calls ingest by default. Split large topic sets into focused queries, then rely on Server de-duplication.
+For a specifically named comparison paper, search with `--no-ingest` first. If title, author, year,
+and arXiv ID do not establish a unique match, ask the user to confirm the intended result before
+ingesting. A supplied arXiv ID or one unambiguous exact match does not require an extra confirmation.
 
 ## Graph
 

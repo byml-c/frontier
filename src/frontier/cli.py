@@ -8,6 +8,11 @@ from typing import Any
 import httpx
 import typer
 
+from .services.generated_content import (
+    PAPER_ANALYSIS_PROSE_FIELDS,
+    non_chinese_prose_fields,
+)
+
 app = typer.Typer(no_args_is_help=True, help="Frontier Agent toolkit CLI")
 paper_app = typer.Typer(no_args_is_help=True)
 graph_app = typer.Typer(no_args_is_help=True)
@@ -68,6 +73,30 @@ class ApiClient:
 
 
 client = ApiClient()
+
+
+def _require_chinese_agent_prose(
+    payload: Any,
+    *,
+    fields: set[str] | frozenset[str] = PAPER_ANALYSIS_PROSE_FIELDS,
+) -> dict[str, Any]:
+    if not isinstance(payload, dict):
+        emit({"ok": False, "error": "Paper update data must be a JSON object."})
+        raise typer.Exit(1)
+    invalid = non_chinese_prose_fields(payload, fields=fields)
+    if invalid:
+        emit(
+            {
+                "ok": False,
+                "error": (
+                    "Agent-generated paper analysis must be written in Simplified Chinese. "
+                    "Rewrite the listed fields and retry the same command."
+                ),
+                "fields": invalid,
+            }
+        )
+        raise typer.Exit(1)
+    return payload
 
 
 @app.command("health")
@@ -138,7 +167,8 @@ def paper_upload(path: Path) -> None:
 
 @paper_app.command("update")
 def paper_update(paper_id: str, data: str = typer.Option(..., help="JSON string or @file")) -> None:
-    emit(client.request("PATCH", f"/api/papers/{paper_id}", json=parse_json(data)))
+    payload = _require_chinese_agent_prose(parse_json(data))
+    emit(client.request("PATCH", f"/api/papers/{paper_id}", json=payload))
 
 
 @paper_app.command("ignore")
@@ -195,9 +225,28 @@ def paper_context(paper_id: str, include_text: bool = True) -> None:
     emit(result)
 
 
+@paper_app.command("resources")
+def paper_resources(
+    paper_id: str,
+    kind: str | None = typer.Option(
+        None, help="Filter: formula, figure, table, or reference"
+    ),
+    block_id: str | None = typer.Option(None, help="Return resources from one document block"),
+) -> None:
+    """Read cached TeX, figures, tables, and internal references."""
+    emit(
+        client.request(
+            "GET",
+            f"/api/papers/{paper_id}/document/resources",
+            params={"kind": kind, "block_id": block_id},
+        )
+    )
+
+
 @paper_app.command("finish")
 def paper_finish(paper_id: str, data: str = typer.Option(..., help="JSON string or @file")) -> None:
-    emit(client.request("POST", f"/api/papers/{paper_id}/finish", json=parse_json(data)))
+    payload = _require_chinese_agent_prose(parse_json(data), fields={"summary"})
+    emit(client.request("POST", f"/api/papers/{paper_id}/finish", json=payload))
 
 
 @graph_app.command("list")

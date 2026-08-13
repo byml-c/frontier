@@ -56,6 +56,7 @@ from ..services.document_reader import (
     queue_document_conversion,
     queue_document_conversions,
 )
+from ..services.document_resources import RESOURCE_KINDS, structured_document_resources
 from ..services.ingest import (
     create_or_update_paper,
     download_paper_pdf,
@@ -626,6 +627,41 @@ def rebuild_document_reader(
     _paper_or_404(session, paper_id)
     queued = queue_document_conversion(paper_id, force=True)
     return {"paper_id": paper_id, "status": "processing", "queued": queued}
+
+
+@router.get("/{paper_id}/document/resources")
+def get_document_resources(
+    paper_id: str,
+    session: Annotated[Session, Depends(get_session)],
+    kind: str | None = Query(default=None),
+    block_id: str | None = Query(default=None),
+) -> dict:
+    paper = _paper_or_404(session, paper_id)
+    if kind and kind not in RESOURCE_KINDS:
+        raise HTTPException(
+            status_code=422,
+            detail=f"kind must be one of: {', '.join(sorted(RESOURCE_KINDS))}",
+        )
+    try:
+        document = document_status(session, paper)
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"Document lookup failed: {exc}") from exc
+    if document.get("status") != "ready":
+        if document.get("status") in {"missing", "processing"}:
+            queue_document_conversion(paper_id)
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "message": "结构化论文资源尚未就绪，请稍后重试",
+                "document_status": document,
+            },
+        )
+    return structured_document_resources(
+        document,
+        kind=kind,
+        block_id=block_id,
+        asset_resolver=lambda filename: document_asset(paper_id, filename),
+    )
 
 
 @router.get("/{paper_id}/document/assets/{filename}")

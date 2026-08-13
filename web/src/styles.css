@@ -33,9 +33,13 @@ body { overflow-x: hidden; }
 .react-pdf__Page,
 .react-pdf__Page canvas { max-width: none; }
 .react-pdf__Page canvas { display: block; }
-.textLayer span::selection {
+.desktop-reader-selection ::selection {
+  color: HighlightText;
+  background: Highlight;
+}
+.pdf-scroll.desktop-reader-selection .textLayer span::selection {
   color: transparent !important;
-  background: rgba(25, 118, 210, .28) !important;
+  background: Highlight !important;
 }
 .pdf-search-mark {
   color: inherit;
@@ -61,9 +65,8 @@ body { overflow-x: hidden; }
   mix-blend-mode: multiply;
 }
 .annotation-mark--active {
-  opacity: .32;
-  background: #1976d2;
-  mix-blend-mode: multiply;
+  opacity: 1;
+  background: rgba(133, 190, 242, .5);
 }
 
 .mobile-reader-selection,

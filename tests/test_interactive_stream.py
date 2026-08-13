@@ -1,7 +1,41 @@
 from __future__ import annotations
 
 from frontier import interactive_stream
-from frontier.interactive_stream import CodexStreamError
+from frontier.interactive_stream import CodexStreamError, _tool_activity
+
+
+def test_failed_command_is_exposed_as_failed_activity() -> None:
+    activity = _tool_activity(
+        {
+            "id": "command-1",
+            "type": "commandExecution",
+            "command": "uv run frontier paper context paper-1",
+            "exitCode": 1,
+            "durationMs": 250,
+        },
+        "completed",
+    )
+
+    assert activity is not None
+    assert activity["status"] == "failed"
+    assert activity["label"] == "论文资料调用失败"
+
+
+def test_python_command_is_exposed_as_computation_activity() -> None:
+    activity = _tool_activity(
+        {
+            "id": "command-python",
+            "type": "commandExecution",
+            "command": "uv run python data/tasks/task-1/metrics.py",
+            "exitCode": 0,
+            "durationMs": 120,
+        },
+        "completed",
+    )
+
+    assert activity is not None
+    assert activity["label"] == "已完成计算工具调用"
+    assert activity["status"] == "completed"
 
 
 def test_stream_turn_exposes_public_activity_without_mixing_commentary(

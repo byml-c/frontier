@@ -130,7 +130,7 @@ export function TextPaperReader({ document, annotations, mobile, toolsOpen, acti
 
   return <Box sx={{ position: "relative", flex: 1, minHeight: 0, overflow: "hidden", bgcolor: "#f7f7f5" }}>
     {toolsOpen && <TextToolbar mobile={mobile} search={search} matches={matches.length} matchIndex={matchIndex} fontSize={fontSize} lineHeight={lineHeight} onSearch={setSearch} onMatch={jumpMatch} onFontSize={(value) => setTypography(value)} onLineHeight={(value) => setTypography(fontSize, value)} onModeToggle={onModeToggle} />}
-    <Box ref={scrollRef} className={mobile ? "mobile-reader-selection" : undefined} onContextMenu={mobile ? (event) => event.preventDefault() : undefined} onPointerDown={beginMobileSelection} onPointerMove={trackMobileSelection} onPointerUp={cancelMobileSelection} onPointerCancel={cancelMobileSelection} onMouseUp={!mobile ? (event) => capture({ x: event.clientX, y: event.clientY }) : undefined} sx={{ height: "100%", overflowY: "auto", WebkitOverflowScrolling: "touch", touchAction: "pan-y", px: { xs: 2, sm: 3 }, py: { xs: 2.5, sm: 4 } }}>
+    <Box ref={scrollRef} className={mobile ? "mobile-reader-selection" : "desktop-reader-selection"} onContextMenu={mobile ? (event) => event.preventDefault() : undefined} onPointerDown={beginMobileSelection} onPointerMove={trackMobileSelection} onPointerUp={cancelMobileSelection} onPointerCancel={cancelMobileSelection} onMouseUp={!mobile ? (event) => capture({ x: event.clientX, y: event.clientY }) : undefined} sx={{ height: "100%", overflowY: "auto", WebkitOverflowScrolling: "touch", touchAction: "pan-y", px: { xs: 2, sm: 3 }, py: { xs: 2.5, sm: 4 } }}>
       <Box component="article" lang="en" sx={{ mx: "auto", maxWidth: 820, p: { xs: 2, sm: 5 }, bgcolor: "background.paper", borderRadius: { xs: 1.5, sm: 2 }, boxShadow: { xs: "none", sm: "0 8px 36px rgba(25,35,45,.08)" }, fontFamily: 'Georgia, "Noto Serif SC", "Songti SC", serif', fontSize, lineHeight, hyphens: "auto", WebkitHyphens: "auto", wordBreak: "normal", overflowWrap: "break-word", "& p": { m: 0 }, "& mark.text-reader-search, & .katex.text-reader-search": { bgcolor: "rgba(255,193,7,.24)", color: "inherit", borderRadius: "1px" } }}>
         <ReaderBlocks blocks={blocks} scrollRoot={scrollRef} annotations={annotations} activeSelection={activeSelection} search={search} onOpenAsset={setAsset} />
       </Box>
@@ -203,7 +203,7 @@ function DocumentBlockView({ block, blocks, scrollRoot, annotations, activeSelec
     if (start < 0) return [];
     return [{ ...item, position_json: { ...item.position_json, block_id: block.id, start_offset: start, end_offset: start + selected.length } }];
   });
-  if (activeSelection?.blockId === block.id) blockAnnotations.push({ id: "active-selection", paper_id: "", kind: "highlight", page_number: block.page_number, position_json: { block_id: block.id, start_offset: activeSelection.startOffset, end_offset: activeSelection.endOffset }, color: "#1976D2", created_at: "" });
+  if (activeSelection?.blockId === block.id) blockAnnotations.push({ id: "active-selection", paper_id: "", kind: "highlight", page_number: block.page_number, position_json: { block_id: block.id, start_offset: activeSelection.startOffset, end_offset: activeSelection.endOffset }, color: "#85BEF2", created_at: "" });
   const captionAnnotations = annotations.flatMap((item) => {
     if (item.position_json.block_id === captionId) return [item];
     if (item.position_json.block_id || item.page_number !== block.page_number || !item.selected_text || !block.caption) return [];
@@ -212,7 +212,7 @@ function DocumentBlockView({ block, blocks, scrollRoot, annotations, activeSelec
     if (start < 0) return [];
     return [{ ...item, position_json: { ...item.position_json, block_id: captionId, start_offset: start, end_offset: start + selected.length } }];
   });
-  if (activeSelection?.blockId === captionId) captionAnnotations.push({ id: "active-caption-selection", paper_id: "", kind: "highlight", page_number: block.page_number, position_json: { block_id: captionId, start_offset: activeSelection.startOffset, end_offset: activeSelection.endOffset }, color: "#1976D2", created_at: "" });
+  if (activeSelection?.blockId === captionId) captionAnnotations.push({ id: "active-caption-selection", paper_id: "", kind: "highlight", page_number: block.page_number, position_json: { block_id: captionId, start_offset: activeSelection.startOffset, end_offset: activeSelection.endOffset }, color: "#85BEF2", created_at: "" });
   if (kind === "caption") return null;
   if (kind === "formula" && block.html) return <Box {...anchorProps} data-text-block data-block-id={block.id} data-page-number={block.page_number} onClick={(event) => followRichReference(event, blocks, scrollRoot.current)} sx={{ my: 2, overflowX: "auto", py: .5, textAlign: "center", "& .katex-display": { m: 0 }, "& .ltx_eqn_table": { width: "100%" } }} dangerouslySetInnerHTML={{ __html: renderArxivHtml(block.html, blockAnnotations, search, block.id) }} />;
   if (["picture", "table", "formula"].includes(kind)) {

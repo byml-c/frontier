@@ -1,40 +1,69 @@
-const CODE_SEGMENT = /(```[\s\S]*?```|~~~[\s\S]*?~~~|`[^`\n]*`)/g;
-const MALFORMED_OPENING_PAIR = /(?<![\\*])\*\*(?!\*)([\t \u00A0\u200B\u2060\u3000\uFEFF]+)([^\n]*?\S)[\t \u00A0\u200B\u2060\u3000\uFEFF]*\*\*(?!\*)/g;
-const STRONG_PAIR_ON_LINE = /(?<![\\*])\*\*(?!\*)([^\n]+?)(?<![\\*])\*\*(?!\*)/g;
-const STRONG_BOUNDARY = /(?<![\\*])(\*\*(?!\*)[^\n]+?(?<![\\*])\*\*)(?=[\p{L}\p{N}])/gu;
+const PROTECTED_SEGMENT = /(```[\s\S]*?```|~~~[\s\S]*?~~~|`[^`\n]*`|\$\$[\s\S]*?\$\$|\$(?!\$)[^$\n]*\$(?!\$)|\\\[[\s\S]*?\\\]|\\\([\s\S]*?\\\))/g;
 const INNER_BOUNDARY = /^[\s\u200B\u2060\uFEFF\u3000]+|[\s\u200B\u2060\uFEFF\u3000]+$/g;
 
+function isEscaped(content: string, index: number): boolean {
+  let backslashes = 0;
+  for (let cursor = index - 1; cursor >= 0 && content[cursor] === "\\"; cursor -= 1) {
+    backslashes += 1;
+  }
+  return backslashes % 2 === 1;
+}
+
+function findStrongDelimiters(line: string): number[] {
+  const delimiters: number[] = [];
+  for (let index = 0; index < line.length - 1; index += 1) {
+    if (line[index] === "*" && line[index + 1] === "*" && isEscaped(line, index)) {
+      // An escaped marker makes the intended pairing ambiguous. Leave this line
+      // to the CommonMark parser instead of pairing a later closing marker as an
+      // opening one.
+      return [];
+    }
+    if (
+      line[index] === "*"
+      && line[index + 1] === "*"
+      && line[index - 1] !== "*"
+      && line[index + 2] !== "*"
+      && !isEscaped(line, index)
+    ) {
+      delimiters.push(index);
+      index += 1;
+    }
+  }
+  return delimiters;
+}
+
+function normalizeStrongLine(line: string): string {
+  const delimiters = findStrongDelimiters(line);
+  if (delimiters.length < 2) return line;
+
+  let cursor = 0;
+  let normalized = "";
+  for (let pairIndex = 0; pairIndex + 1 < delimiters.length; pairIndex += 2) {
+    const opening = delimiters[pairIndex];
+    const closing = delimiters[pairIndex + 1];
+    const original = line.slice(opening, closing + 2);
+    const value = line.slice(opening + 2, closing).replace(INNER_BOUNDARY, "");
+    normalized += line.slice(cursor, opening);
+    normalized += value ? `**${value}**` : original;
+    cursor = closing + 2;
+  }
+  normalized += line.slice(cursor);
+  return normalized;
+}
+
 function normalizeStrongSegment(segment: string): string {
-  const repairedPairs: string[] = [];
-  // Prefer the characteristic model error (`** label**`) before scanning normal
-  // pairs. Placeholders prevent an unrelated, unmatched delimiter earlier in the
-  // line from stealing this pair.
-  const protectedSegment = segment.replace(
-    MALFORMED_OPENING_PAIR,
-    (_match, _leading: string, body: string) => {
-      const marker = `\uE000frontier-strong-${repairedPairs.length}\uE001`;
-      repairedPairs.push(`**${body.replace(INNER_BOUNDARY, "")}**`);
-      return marker;
-    },
-  );
-  const normalized = protectedSegment.replace(STRONG_PAIR_ON_LINE, (match, body: string) => {
-    const value = body.replace(INNER_BOUNDARY, "");
-    return value ? `**${value}**` : match;
-  });
-  return repairedPairs
-    .reduce((value, pair, index) => value.replace(`\uE000frontier-strong-${index}\uE001`, pair), normalized)
-    // A closing delimiter next to a CJK/Latin letter can fail CommonMark's
-    // flanking rule when the bold text ends in punctuation.
-    .replace(STRONG_BOUNDARY, "$1 ");
+  return segment.split("\n").map(normalizeStrongLine).join("\n");
 }
 
 /**
  * Repair CommonMark mistakes commonly produced by streamed model output while
- * leaving inline and fenced code untouched. Repairs never cross a newline, so
- * one unmatched delimiter cannot corrupt later paragraphs.
+ * leaving inline and fenced code untouched. Independent `**` delimiters are
+ * paired from left to right on each line and their inner whitespace is ignored.
+ * Repairs never cross a newline, so one unmatched delimiter cannot corrupt later
+ * paragraphs.
  */
 export function normalizeStrongMarkdown(content: string): string {
-  return content.split(CODE_SEGMENT).map((segment, index) => (
+  return content.split(PROTECTED_SEGMENT).map((segment, index) => (
     index % 2 === 1 ? segment : normalizeStrongSegment(segment)
   )).join("");
 }
