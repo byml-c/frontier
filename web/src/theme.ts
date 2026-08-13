@@ -60,6 +60,7 @@ export const theme = createTheme({
           backgroundAttachment: "fixed",
         },
         "::selection": { backgroundColor: "hsl(210, 100%, 90%)", color: "hsl(210, 100%, 30%)" },
+        "::highlight(frontier-active-selection)": { backgroundColor: "hsl(210, 78%, 88%)", color: "inherit" },
       },
     },
     MuiButton: {

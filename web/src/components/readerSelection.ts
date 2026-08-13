@@ -1,5 +1,13 @@
 export type CaretPoint = { node: Node; offset: number };
 
+export type TextRangeSelection = {
+  text: string;
+  page: number;
+  rect: DOMRect;
+  segments: Array<{ blockId: string; startOffset: number; endOffset: number }>;
+  pageContext: string;
+};
+
 export function caretAtPoint(x: number, y: number): CaretPoint | null {
   const modern = document.caretPositionFromPoint?.(x, y);
   if (modern) return { node: modern.offsetNode, offset: modern.offset };
@@ -36,6 +44,48 @@ export function rangeFromOffsets(root: HTMLElement, start: number, end: number) 
   range.setStart(startPoint.node, startPoint.offset);
   range.setEnd(endPoint.node, endPoint.offset);
   return range;
+}
+
+export function textSelectionFromRange(root: HTMLElement, range: Range): TextRangeSelection | null {
+  const text = range.toString().trim();
+  if (!text) return null;
+  const candidates = [...root.querySelectorAll<HTMLElement>("[data-text-block]")];
+  const rawSegments = candidates.flatMap((block) => {
+    try {
+      if (!range.intersectsNode(block)) return [];
+    } catch {
+      return [];
+    }
+    const fullText = block.textContent || "";
+    const startOffset = block.contains(range.startContainer)
+      ? offsetWithin(block, range.startContainer, range.startOffset) ?? 0
+      : 0;
+    const endOffset = block.contains(range.endContainer)
+      ? offsetWithin(block, range.endContainer, range.endOffset) ?? fullText.length
+      : fullText.length;
+    if (endOffset <= startOffset) return [];
+    return [{ block, blockId: block.dataset.blockId || "", startOffset, endOffset }];
+  });
+  if (!rawSegments.length) return null;
+  const firstRaw = rawSegments[0];
+  const lastRaw = rawSegments.at(-1)!;
+  const firstText = (firstRaw.block.textContent || "").slice(firstRaw.startOffset, firstRaw.endOffset);
+  const lastText = (lastRaw.block.textContent || "").slice(lastRaw.startOffset, lastRaw.endOffset);
+  firstRaw.startOffset += firstText.length - firstText.trimStart().length;
+  lastRaw.endOffset -= lastText.length - lastText.trimEnd().length;
+  const selected = rawSegments.filter((item) => item.blockId && item.endOffset > item.startOffset);
+  if (!selected.length) return null;
+  const rect = range.getBoundingClientRect();
+  return {
+    text,
+    page: Number(selected[0].block.dataset.pageNumber || 1),
+    rect,
+    segments: selected.map(({ blockId, startOffset, endOffset }) => ({ blockId, startOffset, endOffset })),
+    pageContext: selected.map(({ block, startOffset, endOffset }) => {
+      const fullText = block.textContent || "";
+      return fullText.slice(Math.max(0, startOffset - 180), endOffset + 180);
+    }).join("\n\n"),
+  };
 }
 
 export function wordBounds(text: string, offset: number) {

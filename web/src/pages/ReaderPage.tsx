@@ -10,6 +10,7 @@ import HighlightRounded from "@mui/icons-material/HighlightRounded";
 import KeyboardArrowDownRounded from "@mui/icons-material/KeyboardArrowDownRounded";
 import KeyboardArrowUpRounded from "@mui/icons-material/KeyboardArrowUpRounded";
 import LanguagesRounded from "@mui/icons-material/TranslateRounded";
+import NoteAddRounded from "@mui/icons-material/NoteAddRounded";
 import NoteAltRounded from "@mui/icons-material/NoteAltRounded";
 import PendingActionsRounded from "@mui/icons-material/PendingActionsRounded";
 import PaletteRounded from "@mui/icons-material/PaletteRounded";
@@ -35,7 +36,7 @@ import { MobileConfirmAction } from "../components/MobileConfirmAction";
 import { PageHeader } from "../components/PageHeader";
 import { PaperMetadataDialog } from "../components/PaperMetadataDialog";
 import { PaperTagSelector } from "../components/PaperTagSelector";
-import { caretAtPoint, offsetWithin, rangeFromOffsets, wordBounds } from "../components/readerSelection";
+import { caretAtPoint, offsetWithin, rangeFromOffsets, textSelectionFromRange, wordBounds } from "../components/readerSelection";
 import { compactReaderControlSx, floatingReaderControlSx, readerControlSx, readerSearchFieldSx, readerSelectSx } from "../components/readerToolbarStyles";
 import { ErrorState, Loading } from "../components/States";
 import { TextPaperReader, type TextReaderSelection } from "../components/TextPaperReader";
@@ -68,6 +69,19 @@ export function ReaderPage() {
   const rebuildDocument = useMutation({ mutationFn: () => api(`/api/papers/${paperId}/document/rebuild`, { method: "POST" }), onSuccess: () => queryClient.invalidateQueries({ queryKey: ["paper-document", paperId] }) });
   const pdfText = useQuery({ queryKey: ["pdf-text", paperId], queryFn: () => api<{ pages: Array<{ page_number: number; text: string }> }>(`/api/papers/${paperId}/text`), enabled: search.length > 1 });
   const createAnnotation = useMutation({ mutationFn: (payload: Record<string, unknown>) => api<Annotation>(`/api/papers/${paperId}/annotations`, jsonBody(payload)), onSuccess: () => { setSelection(null); window.getSelection()?.removeAllRanges(); queryClient.invalidateQueries({ queryKey: ["annotations", paperId] }); } });
+  const saveTranslatedNote = useMutation({
+    mutationFn: ({ current, saved, content }: { current: SelectionState; saved?: Annotation; content: string }) => {
+      if (saved) {
+        const nextContent = [saved.content?.trim(), content.trim()].filter(Boolean).join("\n\n");
+        return api<Annotation>(`/api/papers/${paperId}/annotations/${saved.id}`, {
+          method: "PATCH",
+          body: JSON.stringify({ kind: "note", page_number: saved.page_number, selected_text: saved.selected_text, content: nextContent, position_json: saved.position_json, color: saved.color || DEFAULT_HIGHLIGHT_COLOR }),
+        });
+      }
+      return api<Annotation>(`/api/papers/${paperId}/annotations`, jsonBody({ kind: "note", page_number: current.page, selected_text: current.text, content: content.trim(), position_json: current.position, color: DEFAULT_HIGHLIGHT_COLOR }));
+    },
+    onSuccess: () => { setSelection(null); window.getSelection()?.removeAllRanges(); queryClient.invalidateQueries({ queryKey: ["annotations", paperId] }); },
+  });
   const deleteAnnotation = useMutation({ mutationFn: (id: string) => api(`/api/papers/${paperId}/annotations/${id}`, { method: "DELETE" }), onSuccess: () => { setSelection(null); window.getSelection()?.removeAllRanges(); queryClient.invalidateQueries({ queryKey: ["annotations", paperId] }); } });
   const saveProgress = useMutation({ mutationFn: (payload: { page_number: number; zoom: number }) => api(`/api/papers/${paperId}/progress`, { method: "PUT", body: JSON.stringify({ ...payload, scroll_offset: 0 }) }) });
   useEffect(() => { api(`/api/papers/${paperId}/start-reading`, { method: "POST" }).catch(() => undefined); }, [paperId]);
@@ -158,7 +172,7 @@ export function ReaderPage() {
     />
     {mobile && <Stack direction="row" alignItems="center" sx={{ bgcolor: "background.paper", borderBottom: 1, borderColor: "divider" }}><Tabs value={mobileView} onChange={(_, value) => changeMobileView(value)} variant="fullWidth" sx={{ minHeight: 40, flex: 1, "& .MuiTab-root": { minHeight: 40, py: 0, px: .5, minWidth: 0, fontSize: ".82rem" } }}><Tab value="reader" label={<Stack component="span" direction="row" alignItems="center" spacing={.15}>阅读<KeyboardArrowDownRounded sx={{ fontSize: 17, transition: "transform .18s ease", transform: readerToolsOpen ? "rotate(180deg)" : "rotate(0deg)" }} /></Stack>} aria-expanded={readerToolsOpen} onClick={() => { if (mobileView === "reader") setReaderToolsOpen((open) => !open); }} /><Tab value="assistant" label="问答" /><Tab value="notes" label={`笔记 ${noteItems.length}`} /></Tabs></Stack>}
     <Box sx={{ display: "flex", flex: 1, minHeight: 0, overflow: "hidden", "& > :last-child": { minHeight: 0, overflow: "hidden", ...(mobile && mobileView === "reader" ? { display: "none" } : {}) } }}>
-      <Box sx={{ flex: 1, minWidth: 0, position: "relative", display: mobile && mobileView !== "reader" ? "none" : "flex", flexDirection: "column" }}>{readerMode === "text" ? <TextPaperReader document={textDocument.data} annotations={noteItems} mobile={mobile} toolsOpen={!mobile || readerToolsOpen} activeSelection={selection?.position.block_id ? { blockId: selection.position.block_id, startOffset: selection.position.start_offset || 0, endOffset: selection.position.end_offset || 0, segments: selection.position.segments?.map((segment) => ({ blockId: segment.block_id, startOffset: segment.start_offset, endOffset: segment.end_offset })) } : undefined} onRetry={() => rebuildDocument.mutate()} onModeToggle={() => selectReaderMode("pdf")} onSelection={captureTextSelection} /> : <>{(!mobile || readerToolsOpen) && <PdfToolbar mobile={mobile} currentPage={currentPage} pageCount={pageCount} zoom={zoom} search={search} matches={searchMatches.length} matchIndex={searchMatchIndex} onSearch={setSearch} onSearchMatch={jumpToSearchMatch} onJump={jumpTo} onZoom={setZoom} onModeToggle={() => selectReaderMode("text")} />}<Box className={mobile ? "pdf-scroll mobile-reader-selection" : "pdf-scroll desktop-reader-selection"} ref={scrollRef} onContextMenu={mobile ? (event) => event.preventDefault() : undefined} onPointerDown={beginMobilePdfSelection} onPointerMove={trackMobilePdfSelection} onPointerUp={cancelMobilePdfSelection} onPointerCancel={cancelMobilePdfSelection} onScroll={onScroll} onMouseUp={!mobile ? (event) => captureSelection({ x: event.clientX, y: event.clientY }) : undefined}><Document file={`/api/papers/${paperId}/pdf?v=${encodeURIComponent(item.pdf_version || "current")}`} onLoadSuccess={({ numPages }) => { setPageCount(numPages); setPdfError(""); }} onLoadError={(error) => setPdfError(error.message)} loading={<Loading label="正在加载 PDF" />} error={<ErrorState error={pdfError || "PDF 无法加载，请检查源文件。"} />}>{Array.from({ length: pageCount }, (_, index) => <LazyPdfPage key={index + 1} pageNumber={index + 1} pageWidth={width * zoom} scrollRoot={scrollRef} items={annotations.data?.filter((entry) => entry.page_number === index + 1) ?? []} activeSelection={mobile && selection?.page === index + 1 && selection.domRange?.kind === "pdf" ? selection.position.rects : undefined} search={search} />)}</Document></Box></>}{mobile && selection && <MobileSelectionHandles selection={selection} mode={readerMode} onChange={setSelection} />}{selection && <SelectionToolbar mobile={mobile} selection={selection} paperId={paperId} note={matchingNote} onClose={dismissSelection} onSaveNote={(content, color) => createAnnotation.mutate({ kind: "note", page_number: selection.page, selected_text: selection.text, content, position_json: selection.position, color })} onEditNote={() => { setEditingNote(matchingNote ?? null); dismissSelection(); }} onAddToChat={addSelectionToChat} />}</Box>
+      <Box sx={{ flex: 1, minWidth: 0, position: "relative", display: mobile && mobileView !== "reader" ? "none" : "flex", flexDirection: "column" }}>{readerMode === "text" ? <TextPaperReader document={textDocument.data} annotations={noteItems} mobile={mobile} toolsOpen={!mobile || readerToolsOpen} activeSelection={selection?.position.block_id ? { blockId: selection.position.block_id, startOffset: selection.position.start_offset || 0, endOffset: selection.position.end_offset || 0, segments: selection.position.segments?.map((segment) => ({ blockId: segment.block_id, startOffset: segment.start_offset, endOffset: segment.end_offset })) } : undefined} onRetry={() => rebuildDocument.mutate()} onModeToggle={() => selectReaderMode("pdf")} onSelection={captureTextSelection} /> : <>{(!mobile || readerToolsOpen) && <PdfToolbar mobile={mobile} currentPage={currentPage} pageCount={pageCount} zoom={zoom} search={search} matches={searchMatches.length} matchIndex={searchMatchIndex} onSearch={setSearch} onSearchMatch={jumpToSearchMatch} onJump={jumpTo} onZoom={setZoom} onModeToggle={() => selectReaderMode("text")} />}<Box className={mobile ? "pdf-scroll mobile-reader-selection" : "pdf-scroll desktop-reader-selection"} ref={scrollRef} onContextMenu={mobile ? (event) => event.preventDefault() : undefined} onPointerDown={beginMobilePdfSelection} onPointerMove={trackMobilePdfSelection} onPointerUp={cancelMobilePdfSelection} onPointerCancel={cancelMobilePdfSelection} onScroll={onScroll} onMouseUp={!mobile ? (event) => captureSelection({ x: event.clientX, y: event.clientY }) : undefined}><Document file={`/api/papers/${paperId}/pdf?v=${encodeURIComponent(item.pdf_version || "current")}`} onLoadSuccess={({ numPages }) => { setPageCount(numPages); setPdfError(""); }} onLoadError={(error) => setPdfError(error.message)} loading={<Loading label="正在加载 PDF" />} error={<ErrorState error={pdfError || "PDF 无法加载，请检查源文件。"} />}>{Array.from({ length: pageCount }, (_, index) => <LazyPdfPage key={index + 1} pageNumber={index + 1} pageWidth={width * zoom} scrollRoot={scrollRef} items={annotations.data?.filter((entry) => entry.page_number === index + 1) ?? []} activeSelection={mobile && selection?.page === index + 1 && selection.domRange?.kind === "pdf" ? selection.position.rects : undefined} search={search} />)}</Document></Box></>}{selection && (mobile || readerMode === "text") && <SelectionHandles selection={selection} mode={readerMode} onChange={setSelection} />}{selection && <SelectionToolbar mobile={mobile} selection={selection} paperId={paperId} note={matchingNote} onClose={dismissSelection} onSaveNote={(content, color) => createAnnotation.mutate({ kind: "note", page_number: selection.page, selected_text: selection.text, content, position_json: selection.position, color })} onSaveTranslationNote={(content) => saveTranslatedNote.mutateAsync({ current: selection, saved: matchingNote, content }).then(() => undefined)} onEditNote={() => { setEditingNote(matchingNote ?? null); dismissSelection(); }} onAddToChat={addSelectionToChat} />}</Box>
       {!mobile && <Box onPointerDown={startResize} sx={{ width: 7, cursor: "col-resize", bgcolor: "divider", "&:hover": { bgcolor: "primary.light" } }} />}
       <Box sx={{ width: mobile ? "100%" : sideWidth, minWidth: 0, display: mobile && mobileView === "pdf" ? "none" : "flex", flexDirection: "column", bgcolor: "background.paper" }}><Tabs value={mobile ? mobileView : sideTab} onChange={(_, value) => mobile ? setMobileView(value) : setSideTab(value)} sx={{ borderBottom: 1, borderColor: "divider", display: mobile ? "none" : "flex" }}><Tab value="assistant" label="论文问答" /><Tab value="notes" label={`笔记（${noteItems.length}）`} /></Tabs>{(mobile ? mobileView : sideTab) === "assistant" ? <PaperConversation paperId={paperId} onJump={jumpTo} selections={chatSelections} onRemoveSelection={(key) => setChatSelections((current) => current.filter((item) => selectionKey(item) !== key))} onClearSelections={() => setChatSelections([])} /> : <NotesPanel notes={noteItems} onJump={jumpTo} onEdit={setEditingNote} onDelete={(note) => deleteAnnotation.mutate(note.id)} />}</Box>
     </Box><NoteEditor note={editingNote} paperId={paperId} onClose={() => setEditingNote(null)} onDelete={() => editingNote && deleteAnnotation.mutate(editingNote.id, { onSuccess: () => setEditingNote(null) })} onSaved={() => { setEditingNote(null); queryClient.invalidateQueries({ queryKey: ["annotations", paperId] }); }} /><FeedbackModal open={feedbackOpen} paper={item} processing={finishing} activities={finishActivities} processError={finishError} onClose={() => setFeedbackOpen(false)} onJump={(page) => { setFeedbackOpen(false); jumpTo(page); }} onSaved={() => { setFeedbackOpen(false); queryClient.invalidateQueries({ queryKey: ["paper", paperId] }); }} /><PaperMetadataDialog paperId={paperId} open={metadataOpen} onClose={() => setMetadataOpen(false)} onJump={(page) => { setMetadataOpen(false); jumpTo(page); }} />
@@ -195,7 +209,7 @@ function LazyPdfPage({ pageNumber, pageWidth, scrollRoot, items, activeSelection
   return <div ref={pageRef} className="pdf-page" data-page-number={pageNumber} style={{ width: pageWidth, minHeight: rendered ? undefined : pageWidth * 1.414 }}>{visible && <><Page pageNumber={pageNumber} width={pageWidth} renderTextLayer renderAnnotationLayer customTextRenderer={textRenderer} onRenderSuccess={() => setRendered(true)} /><AnnotationOverlay items={items} activeSelection={activeSelection} /></>}</div>;
 }
 
-function MobileSelectionHandles({ selection, mode, onChange }: { selection: SelectionState; mode: "text" | "pdf"; onChange: (selection: SelectionState) => void }) {
+function SelectionHandles({ selection, mode, onChange }: { selection: SelectionState; mode: "text" | "pdf"; onChange: (selection: SelectionState) => void }) {
   const [, setLayoutVersion] = useState(0);
   useEffect(() => {
     let frame = 0;
@@ -210,7 +224,7 @@ function MobileSelectionHandles({ selection, mode, onChange }: { selection: Sele
   const first = rects[0]; const last = rects[rects.length - 1];
   const scrollViewport = mode === "pdf"
     ? document.querySelector<HTMLElement>(".pdf-scroll")
-    : document.querySelector<HTMLElement>(".mobile-reader-selection");
+    : document.querySelector<HTMLElement>(".mobile-reader-selection, .desktop-reader-selection");
   const viewportRect = scrollViewport?.getBoundingClientRect();
   const contentElement = mode === "pdf"
     ? document.querySelector<HTMLElement>(`.pdf-page[data-page-number="${selection.page}"]`)
@@ -251,9 +265,19 @@ function MobileSelectionHandles({ selection, mode, onChange }: { selection: Sele
 
 function selectionDomRange(selection: SelectionState, mode: "text" | "pdf") {
   if (mode === "text" && selection.position.block_id) {
-    const root = document.querySelector<HTMLElement>(`[data-text-block][data-block-id="${CSS.escape(selection.position.block_id)}"]`);
-    if (!root) return null;
-    return rangeFromOffsets(root, selection.position.start_offset || 0, selection.position.end_offset || 0);
+    const segments = selection.position.segments?.length
+      ? selection.position.segments
+      : [{ block_id: selection.position.block_id, start_offset: selection.position.start_offset || 0, end_offset: selection.position.end_offset || 0 }];
+    const first = segments[0]; const last = segments.at(-1)!;
+    const firstRoot = document.querySelector<HTMLElement>(`[data-text-block][data-block-id="${CSS.escape(first.block_id)}"]`);
+    const lastRoot = document.querySelector<HTMLElement>(`[data-text-block][data-block-id="${CSS.escape(last.block_id)}"]`);
+    const firstRange = firstRoot ? rangeFromOffsets(firstRoot, first.start_offset, first.end_offset) : null;
+    const lastRange = lastRoot ? rangeFromOffsets(lastRoot, last.start_offset, last.end_offset) : null;
+    if (!firstRange || !lastRange) return null;
+    const combined = document.createRange();
+    combined.setStart(firstRange.startContainer, firstRange.startOffset);
+    combined.setEnd(lastRange.endContainer, lastRange.endOffset);
+    return combined;
   }
   if (mode === "pdf" && selection.domRange?.kind === "pdf") {
     const root = document.querySelector<HTMLElement>(`.pdf-page[data-page-number="${selection.page}"] .react-pdf__Page__textContent`);
@@ -264,21 +288,28 @@ function selectionDomRange(selection: SelectionState, mode: "text" | "pdf") {
 }
 
 function updateTextSelectionBoundary(selection: SelectionState, edge: "start" | "end", point: { node: Node; offset: number }, onChange: (selection: SelectionState) => void) {
-  const blockId = selection.position.block_id;
-  if (!blockId) return;
-  const root = document.querySelector<HTMLElement>(`[data-text-block][data-block-id="${CSS.escape(blockId)}"]`);
-  if (!root || !root.contains(point.node)) return;
-  const pointOffset = offsetWithin(root, point.node, point.offset);
-  if (pointOffset == null) return;
-  const oldStart = selection.position.start_offset || 0; const oldEnd = selection.position.end_offset || oldStart + 1;
-  const start = edge === "start" ? Math.min(pointOffset, oldEnd - 1) : oldStart;
-  const end = edge === "end" ? Math.max(pointOffset, oldStart + 1) : oldEnd;
-  const range = rangeFromOffsets(root, start, end);
-  if (!range) return;
-  const text = range.toString(); const rect = range.getBoundingClientRect();
-  if (!text.trim() || !rect.width) return;
-  const fullText = root.textContent || "";
-  onChange({ ...selection, text, rect, anchor: { x: rect.right, y: rect.bottom }, position: { ...selection.position, start_offset: start, end_offset: end }, pageContext: fullText.slice(Math.max(0, start - 300), end + 300) });
+  const pointElement = point.node.nodeType === Node.ELEMENT_NODE ? point.node as Element : point.node.parentElement;
+  const pointBlock = pointElement?.closest<HTMLElement>("[data-text-block]");
+  const article = pointBlock?.closest<HTMLElement>("article");
+  const current = selectionDomRange(selection, "text");
+  if (!pointBlock || !article || !current || !pointBlock.contains(point.node)) return;
+  const range = document.createRange();
+  try {
+    if (edge === "start") {
+      range.setStart(point.node, point.offset);
+      range.setEnd(current.endContainer, current.endOffset);
+    } else {
+      range.setStart(current.startContainer, current.startOffset);
+      range.setEnd(point.node, point.offset);
+    }
+  } catch {
+    return;
+  }
+  if (range.collapsed) return;
+  const next = textSelectionFromRange(article, range);
+  if (!next) return;
+  const first = next.segments[0];
+  onChange({ ...selection, text: next.text, page: next.page, rect: next.rect, anchor: { x: next.rect.right, y: next.rect.bottom }, position: { block_id: first.blockId, start_offset: first.startOffset, end_offset: first.endOffset, segments: next.segments.map((segment) => ({ block_id: segment.blockId, start_offset: segment.startOffset, end_offset: segment.endOffset })) }, pageContext: next.pageContext });
 }
 
 function updatePdfSelectionBoundary(selection: SelectionState, edge: "start" | "end", point: { node: Node; offset: number }, onChange: (selection: SelectionState) => void) {
@@ -342,13 +373,14 @@ function highlightPdfText(value: string, search: string, items: Annotation[]) {
   return parts.join("");
 }
 
-function SelectionToolbar({ mobile, selection, paperId, note: savedNote, onClose, onSaveNote, onEditNote, onAddToChat }: { mobile: boolean; selection: SelectionState; paperId: string; note?: Annotation; onClose: () => void; onSaveNote: (value: string, color: string) => void; onEditNote: () => void; onAddToChat: () => void }) {
-  const [mode, setMode] = useState<"actions" | "note" | "translation">("actions"); const [note, setNote] = useState(""); const [color, setColor] = useState(DEFAULT_HIGHLIGHT_COLOR); const [translation, setTranslation] = useState(""); const [translating, setTranslating] = useState(false); const [connected, setConnected] = useState(false); const [cached, setCached] = useState(false); const [error, setError] = useState("");
+function SelectionToolbar({ mobile, selection, paperId, note: savedNote, onClose, onSaveNote, onSaveTranslationNote, onEditNote, onAddToChat }: { mobile: boolean; selection: SelectionState; paperId: string; note?: Annotation; onClose: () => void; onSaveNote: (value: string, color: string) => void; onSaveTranslationNote: (value: string) => Promise<void>; onEditNote: () => void; onAddToChat: () => void }) {
+  const [mode, setMode] = useState<"actions" | "note" | "translation">("actions"); const [note, setNote] = useState(""); const [color, setColor] = useState(DEFAULT_HIGHLIGHT_COLOR); const [translation, setTranslation] = useState(""); const [translating, setTranslating] = useState(false); const [savingTranslationNote, setSavingTranslationNote] = useState(false); const [connected, setConnected] = useState(false); const [cached, setCached] = useState(false); const [error, setError] = useState("");
   async function translate() { setMode("translation"); setTranslation(""); setConnected(false); setError(""); setTranslating(true); try { await streamApi(`/api/papers/${paperId}/translate/stream`, { text: selection.text, page_number: selection.page, target_language: "简体中文", position_json: selection.position, page_context: selection.pageContext }, (event) => { if (event.type === "meta") { setCached(Boolean(event.cached)); setConnected(true); } if (event.type === "delta") setTranslation((value) => value + String(event.delta ?? "")); }); } catch (cause) { setError(cause instanceof Error ? cause.message : String(cause)); } finally { setTranslating(false); } }
+  async function saveTranslationAsNote() { if (!translation.trim() || savingTranslationNote) return; setSavingTranslationNote(true); setError(""); try { await onSaveTranslationNote(translation); } catch (cause) { setError(cause instanceof Error ? cause.message : String(cause)); setSavingTranslationNote(false); } }
   if (mode === "actions") {
     return <Stack data-selection-toolbar direction="row" spacing={0.75} sx={{ position: "fixed", zIndex: 34, ...(mobile ? { left: "50%", bottom: "calc(12px + env(safe-area-inset-bottom))", transform: "translateX(-50%)" } : { left: Math.max(8, Math.min(selection.anchor.x + 10, window.innerWidth - 142)), top: Math.max(70, Math.min(selection.anchor.y + 10, window.innerHeight - 54)) }) }}><Tooltip title="翻译"><IconButton aria-label="翻译选中文字" onClick={translate} sx={floatingReaderControlSx}><LanguagesRounded /></IconButton></Tooltip><Tooltip title={savedNote ? "编辑高亮" : "高亮"}><IconButton aria-label={savedNote ? "编辑高亮" : "高亮选中文字"} onClick={savedNote ? onEditNote : () => setMode("note")} sx={floatingReaderControlSx}><HighlightRounded /></IconButton></Tooltip><Tooltip title="添加到聊天"><IconButton aria-label="添加选中文字到聊天" onClick={onAddToChat} sx={floatingReaderControlSx}><PsychologyRounded /></IconButton></Tooltip>{mobile && <Tooltip title="取消选择"><IconButton aria-label="取消选择" onClick={onClose} sx={floatingReaderControlSx}><CloseRounded /></IconButton></Tooltip>}</Stack>;
   }
-  return <MuiPaper data-selection-toolbar elevation={8} sx={{ position: "fixed", zIndex: 40, ...(mobile ? { left: 8, right: 8, bottom: "calc(8px + env(safe-area-inset-bottom))", width: "auto", maxHeight: "calc(100dvh - 24px)" } : { left: Math.max(8, Math.min(selection.rect.left, window.innerWidth - 390)), top: Math.max(70, Math.min(selection.rect.bottom + 8, window.innerHeight - 310)), width: 380, maxWidth: "calc(100vw - 16px)" }), overflow: "auto" }}>{mode === "translation" ? <Box sx={{ p: 2 }}><Stack direction="row" alignItems="center" spacing={1}><LanguagesRounded color="primary" /><Typography fontWeight={700}>翻译</Typography>{cached && <Chip size="small" label="已缓存" color="success" />}<IconButton size="small" onClick={onClose} sx={{ ml: "auto!important" }}><CloseRounded /></IconButton></Stack><Box sx={{ mt: 1.5, minHeight: 38 }}>{translation ? <MarkdownMessage content={translation} /> : translating ? <Stack direction="row" spacing={1}><CircularProgress size={17} /><Typography variant="body2">{connected ? "翻译模型正在生成…" : "正在连接翻译服务…"}</Typography></Stack> : null}</Box>{error && <Alert severity="error">{error}</Alert>}</Box> : <Box sx={{ p: 2 }}><Typography variant="subtitle2">高亮颜色</Typography><Stack direction="row" spacing={1} sx={{ my: 1.25 }}>{HIGHLIGHT_COLORS.map((value) => <Tooltip title={value} key={value}><IconButton aria-label={`高亮颜色 ${value}`} onClick={() => setColor(value)} sx={{ width: 32, height: 32, bgcolor: value, border: color === value ? 2 : 1, borderColor: color === value ? "primary.main" : "divider", "&:hover": { bgcolor: value } }}>{color === value && <CheckRounded fontSize="small" />}</IconButton></Tooltip>)}</Stack><TextField autoFocus fullWidth multiline minRows={3} value={note} onChange={(event) => setNote(event.target.value)} placeholder="添加笔记，也可以留空" /><Stack direction="row" justifyContent="flex-end" spacing={1} sx={{ mt: 1.5 }}><Button onClick={() => setMode("actions")}>返回</Button><Button variant="contained" onClick={() => onSaveNote(note, color)}>保存高亮</Button></Stack></Box>}</MuiPaper>;
+  return <MuiPaper data-selection-toolbar elevation={8} sx={{ position: "fixed", zIndex: 40, ...(mobile ? { left: 8, right: 8, bottom: "calc(8px + env(safe-area-inset-bottom))", width: "auto", maxHeight: "calc(100dvh - 24px)" } : { left: Math.max(8, Math.min(selection.rect.left, window.innerWidth - 390)), top: Math.max(70, Math.min(selection.rect.bottom + 8, window.innerHeight - 340)), width: 380, maxWidth: "calc(100vw - 16px)" }), overflow: "auto" }}>{mode === "translation" ? <Box sx={{ p: 2 }}><Stack direction="row" alignItems="center" spacing={1}><LanguagesRounded color="primary" /><Typography fontWeight={700}>翻译</Typography>{cached && <Chip size="small" label="已缓存" color="success" />}<IconButton size="small" onClick={onClose} sx={{ ml: "auto!important" }}><CloseRounded /></IconButton></Stack><Box sx={{ mt: 1.5, minHeight: 38 }}>{translation ? <MarkdownMessage content={translation} /> : translating ? <Stack direction="row" spacing={1}><CircularProgress size={17} /><Typography variant="body2">{connected ? "翻译模型正在生成…" : "正在连接翻译服务…"}</Typography></Stack> : null}</Box>{error && <Alert severity="error" sx={{ mt: 1 }}>{error}</Alert>}{translation && !translating && <Stack direction="row" justifyContent="flex-end" sx={{ mt: 1.5 }}><Button variant="outlined" startIcon={savingTranslationNote ? <CircularProgress size={15} /> : <NoteAddRounded />} disabled={savingTranslationNote} onClick={saveTranslationAsNote}>{savedNote ? "添加译文到笔记" : "保存为笔记"}</Button></Stack>}</Box> : <Box sx={{ p: 2 }}><Typography variant="subtitle2">高亮颜色</Typography><Stack direction="row" spacing={1} sx={{ my: 1.25 }}>{HIGHLIGHT_COLORS.map((value) => <Tooltip title={value} key={value}><IconButton aria-label={`高亮颜色 ${value}`} onClick={() => setColor(value)} sx={{ width: 32, height: 32, bgcolor: value, border: color === value ? 2 : 1, borderColor: color === value ? "primary.main" : "divider", "&:hover": { bgcolor: value } }}>{color === value && <CheckRounded fontSize="small" />}</IconButton></Tooltip>)}</Stack><TextField autoFocus fullWidth multiline minRows={3} value={note} onChange={(event) => setNote(event.target.value)} placeholder="添加笔记，也可以留空" /><Stack direction="row" justifyContent="flex-end" spacing={1} sx={{ mt: 1.5 }}><Button onClick={() => setMode("actions")}>返回</Button><Button variant="contained" onClick={() => onSaveNote(note, color)}>保存高亮</Button></Stack></Box>}</MuiPaper>;
 }
 
 function PaperConversation({ paperId, onJump, selections, onRemoveSelection, onClearSelections }: { paperId: string; onJump: (page: number) => void; selections: SelectionState[]; onRemoveSelection: (key: string) => void; onClearSelections: () => void }) {
