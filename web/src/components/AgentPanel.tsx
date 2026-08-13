@@ -1,19 +1,14 @@
 import CloseRounded from "@mui/icons-material/CloseRounded";
 import PsychologyRounded from "@mui/icons-material/PsychologyRounded";
-import SendRounded from "@mui/icons-material/SendRounded";
-import StopRounded from "@mui/icons-material/StopRounded";
 import {
   Alert,
   Avatar,
   Box,
-  CircularProgress,
   Drawer,
   IconButton,
   Paper,
   Stack,
-  TextField,
   Typography,
-  Tooltip,
   useMediaQuery,
   useTheme,
 } from "@mui/material";
@@ -23,7 +18,7 @@ import { useLocation } from "react-router-dom";
 import { api, cancelTask, jsonBody, streamApi } from "../api";
 import type { AgentRuntimeState, Conversation } from "../types";
 import { AgentActivity } from "./AgentActivity";
-import { AgentRuntimeStatus } from "./AgentRuntimeStatus";
+import { AgentComposer } from "./AgentComposer";
 import { activitiesFromContext, type AgentActivityItem, failRunningActivities, updateActivities } from "./agentActivityState";
 import { updateAgentStateFromStream } from "./agentRuntimeState";
 import { submitChatOnEnter } from "./chatInput";
@@ -142,8 +137,7 @@ export function AgentPanel({ open, onClose, width, onWidthChange }: Props) {
         {error && <Alert severity="error">{error}</Alert>}
       </ConversationScroller>
       <Box component="form" onSubmit={submit} sx={{ p: 2, borderTop: 1, borderColor: "divider" }}>
-        <TextField fullWidth multiline maxRows={6} minRows={2} value={text} onChange={(event) => setText(event.target.value)} onKeyDown={active ? undefined : submitChatOnEnter} placeholder={active ? "可以先输入修正后的消息，停止后重新发送" : "输入研究问题或整理指令"} InputProps={{ endAdornment: active ? <Tooltip title="停止 Agent"><span><IconButton color="error" aria-label="停止 Agent" onClick={stopAgent} disabled={!activeTaskId || cancelling} sx={{ width: 44, height: 44 }}>{cancelling ? <CircularProgress size={20} /> : <StopRounded />}</IconButton></span></Tooltip> : <IconButton color="primary" type="submit" disabled={!text.trim()}><SendRounded /></IconButton> }} />
-        <AgentRuntimeStatus conversation={conversation.data} liveState={liveAgentState} />
+        <AgentComposer value={text} onChange={setText} onKeyDown={active ? undefined : submitChatOnEnter} placeholder={active ? "可以先输入修正后的消息，停止后重新发送" : "输入研究问题或整理指令"} active={active} cancelling={cancelling} stopDisabled={!activeTaskId || cancelling} onStop={stopAgent} conversation={conversation.data} liveState={liveAgentState} />
       </Box>
     </Stack>
   </Drawer>;

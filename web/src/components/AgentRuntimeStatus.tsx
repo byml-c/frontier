@@ -27,7 +27,7 @@ export function AgentRuntimeStatus({ conversation, liveState }: { conversation?:
   const usage = contextUsageDetails(state.usage);
 
   return (
-    <Stack direction="row" alignItems="center" spacing={0.75} sx={{ minWidth: 0, minHeight: 22, mt: 0.5, px: 0.25 }}>
+    <Stack direction="row" alignItems="center" spacing={0.75} sx={{ minWidth: 0, height: 30 }}>
       {usage && <ContextUsageRing {...usage} />}
       <Tooltip title={`模型：${model} · 思考程度：${effort}`}>
         <Typography
