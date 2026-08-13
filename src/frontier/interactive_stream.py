@@ -68,13 +68,20 @@ def unregister_codex_run(run_id: str, process: subprocess.Popen[str]) -> None:
         _CANCELLED_RUNS.pop(run_id, None)
 
 
-def is_missing_codex_thread_error(error: BaseException | str) -> bool:
-    """Return whether Codex can no longer resume a persisted thread locally."""
+def is_unusable_codex_thread_error(error: BaseException | str) -> bool:
+    """Return whether a persisted thread must be rebuilt under current config.
+
+    A rollout may disappear locally, or it may still exist while referring to a
+    provider that the user has since removed.  Both make only that persisted
+    thread unusable; a fresh thread can still run with the current Codex
+    provider and recover its visible history from Frontier's database.
+    """
     detail = str(error).lower()
     return (
         "no rollout found for thread id" in detail
         or "rollout not found" in detail
         or "thread not found" in detail
+        or ("model provider" in detail and "not found" in detail)
     )
 
 
@@ -447,7 +454,7 @@ def _stream_turn(
         try:
             result = _await_response(process, thread_request_id)
         except CodexStreamError as exc:
-            if not is_missing_codex_thread_error(exc):
+            if not is_unusable_codex_thread_error(exc):
                 raise
             recovered = True
             thread_request_id += 1

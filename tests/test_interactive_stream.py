@@ -317,6 +317,65 @@ def test_stream_turn_recovers_missing_rollout_with_new_thread(monkeypatch) -> No
     )
 
 
+def test_stream_turn_rebuilds_thread_after_provider_switch(monkeypatch) -> None:
+    writes: list[dict] = []
+    responses = iter(
+        [
+            CodexStreamError(
+                "failed to load configuration: Model provider `deepseek` not found"
+            ),
+            {
+                "thread": {"id": "thread-openai"},
+                "model": "gpt-5.6-sol",
+                "modelProvider": "openai",
+                "reasoningEffort": "medium",
+            },
+            {},
+        ]
+    )
+    messages = iter(
+        [{"method": "turn/completed", "params": {"turn": {"status": "completed"}}}]
+    )
+
+    def await_response(*_args):
+        response = next(responses)
+        if isinstance(response, Exception):
+            raise response
+        return response
+
+    monkeypatch.setattr(
+        interactive_stream,
+        "_write_message",
+        lambda _process, message: writes.append(message),
+    )
+    monkeypatch.setattr(interactive_stream, "_await_response", await_response)
+    monkeypatch.setattr(interactive_stream, "_read_message", lambda *_args: next(messages))
+
+    events = list(
+        interactive_stream._stream_turn(  # type: ignore[arg-type]
+            object(),
+            "current prompt",
+            "thread-deepseek",
+            recovery_prompt="persisted history and current prompt",
+        )
+    )
+
+    assert [message["method"] for message in writes[:3]] == [
+        "thread/resume",
+        "thread/start",
+        "turn/start",
+    ]
+    assert writes[2]["params"]["input"][0]["text"] == (
+        "persisted history and current prompt"
+    )
+    assert next(event for event in events if event["type"] == "runtime") == {
+        "type": "runtime",
+        "model": "gpt-5.6-sol",
+        "model_provider": "openai",
+        "reasoning_effort": "medium",
+    }
+
+
 def test_stream_turn_does_not_hide_other_resume_errors(monkeypatch) -> None:
     monkeypatch.setattr(interactive_stream, "_write_message", lambda *_args: None)
     monkeypatch.setattr(
