@@ -15,12 +15,12 @@ import {
   useTheme,
 } from "@mui/material";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { FormEvent, useEffect, useRef, useState } from "react";
+import { FormEvent, useCallback, useEffect, useRef, useState } from "react";
 import { useLocation } from "react-router-dom";
 import { api, cancelTask, jsonBody, streamApi } from "../api";
 import type { AgentRuntimeState, Conversation } from "../types";
 import { AgentActivity } from "./AgentActivity";
-import { AgentComposer } from "./AgentComposer";
+import { AgentComposer, type AgentComposerHandle } from "./AgentComposer";
 import { activitiesFromContext, type AgentActivityItem, failRunningActivities, updateActivities } from "./agentActivityState";
 import { updateAgentStateFromStream } from "./agentRuntimeState";
 import { submitChatOnEnter } from "./chatInput";
@@ -35,7 +35,6 @@ export function AgentPanel({ open, onClose, width, onWidthChange }: Props) {
   const queryClient = useQueryClient();
   const theme = useTheme();
   const mobile = useMediaQuery(theme.breakpoints.down("md"));
-  const [text, setText] = useState("");
   const [liveUser, setLiveUser] = useState("");
   const [streaming, setStreaming] = useState("");
   const [sending, setSending] = useState(false);
@@ -46,6 +45,7 @@ export function AgentPanel({ open, onClose, width, onWidthChange }: Props) {
   const [cancelling, setCancelling] = useState(false);
   const streamController = useRef<AbortController | null>(null);
   const cancellingRef = useRef(false);
+  const composerRef = useRef<AgentComposerHandle>(null);
   const conversation = useQuery({
     queryKey: ["global-conversation"],
     queryFn: async () => {
@@ -63,7 +63,7 @@ export function AgentPanel({ open, onClose, width, onWidthChange }: Props) {
   useEffect(() => {
     const addContext = (event: Event) => {
       const detail = (event as CustomEvent<{ context?: string }>).detail;
-      if (detail?.context) setText(`请和我一起讨论这个研究节点：\n${detail.context}`);
+      if (detail?.context) composerRef.current?.setValue(`请和我一起讨论这个研究节点：\n${detail.context}`);
     };
     window.addEventListener("frontier:open-agent", addContext);
     return () => window.removeEventListener("frontier:open-agent", addContext);
@@ -71,12 +71,12 @@ export function AgentPanel({ open, onClose, width, onWidthChange }: Props) {
 
   async function submit(event: FormEvent) {
     event.preventDefault();
-    const content = text.trim();
+    const content = composerRef.current?.getValue().trim() ?? "";
     if (!content || !conversation.data || active) return;
     const controller = new AbortController();
     streamController.current = controller;
     cancellingRef.current = false;
-    setText(""); setLiveUser(content); setStreaming(""); setActivities([]); setError(""); setLiveTaskId(null); setLiveAgentState({}); setSending(true);
+    composerRef.current?.clear(); setLiveUser(content); setStreaming(""); setActivities([]); setError(""); setLiveTaskId(null); setLiveAgentState({}); setSending(true);
     try {
       await streamApi(`/api/conversations/${conversation.data.id}/messages/stream`, { content, context_json: { path: location.pathname } }, (streamEvent) => {
         setLiveAgentState((value) => updateAgentStateFromStream(value, streamEvent));
@@ -97,7 +97,7 @@ export function AgentPanel({ open, onClose, width, onWidthChange }: Props) {
     }
   }
 
-  async function stopAgent() {
+  const stopAgent = useCallback(async () => {
     if (!activeTaskId || cancelling) return;
     cancellingRef.current = true;
     setCancelling(true);
@@ -112,7 +112,7 @@ export function AgentPanel({ open, onClose, width, onWidthChange }: Props) {
     } finally {
       setCancelling(false);
     }
-  }
+  }, [activeTaskId, cancelling, queryClient]);
 
   async function retryAssistant(assistantId: string) {
     if (!conversation.data || active) return;
@@ -165,7 +165,7 @@ export function AgentPanel({ open, onClose, width, onWidthChange }: Props) {
         {error && <Alert severity="error">{error}</Alert>}
       </ConversationScroller>
       <Box component="form" onSubmit={submit} sx={{ p: 2, borderTop: 1, borderColor: "divider" }}>
-        <AgentComposer value={text} onChange={setText} onKeyDown={active ? undefined : submitChatOnEnter} placeholder={active ? "可以先输入修正后的消息，停止后重新发送" : "输入研究问题或整理指令"} active={active} cancelling={cancelling} stopDisabled={!activeTaskId || cancelling} onStop={stopAgent} conversation={conversation.data} liveState={liveAgentState} />
+        <AgentComposer ref={composerRef} onKeyDown={active ? undefined : submitChatOnEnter} placeholder={active ? "可以先输入修正后的消息，停止后重新发送" : "输入研究问题或整理指令"} active={active} cancelling={cancelling} stopDisabled={!activeTaskId || cancelling} onStop={stopAgent} conversation={conversation.data} liveState={liveAgentState} />
       </Box>
     </Stack>
   </Drawer>;

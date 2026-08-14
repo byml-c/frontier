@@ -463,9 +463,19 @@ def arxiv_search(
     paper_ids = []
     for payload in results:
         paper, was_created = create_or_update_paper(session, payload, actor="agent")
+        metadata = dict(paper.metadata_json or {})
+        discovery_queries = [
+            str(value)
+            for value in metadata.get("discovery_queries", [])
+            if isinstance(value, str) and value.strip()
+        ]
+        if query.casefold() not in {value.casefold() for value in discovery_queries}:
+            discovery_queries.append(query)
+            paper.metadata_json = {**metadata, "discovery_queries": discovery_queries[-20:]}
         paper_ids.append(paper.id)
         created += int(was_created)
         merged += int(not was_created)
+    session.commit()
     return {"paper_ids": paper_ids, "count": len(results), "created": created, "merged": merged}
 
 

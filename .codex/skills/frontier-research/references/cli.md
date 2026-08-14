@@ -6,6 +6,7 @@ Set `FRONTIER_API_BASE_URL` when the Server is not at `http://127.0.0.1:8000`. E
 
 ```bash
 uv run frontier paper list --status candidate --limit 50
+uv run frontier paper list --query 'PI05' --limit 20
 uv run frontier paper get PAPER_ID
 uv run frontier paper create --data '{"title":"...","source":"manual"}'
 uv run frontier paper add-arxiv 2410.24164
@@ -22,6 +23,10 @@ uv run frontier paper resources PAPER_ID --kind figure --block-id BLOCK_ID
 uv run frontier paper context PAPER_ID
 uv run frontier paper finish PAPER_ID --data '{"summary":"...","suggested_interested":true,"suggested_quality":true,"suggested_create_node":false,"suggested_tags":["VLA"]}'
 ```
+
+`paper list --query` searches the saved library by title, abstract, all authors, primary
+affiliation, arXiv ID, DOI, and the discovery query that originally ingested the paper. Use it
+before an external search so an existing paper and its cached full text can be reused.
 
 Use `paper context` for reading completion and paper chat. It returns metadata, annotations, progress, conversations, and page-separated PDF text. If a claim depends on a figure, table, equation layout, or visual result, use `paper render-page`; the returned absolute PNG path can be opened with the Agent's image-viewing tool.
 

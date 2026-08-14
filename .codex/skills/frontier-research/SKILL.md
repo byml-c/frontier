@@ -33,12 +33,13 @@ Do not invent author roles, affiliations, experimental results, or limitations. 
 
 ## Identify a specified paper
 
-When a user or task names a paper that is not already available, especially for comparison:
+When a user or task names a paper, author, arXiv ID, method, or keyword, especially for comparison:
 
-1. Search without changing the library first: `uv run frontier source arxiv-search '<focused title/author query>' --max-results 10 --no-ingest`.
-2. Compare title, authors, year, and arXiv ID. If these do not identify exactly one paper reliably, show the plausible result or results and ask the user which paper they mean before ingesting anything.
-3. When the match is unique, ingest it only if the requested work needs saved metadata or full text, then use `paper download` and read the evidence needed for the comparison.
-4. A unique arXiv ID is already sufficient identification. Do not force a confirmation for a clear exact match or for broad topic discovery; broad discovery may follow the normal candidate workflow.
+1. Search the local paper library first: `uv run frontier paper list --query '<title, author, identifier, or keyword>' --limit 20`. Reuse a reliable match and its cached text or structured resources.
+2. If it is not already available, search without changing the library: `uv run frontier source arxiv-search '<focused title/author query>' --max-results 10 --no-ingest`.
+3. Compare title, authors, year, and arXiv ID. If these do not identify exactly one paper reliably, show the plausible result or results and ask the user which paper they mean before ingesting anything.
+4. When the match is unique, ingest it only if the requested work needs saved metadata or full text, then use `paper download` and read the evidence needed for the comparison.
+5. A unique arXiv ID is already sufficient identification. Do not force a confirmation for a clear exact match or for broad topic discovery; broad discovery may follow the normal candidate workflow.
 
 Never silently choose between ambiguous papers or claim to have compared full texts after reading only search metadata.
 

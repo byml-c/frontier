@@ -5,11 +5,12 @@ from itertools import pairwise
 from zoneinfo import ZoneInfo
 
 import pymupdf
+import pytest
 from fastapi.testclient import TestClient
 
 from frontier.agent_runner import _parse_citations
 from frontier.api.papers import _translation_key
-from frontier.schemas import TranslationRequest
+from frontier.schemas import PaperCreate, TranslationRequest
 from frontier.services.document_reader import (
     DOCUMENT_SCHEMA_VERSION,
     DocumentReaderUnavailable,
@@ -35,6 +36,67 @@ def create_paper(client: TestClient, title: str = "Tactile VLA for Fine Manipula
     )
     assert response.status_code == 200, response.text
     return response.json()["paper"]
+
+
+def test_paper_search_covers_saved_metadata_and_abstract(client: TestClient) -> None:
+    response = client.post(
+        "/api/papers",
+        json={
+            "title": "π0.5: Locomotion with Predictive Representations",
+            "abstract": "The controller transfers across unseen terrains.",
+            "authors": [{"name": "Primary Author"}, {"name": "Hidden Collaborator"}],
+            "first_author": "Primary Author",
+            "corresponding_author": "Senior Researcher",
+            "primary_affiliation": "Frontier Robotics Institute",
+            "source": "arxiv",
+            "arxiv_id": "2608.01234",
+            "doi": "10.1000/pi05",
+            "published_at": "2026-08-01",
+        },
+    )
+    assert response.status_code == 200, response.text
+    paper_id = response.json()["paper"]["id"]
+
+    for query in (
+        "PI05",
+        "Hidden Collaborator",
+        "Senior Researcher",
+        "Frontier Robotics",
+        "arXiv:2608.01234",
+        "10.1000/pi05",
+    ):
+        result = client.get("/api/papers", params={"q": query}).json()
+        assert paper_id in {item["id"] for item in result["items"]}, query
+
+
+def test_arxiv_discovery_query_is_searchable_only_after_ingest(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    query = "opaque-pi05-discovery-alias"
+    payload = PaperCreate(
+        title="A Paper Whose Metadata Does Not Contain the Query",
+        abstract="A generic abstract.",
+        authors=[{"name": "Example Author"}],
+        source="arxiv",
+        arxiv_id="2608.09991",
+    )
+    monkeypatch.setattr("frontier.api.system.search_arxiv", lambda *_args, **_kwargs: [payload])
+
+    preview = client.post(
+        "/api/sources/arxiv/search",
+        params={"query": query, "max_results": 10, "ingest": "false"},
+    )
+    assert preview.status_code == 200
+    assert client.get("/api/papers", params={"q": query}).json()["total"] == 0
+
+    ingested = client.post(
+        "/api/sources/arxiv/search",
+        params={"query": query, "max_results": 10, "ingest": "true"},
+    )
+    assert ingested.status_code == 200
+    paper_id = ingested.json()["paper_ids"][0]
+    result = client.get("/api/papers", params={"q": query}).json()
+    assert paper_id in {item["id"] for item in result["items"]}
 
 
 def test_parse_citations_supports_page_ranges() -> None:

@@ -67,6 +67,8 @@ def test_research_prompts_expose_safe_computation_and_paper_lookup(
 ) -> None:
     prompt = build_prompt(TaskRun(id="task-42", kind=kind, payload_json=payload))
 
+    assert "frontier paper list --query" in prompt
+    assert "Reuse a reliable local match" in prompt
     assert "--no-ingest" in prompt
     assert ambiguity_action in prompt
     assert "Do not impose this confirmation step on broad topic discovery" in prompt

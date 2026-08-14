@@ -18,7 +18,7 @@ from fastapi import (
     UploadFile,
 )
 from fastapi.responses import FileResponse, StreamingResponse
-from sqlalchemy import and_, case, func, or_, select
+from sqlalchemy import Text, and_, case, cast, func, or_, select
 from sqlalchemy.orm import Session
 
 from ..agent_runner import build_prompt, enqueue_task, run_task
@@ -49,7 +49,7 @@ from ..schemas import (
     TagCreate,
     TranslationRequest,
 )
-from ..services.common import log_operation, model_dict, normalize_title
+from ..services.common import compact_search_key, log_operation, model_dict, normalize_title
 from ..services.document_reader import (
     document_asset,
     document_status,
@@ -191,9 +191,29 @@ def list_papers(
     )
     count_statement = select(func.count(func.distinct(Paper.id)))
     filters = []
-    if q:
-        token = f"%{q.strip()}%"
-        filters.append(or_(Paper.title.ilike(token), Paper.first_author.ilike(token)))
+    if q and (query := q.strip()):
+        token = f"%{query}%"
+        identifier = query.removeprefix("arXiv:").removeprefix("arxiv:").strip()
+        identifier_token = f"%{identifier}%"
+        compact_key = compact_search_key(query)
+        compact_title = func.replace(
+            func.replace(func.lower(Paper.normalized_title), " ", ""), "π", "pi"
+        )
+        search_clauses = [
+            Paper.title.ilike(token),
+            Paper.abstract.ilike(token),
+            Paper.first_author.ilike(token),
+            Paper.corresponding_author.ilike(token),
+            Paper.primary_affiliation.ilike(token),
+            cast(Paper.authors, Text).ilike(token),
+            cast(Paper.metadata_json, Text).ilike(token),
+            Paper.doi.ilike(token),
+        ]
+        if identifier:
+            search_clauses.append(Paper.arxiv_id.ilike(identifier_token))
+        if compact_key:
+            search_clauses.append(compact_title.like(f"%{compact_key}%"))
+        filters.append(or_(*search_clauses))
     if status:
         filters.append(Paper.status == status)
     if quality is not None:

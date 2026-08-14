@@ -134,8 +134,12 @@ def build_prompt(task: TaskRun) -> str:
         else "do not import it; report that user confirmation is required"
     )
     research_capabilities = (
-        "When the task or user names a specific paper that is not already available, especially "
-        "for a comparison, first search arXiv without importing it using `uv run frontier source "
+        "When the task or user names a paper, author, arXiv ID, method, or keyword, first search "
+        "the local paper library using `uv run frontier paper list --query '<title, author, "
+        "identifier, or keyword>' --limit 20`. Reuse a reliable local match and its cached full "
+        "text or structured resources instead of searching or importing it again. When a specific "
+        "paper is not already available, especially for a comparison, search arXiv without "
+        "importing it using `uv run frontier source "
         "arxiv-search '<focused title/author query>' --max-results 10 --no-ingest`. If title, "
         "author, and year do not identify one result reliably, "
         f"{ambiguous_paper_action}. If there is one reliable match, import and download it "

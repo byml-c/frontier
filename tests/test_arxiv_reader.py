@@ -34,7 +34,7 @@ CAPTION_ONLY_FIGURE_HTML = """
     </span></p>
   </div>
   <figure id="S0.F1" class="ltx_figure">
-    <figcaption>Figure 1: The teaser caption lives in the following figure.</figcaption>
+    <figcaption>Figure 1: open the drawer <math display="inline"><semantics><mo>→</mo><annotation encoding="application/x-tex">\\rightarrow</annotation></semantics></math> close it.</figcaption>
   </figure>
 </article></body></html>
 """
@@ -107,12 +107,13 @@ def test_arxiv_html_attaches_a_preceding_textless_image_to_its_caption(
         paper_id="paper-with-teaser",
         version="v1",
         root=tmp_path / "reader",
-        schema_version=6,
+        schema_version=7,
         fetch_asset=fetch_asset,
     )
 
     pictures = [block for block in payload["blocks"] if block["kind"] == "picture"]
     assert len(pictures) == 1
     assert pictures[0]["caption"].startswith("Figure 1:")
+    assert 'data-reader-tex="\\rightarrow"' in pictures[0]["caption_html"]
     assert pictures[0]["image_url"].endswith(".png")
     assert fetched == ["https://arxiv.org/html/2608.11739v1/teaser.png"]

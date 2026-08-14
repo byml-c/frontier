@@ -39,6 +39,11 @@ def normalize_title(title: str) -> str:
     return " ".join(value.split())
 
 
+def compact_search_key(value: str) -> str:
+    """Normalize notation variants used in short paper or method names."""
+    return normalize_title(value).replace(" ", "").replace("π", "pi")
+
+
 def parse_arxiv_id(value: str) -> tuple[str, int | None] | None:
     match = re.search(r"(?:arxiv\.org/(?:abs|pdf)/)?(\d{4}\.\d{4,5})(?:v(\d+))?", value)
     if not match:

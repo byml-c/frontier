@@ -1,13 +1,11 @@
 import SendRounded from "@mui/icons-material/SendRounded";
 import StopRounded from "@mui/icons-material/StopRounded";
 import { Box, CircularProgress, IconButton, InputBase, Tooltip } from "@mui/material";
-import type { KeyboardEventHandler } from "react";
+import { forwardRef, memo, useCallback, useImperativeHandle, useRef, useState, type KeyboardEventHandler } from "react";
 import type { AgentRuntimeState, Conversation } from "../types";
 import { AgentRuntimeStatus } from "./AgentRuntimeStatus";
 
 type Props = {
-  value: string;
-  onChange: (value: string) => void;
   onKeyDown?: KeyboardEventHandler<HTMLTextAreaElement | HTMLInputElement>;
   placeholder: string;
   active: boolean;
@@ -18,8 +16,30 @@ type Props = {
   liveState?: AgentRuntimeState;
 };
 
-/** Shared two-level composer: transparent editor above, runtime and action below. */
-export function AgentComposer({ value, onChange, onKeyDown, placeholder, active, cancelling, stopDisabled, onStop, conversation, liveState }: Props) {
+export type AgentComposerHandle = {
+  getValue: () => string;
+  setValue: (value: string) => void;
+  clear: () => void;
+};
+
+/**
+ * Shared two-level composer. Draft state deliberately lives here so typing does
+ * not re-render the conversation history (especially Markdown and KaTeX).
+ */
+const AgentComposerImpl = forwardRef<AgentComposerHandle, Props>(function AgentComposer({ onKeyDown, placeholder, active, cancelling, stopDisabled, onStop, conversation, liveState }, ref) {
+  const [value, setValue] = useState("");
+  const valueRef = useRef("");
+  const updateValue = useCallback((nextValue: string) => {
+    valueRef.current = nextValue;
+    setValue(nextValue);
+  }, []);
+
+  useImperativeHandle(ref, () => ({
+    getValue: () => valueRef.current,
+    setValue: updateValue,
+    clear: () => updateValue(""),
+  }), [updateValue]);
+
   return (
     <Box
       sx={{
@@ -43,7 +63,7 @@ export function AgentComposer({ value, onChange, onKeyDown, placeholder, active,
         minRows={2}
         maxRows={6}
         value={value}
-        onChange={(event) => onChange(event.target.value)}
+        onChange={(event) => updateValue(event.target.value)}
         onKeyDown={onKeyDown}
         placeholder={placeholder}
         inputProps={{ "aria-label": placeholder }}
@@ -114,4 +134,6 @@ export function AgentComposer({ value, onChange, onKeyDown, placeholder, active,
       </Box>
     </Box>
   );
-}
+});
+
+export const AgentComposer = memo(AgentComposerImpl);

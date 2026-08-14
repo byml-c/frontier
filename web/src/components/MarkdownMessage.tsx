@@ -1,4 +1,5 @@
 import { Box, Link as MuiLink } from "@mui/material";
+import { memo } from "react";
 import ReactMarkdown from "react-markdown";
 import rehypeKatex from "rehype-katex";
 import remarkCjkFriendly from "remark-cjk-friendly/parseOnly";
@@ -8,7 +9,7 @@ import remarkMath from "remark-math";
 import "katex/dist/katex.min.css";
 import { prepareMarkdown } from "./markdownNormalization";
 
-export function MarkdownMessage({
+export const MarkdownMessage = memo(function MarkdownMessage({
   content,
   onJump,
   inverted = false,
@@ -116,4 +117,4 @@ export function MarkdownMessage({
       </ReactMarkdown>
     </Box>
   );
-}
+});

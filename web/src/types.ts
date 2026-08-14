@@ -160,6 +160,7 @@ export type DocumentBlock = {
   level: number;
   text?: string;
   caption?: string;
+  caption_html?: string;
   html?: string;
   image_url?: string;
 };

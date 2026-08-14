@@ -1,5 +1,6 @@
 import { Box, CircularProgress, Stack, Tooltip, Typography } from "@mui/material";
 import { useQuery } from "@tanstack/react-query";
+import { memo } from "react";
 import { api } from "../api";
 import type { AgentRuntimeState, Conversation, LatestServiceChecks } from "../types";
 import {
@@ -11,7 +12,7 @@ import {
   reasoningEffortLabel,
 } from "./agentRuntimeState";
 
-export function AgentRuntimeStatus({ conversation, liveState }: { conversation?: Conversation; liveState?: AgentRuntimeState }) {
+export const AgentRuntimeStatus = memo(function AgentRuntimeStatus({ conversation, liveState }: { conversation?: Conversation; liveState?: AgentRuntimeState }) {
   const checks = useQuery({
     queryKey: ["service-checks"],
     queryFn: () => api<LatestServiceChecks>("/api/service-checks"),
@@ -40,7 +41,7 @@ export function AgentRuntimeStatus({ conversation, liveState }: { conversation?:
       </Tooltip>
     </Stack>
   );
-}
+});
 
 function ContextUsageRing({ current, window, percent, percentLabel }: { current: number; window: number; percent: number; percentLabel: string }) {
   const tokenLabel = `上下文 ${formatTokens(current)} / ${formatTokens(window)} tokens（${percentLabel}）`;

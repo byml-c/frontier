@@ -227,6 +227,8 @@ def _build_block(
             "text": _plain_text(table) if isinstance(table, Tag) else "",
             "caption": caption,
         }
+        if isinstance(caption_node, Tag):
+            block["caption_html"] = _safe_fragment(caption_node, base_url, inner=True)
         if asset_url and fetch_asset:
             source_url = asset_url
             suffix = Path(urlparse(source_url).path).suffix.lower()
