@@ -128,3 +128,54 @@ def test_agent_cli_accepts_chinese_analysis(monkeypatch: pytest.MonkeyPatch) -> 
     cli.paper_update("paper-1", json.dumps({"summary": "这是一句中文总结。"}))
 
     assert captured["json"] == {"summary": "这是一句中文总结。"}
+
+
+def test_finish_prompt_requires_the_structured_completion_schema() -> None:
+    prompt = build_prompt(
+        TaskRun(
+            id="task-finish",
+            kind="finish_reading",
+            payload_json={"paper_id": "paper-1"},
+        )
+    )
+
+    assert "completion_summary_structured" in prompt
+    for field in (
+        "research_question",
+        "evidence_and_contribution",
+        "experiments",
+        "limitations",
+        "user_attitude",
+    ):
+        assert f"`{field}`" in prompt
+
+
+def test_finish_cli_rejects_english_structured_summary(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    requested = False
+
+    def fake_request(*args: object, **kwargs: object) -> dict:
+        nonlocal requested
+        requested = True
+        return {}
+
+    monkeypatch.setattr(cli.client, "request", fake_request)
+
+    with pytest.raises(typer.Exit):
+        cli.paper_finish(
+            "paper-1",
+            json.dumps(
+                {
+                    "completion_summary_structured": {
+                        "research_question": "English-only question",
+                        "evidence_and_contribution": "中文证据。",
+                        "experiments": "中文实验。",
+                        "limitations": "中文局限。",
+                        "user_attitude": "用户未明确表达。",
+                    }
+                }
+            ),
+        )
+
+    assert requested is False

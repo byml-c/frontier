@@ -50,6 +50,11 @@ from ..schemas import (
     TranslationRequest,
 )
 from ..services.common import compact_search_key, log_operation, model_dict, normalize_title
+from ..services.completion_summary import (
+    COMPLETION_SUMMARY_METADATA_KEY,
+    completion_summary_structured,
+    save_completion_summary,
+)
 from ..services.document_reader import (
     document_asset,
     document_status,
@@ -86,6 +91,9 @@ def _paper_or_404(session: Session, paper_id: str) -> Paper:
 
 def _serialize_paper(session: Session, paper: Paper, *, detail: bool = False) -> dict:
     payload = model_dict(paper)
+    payload["completion_summary_structured"] = completion_summary_structured(
+        paper, include_user_attitude=True
+    )
     tags = session.execute(
         select(Tag.id, Tag.name, Tag.color)
         .join(PaperTag, PaperTag.tag_id == Tag.id)
@@ -346,7 +354,11 @@ def update_paper(
             **(changes["metadata_json"] or {}),
             **{
                 key: current_metadata[key]
-                for key in ("manual_analysis", "agent_metadata_analysis")
+                for key in (
+                    "manual_analysis",
+                    "agent_metadata_analysis",
+                    COMPLETION_SUMMARY_METADATA_KEY,
+                )
                 if key in current_metadata
             },
         }
@@ -378,13 +390,19 @@ def update_paper_metadata(
     changes = payload.model_dump(exclude_unset=True)
     tag_ids = changes.pop("tag_ids", None)
     new_tags = changes.pop("new_tags", [])
+    structured = changes.pop("completion_summary_structured", None)
     if "metadata_json" in changes:
         current_metadata = paper.metadata_json or {}
         changes["metadata_json"] = {
             **(changes["metadata_json"] or {}),
             **{
                 key: current_metadata[key]
-                for key in ("manual_analysis", "agent_metadata_analysis", "suggested_tags")
+                for key in (
+                    "manual_analysis",
+                    "agent_metadata_analysis",
+                    "suggested_tags",
+                    COMPLETION_SUMMARY_METADATA_KEY,
+                )
                 if key in current_metadata
             },
         }
@@ -392,6 +410,8 @@ def update_paper_metadata(
         changes["normalized_title"] = normalize_title(changes["title"])
     for key, value in changes.items():
         setattr(paper, key, value)
+    if structured is not None:
+        save_completion_summary(paper, structured)
     if tag_ids is not None:
         _replace_paper_tags(session, paper.id, tag_ids, new_tags)
     log_operation(
@@ -490,12 +510,20 @@ def finish_reading(
 ) -> dict:
     paper = _paper_or_404(session, paper_id)
     paper.status = "feedback_pending"
-    if payload.summary:
+    structured = payload.completion_summary_structured
+    if structured is not None:
+        save_completion_summary(paper, structured.model_dump())
+    elif payload.summary:
         paper.completion_summary = payload.summary
-    paper.pending_feedback = payload.model_dump(exclude={"summary"})
+        metadata = dict(paper.metadata_json or {})
+        metadata.pop(COMPLETION_SUMMARY_METADATA_KEY, None)
+        paper.metadata_json = metadata
+    paper.pending_feedback = payload.model_dump(
+        exclude={"summary", "completion_summary_structured"}
+    )
     log_operation(
         session,
-        actor="agent" if payload.summary else "user",
+        actor="agent" if payload.summary or structured is not None else "user",
         action="paper.reading_summarized",
         entity_type="paper",
         entity_id=paper.id,
@@ -517,6 +545,10 @@ def confirm_feedback(
     paper.is_quality = payload.quality
     paper.reading_completed_at = datetime.now(UTC)
     paper.pending_feedback = {}
+    if payload.completion_summary_structured is not None:
+        save_completion_summary(
+            paper, payload.completion_summary_structured.model_dump()
+        )
     if payload.personal_comment:
         paper.metadata_json = {**paper.metadata_json, "personal_comment": payload.personal_comment}
     selected_tag_ids = (

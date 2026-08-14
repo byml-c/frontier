@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import date
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 
 class PaperCreate(BaseModel):
@@ -55,6 +55,24 @@ class PaperUpdate(BaseModel):
     suggested_tags: list[str] | None = None
 
 
+class CompletionSummaryStructured(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    research_question: str = Field(min_length=1)
+    evidence_and_contribution: str = Field(min_length=1)
+    experiments: str = Field(min_length=1)
+    limitations: str = Field(min_length=1)
+    user_attitude: str = Field(min_length=1)
+
+    @field_validator("*")
+    @classmethod
+    def require_non_blank_section(cls, value: str) -> str:
+        value = value.strip()
+        if not value:
+            raise ValueError("completion summary sections cannot be blank")
+        return value
+
+
 class PaperMetadataUpdate(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -78,6 +96,7 @@ class PaperMetadataUpdate(BaseModel):
     recommendation_reason: str | None = None
     research_score: float | None = Field(default=None, ge=0, le=1)
     relevance_score: float | None = Field(default=None, ge=0, le=1)
+    completion_summary_structured: CompletionSummaryStructured | None = None
     metadata_json: dict[str, Any] | None = None
     tag_ids: list[str] | None = None
     new_tags: list[str] = Field(default_factory=list)
@@ -88,7 +107,10 @@ class IgnorePaper(BaseModel):
 
 
 class FinishReading(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     summary: str | None = None
+    completion_summary_structured: CompletionSummaryStructured | None = None
     suggested_interested: bool | None = None
     suggested_quality: bool | None = None
     suggested_create_node: bool | None = None
@@ -103,6 +125,7 @@ class ConfirmFeedback(BaseModel):
     tag_ids: list[str] | None = None
     new_tags: list[str] = Field(default_factory=list)
     personal_comment: str | None = None
+    completion_summary_structured: CompletionSummaryStructured | None = None
 
 
 class AnnotationCreate(BaseModel):

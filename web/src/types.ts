@@ -7,6 +7,15 @@ export type NodeRef = {
 
 export type Tag = { id: string; name: string; color?: string | null };
 
+export type CompletionSummaryStructured = {
+  research_question?: string | null;
+  evidence_and_contribution?: string | null;
+  experiments?: string | null;
+  limitations?: string | null;
+  user_attitude?: string | null;
+  overview?: string | null;
+};
+
 export type Paper = {
   id: string;
   title: string;
@@ -34,6 +43,7 @@ export type Paper = {
   is_interested: boolean;
   is_quality: boolean;
   completion_summary?: string | null;
+  completion_summary_structured?: CompletionSummaryStructured | null;
   pending_feedback?: Record<string, unknown>;
   metadata_json?: Record<string, unknown>;
   analysis_status?: "queued" | "processing" | "completed" | "failed" | null;
@@ -112,12 +122,29 @@ export type Annotation = {
 };
 
 export type DailyAnnotation = Pick<Annotation, "id" | "kind" | "page_number" | "selected_text" | "content" | "color" | "created_at">;
+export type PublicDailyPaper = {
+  id: string;
+  title: string;
+  abstract?: string | null;
+  authors?: Array<{ name: string }>;
+  first_author?: string | null;
+  corresponding_author?: string | null;
+  primary_affiliation?: string | null;
+  source: string;
+  source_url?: string | null;
+  arxiv_id?: string | null;
+  published_at?: string | null;
+  status: string;
+  tags: Tag[];
+  nodes: Array<Pick<NodeRef, "id" | "name">>;
+  completion_summary_structured?: Omit<CompletionSummaryStructured, "user_attitude" | "overview"> | null;
+};
 export type DailyPayload = {
   date: string;
   available_dates: string[];
   selection: null | {
     date: string;
-    paper: Paper & { arxiv_id?: string | null };
+    paper: PublicDailyPaper;
     annotations: DailyAnnotation[];
   };
 };

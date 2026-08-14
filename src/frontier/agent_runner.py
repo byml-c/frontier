@@ -222,10 +222,14 @@ reading is completed. Finish with a short summary of fields updated and any conc
 
 Prepare the completion summary for paper {paper_id}. Load the paper, extracted PDF pages,
 annotations, notes, and its paper conversation. Write the complete saved summary in Simplified
-Chinese and summarize the question, evidence, contribution, experiment, limitations, the user's
-apparent attitude, and suggested tags. Every material paper
-claim must cite a page as [[page:N]]. Save only suggestions with `frontier paper finish`; do not
-confirm interest, quality, tags, or node creation on the user's behalf.
+Chinese. Save `completion_summary_structured` with exactly these fields: `research_question`,
+`evidence_and_contribution`, `experiments`, `limitations`, and `user_attitude`. Every material paper
+claim in the first four fields must cite a page as [[page:N]]. Derive `user_attitude` only from the
+user's annotations, notes, and conversation; state that evidence is insufficient instead of
+inventing an attitude. Save suggested tags and the structured summary with `frontier paper finish`.
+Do not confirm interest, quality, tags, or node creation on the user's behalf. Do not send the
+legacy `summary` field when `completion_summary_structured` is available; the Server creates its
+compatibility Markdown.
 After saving, return only one concise Chinese sentence confirming completion. Do not narrate loaded
 context, tool calls, internal reasoning, or intermediate work in the final response.
 """

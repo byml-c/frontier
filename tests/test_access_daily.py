@@ -29,6 +29,32 @@ def _paper(client: TestClient) -> dict:
 
 def test_daily_selection_exposes_only_read_only_share_data(client: TestClient) -> None:
     paper = _paper(client)
+    structured = {
+        "research_question": "研究问题 [[page:1]]。",
+        "evidence_and_contribution": "证据与贡献 [[page:2]]。",
+        "experiments": "实验结果 [[page:3]]。",
+        "limitations": "局限性 [[page:4]]。",
+        "user_attitude": "用户非常感兴趣，这是私有内容。",
+    }
+    finished = client.post(
+        f"/api/papers/{paper['id']}/finish",
+        json={
+            "completion_summary_structured": structured,
+            "suggested_interested": True,
+            "suggested_quality": True,
+        },
+    )
+    assert finished.status_code == 200, finished.text
+    structured = {
+        **structured,
+        "research_question": "用户编辑后的研究问题 [[page:1]]。",
+        "user_attitude": "用户编辑后的态度仍然是私有内容。",
+    }
+    edited = client.patch(
+        f"/api/papers/{paper['id']}/metadata",
+        json={"completion_summary_structured": structured},
+    )
+    assert edited.status_code == 200, edited.text
     annotation = client.post(
         f"/api/papers/{paper['id']}/annotations",
         json={
@@ -54,6 +80,16 @@ def test_daily_selection_exposes_only_read_only_share_data(client: TestClient) -
     assert "position_json" not in body["selection"]["annotations"][0]
     assert "pdf_path" not in body["selection"]["paper"]
     assert "metadata_json" not in body["selection"]["paper"]
+    public_paper = body["selection"]["paper"]
+    assert public_paper["completion_summary_structured"] == {
+        key: value for key, value in structured.items() if key != "user_attitude"
+    }
+    assert "user_attitude" not in public_paper["completion_summary_structured"]
+    serialized_public_paper = str(public_paper)
+    assert "用户编辑后的态度" not in serialized_public_paper
+    assert "completion_summary" not in public_paper
+    assert "is_interested" not in public_paper
+    assert "is_quality" not in public_paper
 
 
 def test_private_api_requires_a_trusted_device_while_daily_stays_public(
@@ -85,6 +121,54 @@ def test_private_api_requires_a_trusted_device_while_daily_stays_public(
     finally:
         settings.access_password = previous
         client.cookies.clear()
+
+
+def test_daily_legacy_fallback_never_uses_private_completion_summary(
+    client: TestClient,
+) -> None:
+    created = client.post(
+        "/api/papers",
+        json={
+            "title": "Legacy private completion summary",
+            "source": "manual",
+        },
+    )
+    assert created.status_code == 200, created.text
+    paper = created.json()["paper"]
+    updated = client.patch(
+        f"/api/papers/{paper['id']}",
+        json={
+            "problem": "旧论文的研究问题。",
+            "innovation": "旧论文的证据与贡献。",
+            "experiment": "旧论文的实验。",
+            "limitations": "旧论文的局限。",
+        },
+    )
+    assert updated.status_code == 200, updated.text
+    private_marker = "用户态度私有标记-legacy"
+    finished = client.post(
+        f"/api/papers/{paper['id']}/finish",
+        json={"summary": f"论文总结。{private_marker}"},
+    )
+    assert finished.status_code == 200, finished.text
+    target = date(2026, 8, 12).isoformat()
+    assert (
+        client.put(f"/api/daily/{target}", json={"paper_id": paper["id"]}).status_code
+        == 200
+    )
+
+    public_paper = client.get(
+        "/api/daily", params={"target_date": target}
+    ).json()["selection"]["paper"]
+
+    assert "completion_summary" not in public_paper
+    assert private_marker not in str(public_paper)
+    assert public_paper["completion_summary_structured"] == {
+        "research_question": "旧论文的研究问题。",
+        "evidence_and_contribution": "旧论文的证据与贡献。",
+        "experiments": "旧论文的实验。",
+        "limitations": "旧论文的局限。",
+    }
 
 
 def test_daily_discussion_is_bound_to_the_paper_across_dates(client: TestClient) -> None:

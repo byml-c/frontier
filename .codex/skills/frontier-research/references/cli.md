@@ -21,7 +21,7 @@ uv run frontier paper resources PAPER_ID
 uv run frontier paper resources PAPER_ID --kind formula
 uv run frontier paper resources PAPER_ID --kind figure --block-id BLOCK_ID
 uv run frontier paper context PAPER_ID
-uv run frontier paper finish PAPER_ID --data '{"summary":"...","suggested_interested":true,"suggested_quality":true,"suggested_create_node":false,"suggested_tags":["VLA"]}'
+uv run frontier paper finish PAPER_ID --data '{"completion_summary_structured":{"research_question":"... [[page:1]]","evidence_and_contribution":"... [[page:4]]","experiments":"... [[page:7]]","limitations":"... [[page:12]]","user_attitude":"..."},"suggested_interested":true,"suggested_quality":true,"suggested_create_node":false,"suggested_tags":["VLA"]}'
 ```
 
 `paper list --query` searches the saved library by title, abstract, all authors, primary
@@ -29,6 +29,10 @@ affiliation, arXiv ID, DOI, and the discovery query that originally ingested the
 before an external search so an existing paper and its cached full text can be reused.
 
 Use `paper context` for reading completion and paper chat. It returns metadata, annotations, progress, conversations, and page-separated PDF text. If a claim depends on a figure, table, equation layout, or visual result, use `paper render-page`; the returned absolute PNG path can be opened with the Agent's image-viewing tool.
+
+`paper finish` stores the five completion-summary sections structurally. The Server also renders a
+legacy Markdown `completion_summary` for older private clients. `user_attitude` is private and is
+excluded from daily and brief summary payloads.
 
 Use `paper resources` for the cached structured arXiv HTML representation. It returns formula TeX,
 figure and table captions plus local asset paths, searchable table text, bibliography entries, and

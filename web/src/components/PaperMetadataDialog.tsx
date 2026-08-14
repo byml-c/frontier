@@ -19,7 +19,9 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useEffect, useState } from "react";
 import { api } from "../api";
 import type { Paper, Tag } from "../types";
-import { MarkdownMessage } from "./MarkdownMessage";
+import { CompletionSummaryEditor } from "./CompletionSummaryEditor";
+import { CompletionSummarySections } from "./CompletionSummarySections";
+import { completionSummaryDraft, completionSummaryDraftIsComplete, type CompletionSummaryDraft } from "./completionSummary";
 import { Modal } from "./Modal";
 import { PaperTagSelector } from "./PaperTagSelector";
 import { ErrorState, Loading } from "./States";
@@ -115,6 +117,7 @@ export function PaperMetadataDialog({
   const [form, setForm] = useState<MetadataForm>(emptyForm);
   const [selectedTags, setSelectedTags] = useState<string[]>([]);
   const [newTags, setNewTags] = useState<string[]>([]);
+  const [summaryDraft, setSummaryDraft] = useState<CompletionSummaryDraft | null>(null);
   const [dirty, setDirty] = useState(false);
   const [formError, setFormError] = useState("");
   const paper = useQuery({
@@ -138,6 +141,7 @@ export function PaperMetadataDialog({
     setForm(paperToForm(paper.data));
     setSelectedTags(paper.data.tags.map((tag) => tag.id));
     setNewTags([]);
+    setSummaryDraft(completionSummaryDraft(paper.data.completion_summary_structured));
     setFormError("");
     setDirty(false);
   }, [open, paper.data, dirty]);
@@ -178,6 +182,7 @@ export function PaperMetadataDialog({
           research_score: form.research_score === "" ? null : Number(form.research_score),
           relevance_score: form.relevance_score === "" ? null : Number(form.relevance_score),
           metadata_json: metadata,
+          completion_summary_structured: summaryDraft && completionSummaryDraftIsComplete(summaryDraft) ? summaryDraft : undefined,
           tag_ids: selectedTags,
           new_tags: newTags,
         }),
@@ -188,6 +193,7 @@ export function PaperMetadataDialog({
         queryClient.invalidateQueries({ queryKey: ["paper", paperId] }),
         queryClient.invalidateQueries({ queryKey: ["papers"] }),
         queryClient.invalidateQueries({ queryKey: ["brief"] }),
+        queryClient.invalidateQueries({ queryKey: ["daily"] }),
         queryClient.invalidateQueries({ queryKey: ["tags"] }),
       ]);
       onClose();
@@ -219,6 +225,7 @@ export function PaperMetadataDialog({
   }
 
   const suggestedTags = paper.data?.suggested_tags ?? [];
+  const summaryComplete = !summaryDraft || completionSummaryDraftIsComplete(summaryDraft);
   function acceptSuggestedTag(name: string) {
     const existing = tags.data?.find((tag) => tag.name === name);
     if (existing) {
@@ -235,7 +242,7 @@ export function PaperMetadataDialog({
         <Stack sx={{ width: "100%", height: "100%", minHeight: 0 }}>
           <Tabs value={tab} onChange={(_, value) => setTab(value)} sx={{ flexShrink: 0 }}>
             <Tab value="summary" label="Agent 总结" />
-            {paper.data?.completion_summary && <Tab value="reading" label="精读结论" />}
+            {(paper.data?.completion_summary_structured || paper.data?.completion_summary) && <Tab value="reading" label="精读结论" />}
             <Tab value="metadata" label="文献信息" />
           </Tabs>
 
@@ -340,10 +347,17 @@ export function PaperMetadataDialog({
               </Card>
             )}
 
-            {tab === "reading" && paper.data?.completion_summary && (
+            {tab === "reading" && (paper.data?.completion_summary_structured || paper.data?.completion_summary) && (
               <Card variant="outlined" sx={metadataCardSx}>
                 <CardContent>
-                  <MarkdownMessage content={paper.data.completion_summary} onJump={onJump} />
+                  {summaryDraft ? <CompletionSummaryEditor
+                    value={summaryDraft}
+                    onChange={(value) => { setSummaryDraft(value); setDirty(true); }}
+                  /> : <CompletionSummarySections
+                    summary={paper.data.completion_summary_structured ?? { overview: paper.data.completion_summary }}
+                    scope="private"
+                    onJump={onJump}
+                  />}
                 </CardContent>
               </Card>
             )}
@@ -352,7 +366,7 @@ export function PaperMetadataDialog({
           {(formError || save.error) && <Alert severity="error" sx={{ mt: 1, flexShrink: 0 }}>{formError || save.error?.message}</Alert>}
           <Stack direction="row" justifyContent="flex-end" spacing={1} sx={{ flexShrink: 0, pt: 2, borderTop: 1, borderColor: "divider" }}>
             <Button onClick={onClose}>取消</Button>
-            <Button variant="contained" disabled={save.isPending || !form.title.trim()} onClick={() => { setFormError(""); save.mutate(); }}>{save.isPending ? "正在保存…" : "保存"}</Button>
+            <Button variant="contained" disabled={save.isPending || !form.title.trim()} onClick={() => { if (!summaryComplete) { setTab("reading"); setFormError("请补全所有精读总结后再保存。"); return; } setFormError(""); save.mutate(); }}>{save.isPending ? "正在保存…" : "保存"}</Button>
           </Stack>
         </Stack>
       )}

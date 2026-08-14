@@ -12,6 +12,7 @@ from .auth import INTERNAL_TOKEN_HEADER, internal_api_token
 from .services.generated_content import (
     PAPER_ANALYSIS_PROSE_FIELDS,
     non_chinese_prose_fields,
+    non_chinese_structured_summary_fields,
 )
 
 app = typer.Typer(no_args_is_help=True, help="Frontier Agent toolkit CLI")
@@ -248,6 +249,19 @@ def paper_resources(
 @paper_app.command("finish")
 def paper_finish(paper_id: str, data: str = typer.Option(..., help="JSON string or @file")) -> None:
     payload = _require_chinese_agent_prose(parse_json(data), fields={"summary"})
+    invalid = non_chinese_structured_summary_fields(payload)
+    if invalid:
+        emit(
+            {
+                "ok": False,
+                "error": (
+                    "Agent-generated paper analysis must be written in Simplified Chinese. "
+                    "Rewrite the listed fields and retry the same command."
+                ),
+                "fields": invalid,
+            }
+        )
+        raise typer.Exit(1)
     emit(client.request("POST", f"/api/papers/{paper_id}/finish", json=payload))
 
 

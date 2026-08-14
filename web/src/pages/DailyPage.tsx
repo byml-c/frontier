@@ -1,5 +1,4 @@
 import ArrowOutwardRounded from "@mui/icons-material/ArrowOutwardRounded";
-import AutoAwesomeRounded from "@mui/icons-material/AutoAwesomeRounded";
 import CalendarMonthRounded from "@mui/icons-material/CalendarMonthRounded";
 import NotesRounded from "@mui/icons-material/NotesRounded";
 import { Box, Button, Card, CardContent, Chip, Container, Divider, IconButton, Menu, MenuItem, Stack, Typography } from "@mui/material";
@@ -7,6 +6,7 @@ import { useQuery } from "@tanstack/react-query";
 import { useState } from "react";
 import { useSearchParams } from "react-router-dom";
 import { api, formatDate } from "../api";
+import { CompletionSummarySections } from "../components/CompletionSummarySections";
 import { MarkdownMessage } from "../components/MarkdownMessage";
 import { DailyDiscussion } from "../components/DailyDiscussion";
 import { Empty, ErrorState, Loading } from "../components/States";
@@ -29,15 +29,13 @@ function DailyPaperCard({ selection }: { selection: NonNullable<DailyPayload["se
   const { paper, annotations } = selection;
   const sourceUrl = paper.arxiv_id ? `https://arxiv.org/abs/${paper.arxiv_id}` : paper.source_url;
   const authors = paper.authors?.map((author) => author.name).filter(Boolean).join(", ");
-  const analysis = [["研究问题", paper.problem], ["主要创新", paper.innovation], ["实验结果", paper.experiment], ["局限与后续问题", paper.limitations], ["精读总结", paper.completion_summary]].filter(([, value]) => Boolean(value));
   return <Card><CardContent sx={{ p: { xs: 2.25, sm: 3.5 } }}>
     <Stack direction="row" justifyContent="space-between" alignItems="flex-start" spacing={2}><Stack direction="row" flexWrap="wrap" gap={.75}><Chip size="small" color="primary" label="每日精选" />{paper.tags.map((tag) => <Chip size="small" variant="outlined" label={tag.name} key={tag.id} sx={{ color: tag.color || undefined }} />)}</Stack>{sourceUrl && <Button component="a" href={sourceUrl} target="_blank" rel="noreferrer" endIcon={<ArrowOutwardRounded />} sx={{ flexShrink: 0 }}>{paper.arxiv_id ? "arXiv" : "原文"}</Button>}</Stack>
     <Typography variant="h1" sx={{ mt: 2, fontSize: { xs: "1.55rem", sm: "2rem" }, lineHeight: 1.25 }}>{paper.title}</Typography>
     <Typography color="text.secondary" sx={{ mt: 1 }}>{paper.first_author || "作者信息待确认"}{paper.corresponding_author ? ` · 通讯作者 ${paper.corresponding_author}` : ""}{paper.primary_affiliation ? ` · ${paper.primary_affiliation}` : ""} · {paper.source.toUpperCase()} · {formatDate(paper.published_at)}</Typography>
     {authors && <Typography variant="body2" color="text.secondary" sx={{ mt: .75, display: "-webkit-box", WebkitLineClamp: 3, WebkitBoxOrient: "vertical", overflow: "hidden" }}>{authors}</Typography>}
-    <Box sx={{ mt: 2, fontSize: ".95rem" }}><MarkdownMessage content={paper.summary || paper.abstract || "暂无论文简介。"} /></Box>
-    <Divider sx={{ my: 2.5 }} /><Stack direction="row" spacing={1.25} alignItems="flex-start"><AutoAwesomeRounded color="primary" sx={{ mt: .2 }} /><Box><Typography variant="subtitle2">Agent 评语</Typography><Box sx={{ mt: .5 }}><MarkdownMessage content={paper.agent_comment || paper.recommendation_reason || "暂无 Agent 评语。"} /></Box></Box></Stack>
-    <Stack divider={<Divider flexItem />} spacing={2.25} sx={{ mt: 3 }}>{analysis.map(([title, value]) => <Box key={title}><Typography variant="h3">{title}</Typography><Box color="text.secondary" sx={{ mt: .75 }}><MarkdownMessage content={value || ""} /></Box></Box>)}</Stack>
+    <Divider sx={{ my: 2.5 }} />
+    <CompletionSummarySections summary={paper.completion_summary_structured} scope="public" emptyMessage="这篇论文尚无可公开的结构化精读总结。" />
     <Divider sx={{ my: 3 }} /><Stack direction="row" spacing={1} alignItems="center"><NotesRounded color="primary" /><Typography variant="h3">阅读批注与笔记</Typography><Chip size="small" label={`${annotations.length} 条`} /></Stack>
     {!annotations.length ? <Typography color="text.secondary" sx={{ mt: 1.5 }}>这篇论文暂时没有公开批注。</Typography> : <Stack spacing={1.5} sx={{ mt: 1.5 }}>{annotations.map((note) => <Box key={note.id} sx={{ pl: 1.5, borderLeft: 4, borderColor: note.color || "primary.light" }}><Typography variant="caption" color="text.secondary">第 {note.page_number} 页</Typography>{note.selected_text && <Typography component="blockquote" sx={{ m: 0, mt: .5, color: "text.secondary", fontFamily: '"Times New Roman", Times, serif', fontStyle: "italic" }}>{note.selected_text}</Typography>}{note.content && <Box sx={{ mt: .75 }}><MarkdownMessage content={note.content} /></Box>}</Box>)}</Stack>}
   </CardContent></Card>;

@@ -13,6 +13,10 @@ from ..database import get_session
 from ..models import Brief, BriefItem, Paper, PaperNode, PaperTag, ResearchNode, Tag
 from ..schemas import BriefCreate, BriefItemCreate
 from ..services.common import get_setting, log_operation, model_dict
+from ..services.completion_summary import (
+    brief_completion_summary,
+    completion_summary_structured,
+)
 from ..services.document_reader import queue_document_conversions
 from ..services.manual_recommendations import (
     current_analysis_state,
@@ -100,7 +104,10 @@ def _serialize_brief(session: Session, brief: Brief, *, detail: bool = True) -> 
                         else item.snapshot_json or _paper_snapshot(session, paper)
                     ),
                     # 阅读结论属于论文的后续状态，不应被冻结在发布时的简报快照中。
-                    "completion_summary": paper.completion_summary,
+                    "completion_summary": brief_completion_summary(paper),
+                    "completion_summary_structured": completion_summary_structured(
+                        paper, include_user_attitude=False
+                    ),
                 }
             ),
             "current_status": paper.status,

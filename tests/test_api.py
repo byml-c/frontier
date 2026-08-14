@@ -308,6 +308,203 @@ def test_paper_dedup_annotations_and_feedback(client: TestClient) -> None:
     )
 
 
+def test_finish_reading_stores_and_serializes_structured_summary(
+    client: TestClient,
+) -> None:
+    paper = create_paper(client, "Structured completion summary")
+    brief = client.post(
+        "/api/briefs",
+        json={"brief_date": "2026-08-01", "title": "Structured summary brief"},
+    ).json()
+    assert (
+        client.post(
+            f"/api/briefs/{brief['id']}/items",
+            json={"paper_id": paper["id"], "rank": 1, "tier": "featured"},
+        ).status_code
+        == 200
+    )
+    assert client.post(f"/api/briefs/{brief['id']}/publish").status_code == 200
+    structured = {
+        "research_question": "研究如何提升操作泛化能力 [[page:1]]。",
+        "evidence_and_contribution": "提出统一策略并给出消融证据 [[page:4]]。",
+        "experiments": "在三个基准上进行了实验 [[page:7]]。",
+        "limitations": "真实场景覆盖仍然有限 [[page:12]]。",
+        "user_attitude": "用户对跨平台迁移最感兴趣。",
+    }
+
+    response = client.post(
+        f"/api/papers/{paper['id']}/finish",
+        json={
+            "completion_summary_structured": structured,
+            "suggested_interested": True,
+            "suggested_tags": ["VLA"],
+        },
+    )
+
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["completion_summary_structured"] == structured
+    assert body["metadata_json"]["completion_summary_structured"] == structured
+    assert "### 研究问题" in body["completion_summary"]
+    assert "### 用户态度" in body["completion_summary"]
+    assert "completion_summary_structured" not in body["pending_feedback"]
+    assert body["pending_feedback"]["suggested_interested"] is True
+    brief_paper = client.get(f"/api/briefs/{brief['id']}").json()["items"][0]["paper"]
+    assert brief_paper["completion_summary_structured"] == {
+        key: value for key, value in structured.items() if key != "user_attitude"
+    }
+    assert "用户对跨平台迁移" not in brief_paper["completion_summary"]
+    metadata_update = client.patch(
+        f"/api/papers/{paper['id']}", json={"metadata_json": {"custom": "value"}}
+    )
+    assert metadata_update.status_code == 200, metadata_update.text
+    assert metadata_update.json()["completion_summary_structured"] == structured
+
+
+def test_metadata_update_saves_edited_structured_summary_and_preserves_metadata(
+    client: TestClient,
+) -> None:
+    paper = create_paper(client, "Edit completion summary from metadata")
+    seeded = client.patch(
+        f"/api/papers/{paper['id']}/metadata",
+        json={"metadata_json": {"custom_metadata": {"must": "remain"}}},
+    )
+    assert seeded.status_code == 200, seeded.text
+    edited = {
+        "research_question": "  手动修改后的研究问题。  ",
+        "evidence_and_contribution": "手动修改后的证据与贡献。",
+        "experiments": "手动修改后的实验。",
+        "limitations": "手动修改后的局限。",
+        "user_attitude": "手动修改后的用户态度。",
+    }
+
+    response = client.patch(
+        f"/api/papers/{paper['id']}/metadata",
+        json={"completion_summary_structured": edited},
+    )
+
+    assert response.status_code == 200, response.text
+    body = response.json()
+    expected = {**edited, "research_question": edited["research_question"].strip()}
+    assert body["completion_summary_structured"] == expected
+    assert body["metadata_json"]["completion_summary_structured"] == expected
+    assert body["metadata_json"]["custom_metadata"] == {"must": "remain"}
+    assert "手动修改后的研究问题" in body["completion_summary"]
+    assert "手动修改后的用户态度" in body["completion_summary"]
+    assert body["is_interested"] is False
+    assert body["is_quality"] is False
+
+
+def test_confirm_feedback_saves_user_edited_structured_summary(
+    client: TestClient,
+) -> None:
+    paper = create_paper(client, "Edit completion summary while confirming")
+    assert client.post(f"/api/papers/{paper['id']}/finish", json={}).status_code == 200
+    edited = {
+        "research_question": "确认时修改的研究问题。",
+        "evidence_and_contribution": "确认时修改的证据与贡献。",
+        "experiments": "确认时修改的实验。",
+        "limitations": "确认时修改的局限。",
+        "user_attitude": "确认时修改的用户态度。",
+    }
+
+    response = client.post(
+        f"/api/papers/{paper['id']}/confirm-feedback",
+        json={
+            "interested": True,
+            "quality": False,
+            "completion_summary_structured": edited,
+        },
+    )
+
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["status"] == "completed"
+    assert body["is_interested"] is True
+    assert body["is_quality"] is False
+    assert body["completion_summary_structured"] == edited
+    assert body["metadata_json"]["completion_summary_structured"] == edited
+    assert "确认时修改的研究问题" in body["completion_summary"]
+    assert "确认时修改的用户态度" in body["completion_summary"]
+
+
+def test_structured_completion_summary_requires_every_non_blank_section(
+    client: TestClient,
+) -> None:
+    paper = create_paper(client, "Incomplete structured completion summary")
+
+    missing = client.post(
+        f"/api/papers/{paper['id']}/finish",
+        json={
+            "completion_summary_structured": {
+                "research_question": "研究问题。",
+                "evidence_and_contribution": "证据与贡献。",
+                "experiments": "实验。",
+                "limitations": "局限。",
+            }
+        },
+    )
+    blank = client.post(
+        f"/api/papers/{paper['id']}/finish",
+        json={
+            "completion_summary_structured": {
+                "research_question": "研究问题。",
+                "evidence_and_contribution": "证据与贡献。",
+                "experiments": "实验。",
+                "limitations": "局限。",
+                "user_attitude": "   ",
+            }
+        },
+    )
+
+    assert missing.status_code == 422
+    assert blank.status_code == 422
+
+    metadata_missing = client.patch(
+        f"/api/papers/{paper['id']}/metadata",
+        json={
+            "completion_summary_structured": {
+                "research_question": "研究问题。",
+                "evidence_and_contribution": "证据与贡献。",
+                "experiments": "实验。",
+                "limitations": "局限。",
+            }
+        },
+    )
+    confirm_blank = client.post(
+        f"/api/papers/{paper['id']}/confirm-feedback",
+        json={
+            "interested": False,
+            "quality": False,
+            "completion_summary_structured": {
+                "research_question": "研究问题。",
+                "evidence_and_contribution": "证据与贡献。",
+                "experiments": "实验。",
+                "limitations": "局限。",
+                "user_attitude": "   ",
+            },
+        },
+    )
+    assert metadata_missing.status_code == 422
+    assert confirm_blank.status_code == 422
+
+
+def test_legacy_completion_summary_has_structured_overview_fallback(
+    client: TestClient,
+) -> None:
+    paper = create_paper(client, "Legacy completion summary")
+    summary = "这是旧版精读总结 [[page:2]]。"
+
+    response = client.post(
+        f"/api/papers/{paper['id']}/finish",
+        json={"summary": summary},
+    )
+
+    assert response.status_code == 200, response.text
+    assert response.json()["completion_summary"] == summary
+    assert response.json()["completion_summary_structured"] == {"overview": summary}
+
+
 def test_papers_are_grouped_by_reading_status(client: TestClient) -> None:
     candidate = create_paper(client, "Status order candidate")
     reading = create_paper(client, "Status order reading")

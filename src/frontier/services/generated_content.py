@@ -17,6 +17,16 @@ PAPER_ANALYSIS_PROSE_FIELDS = frozenset(
     }
 )
 
+COMPLETION_SUMMARY_PROSE_FIELDS = frozenset(
+    {
+        "research_question",
+        "evidence_and_contribution",
+        "experiments",
+        "limitations",
+        "user_attitude",
+    }
+)
+
 _CJK_CHARACTER = re.compile(r"[\u3400-\u4dbf\u4e00-\u9fff]")
 
 
@@ -37,3 +47,13 @@ def non_chinese_prose_fields(
         if isinstance(value, str) and value.strip() and not _CJK_CHARACTER.search(value):
             invalid.append(field)
     return sorted(invalid)
+
+
+def non_chinese_structured_summary_fields(payload: Mapping[str, Any]) -> list[str]:
+    summary = payload.get("completion_summary_structured")
+    if not isinstance(summary, Mapping):
+        return []
+    return [
+        f"completion_summary_structured.{field}"
+        for field in non_chinese_prose_fields(summary, fields=COMPLETION_SUMMARY_PROSE_FIELDS)
+    ]

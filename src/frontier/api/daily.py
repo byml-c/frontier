@@ -29,6 +29,9 @@ from ..models import (
     Tag,
 )
 from ..services.common import log_operation, model_dict
+from ..services.completion_summary import (
+    completion_summary_structured,
+)
 from ..services.research_day import current_research_date
 
 router = APIRouter(prefix="/api/daily", tags=["daily"])
@@ -85,9 +88,9 @@ def _public_paper(session: Session, paper: Paper) -> dict:
         "experiment": paper.experiment,
         "limitations": paper.limitations,
         "recommendation_reason": paper.recommendation_reason,
-        "completion_summary": paper.completion_summary,
-        "is_interested": paper.is_interested,
-        "is_quality": paper.is_quality,
+        "completion_summary_structured": completion_summary_structured(
+            paper, include_user_attitude=False
+        ),
         "tags": [dict(row._mapping) for row in tags],
         "nodes": [dict(row._mapping) for row in nodes],
     }

@@ -71,7 +71,10 @@ Keep simple word or sentence translations out of the Agent conversation. When th
 When the user explicitly finishes reading:
 
 1. Synthesize the PDF, annotations, notes, and conversation.
-2. Produce a concise completion summary with page citations.
+2. Produce `completion_summary_structured` with separate `research_question`,
+   `evidence_and_contribution`, `experiments`, `limitations`, and `user_attitude` fields. Cite every
+   material paper claim in the first four fields as `[[page:N]]`; infer user attitude only from the
+   user's own annotations, notes, or conversation.
 3. Suggest interest, paper quality, new-node need, and tags.
 4. Save suggestions with `paper finish`.
 5. Never confirm feedback, select tags, or admit a paper to the quality library for the user.

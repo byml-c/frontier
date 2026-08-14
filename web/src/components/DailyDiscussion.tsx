@@ -19,6 +19,7 @@ import {
   Drawer,
   Fab,
   IconButton,
+  Portal,
   Stack,
   TextField,
   ToggleButton,
@@ -70,7 +71,6 @@ export function DailyDiscussion({ paperId }: { paperId: string }) {
   const discussion = useQuery({
     queryKey: ["daily-discussion", paperId],
     queryFn: () => api<DailyDiscussionPayload>(`/api/daily/papers/${paperId}/reviews`),
-    enabled: open,
   });
   const rotateIdentity = useMutation({
     mutationFn: () => api("/api/daily/identity/rotate", jsonBody({})),
@@ -88,10 +88,12 @@ export function DailyDiscussion({ paperId }: { paperId: string }) {
   }
   function refresh() { return queryClient.invalidateQueries({ queryKey: ["daily-discussion", paperId] }); }
   return <>
-    {!open && <Badge badgeContent={discussion.data?.review_count} color="primary" overlap="circular" sx={{ position: "fixed", zIndex: 20, left: "50%", bottom: "calc(20px + env(safe-area-inset-bottom))", transform: "translateX(-50%)" }}>
-      <Fab color="primary" aria-label="打开论文评论" onClick={() => setOpen(true)}><ChatBubbleOutlineRounded /></Fab>
-    </Badge>}
-    <Drawer anchor="bottom" open={open} onClose={() => setOpen(false)} PaperProps={{ sx: { height: { xs: "88dvh", md: "min(820px, 86dvh)" }, borderRadius: "20px 20px 0 0", overflow: "hidden" } }}>
+    <Portal>
+      {!open ? <Badge badgeContent={discussion.data?.review_count} color="primary" overlap="circular" sx={{ position: "fixed", zIndex: (theme) => theme.zIndex.appBar + 1, left: "50%", bottom: "calc(20px + env(safe-area-inset-bottom))", transform: "translateX(-50%)", "& .MuiBadge-badge": { zIndex: 2, top: -3, right: -5, transform: "none", boxShadow: "0 0 0 2px", boxShadowColor: "background.paper" } }}>
+        <Fab color="primary" aria-label="打开论文评论" onClick={() => setOpen(true)} sx={{ zIndex: 0 }}><ChatBubbleOutlineRounded /></Fab>
+      </Badge> : <Fab color="primary" aria-label="关闭论文评论" onClick={() => setOpen(false)} sx={{ position: "fixed", zIndex: (theme) => theme.zIndex.modal + 1, left: "50%", bottom: "calc(20px + env(safe-area-inset-bottom))", transform: "translateX(-50%)" }}><CloseRounded /></Fab>}
+    </Portal>
+    <Drawer anchor="bottom" open={open} onClose={() => setOpen(false)} PaperProps={{ sx: (theme) => ({ height: { xs: "88dvh", md: "min(820px, 86dvh)" }, width: { xs: "100%", md: `min(calc(100% - ${theme.spacing(6)}), calc(${theme.breakpoints.values.md}px - ${theme.spacing(6)}))` }, left: 0, right: 0, mx: "auto", borderRadius: "20px 20px 0 0", overflow: "hidden" }) }}>
       <Stack sx={{ height: "100%", minHeight: 0 }}>
         <Stack direction="row" alignItems="center" spacing={1.5} sx={{ px: { xs: 2, md: 3 }, py: 1.5, borderBottom: 1, borderColor: "divider" }}>
           <Box sx={{ flex: 1, minWidth: 0 }}><Typography variant="h3">论文评分与讨论</Typography>{discussion.data && <Typography variant="caption" color="text.secondary">{discussion.data.review_count} 份评价{discussion.data.average_score != null ? ` · 平均 ${discussion.data.average_score}/6` : ""}</Typography>}</Box>
@@ -104,7 +106,6 @@ export function DailyDiscussion({ paperId }: { paperId: string }) {
             {!discussion.data?.reviews.length ? <Typography color="text.secondary" sx={{ py: 5, textAlign: "center" }}>还没有评价，欢迎留下第一份匿名评审。</Typography> : discussion.data.reviews.map((review) => <ReviewCard key={review.id} review={review} open={expanded.has(review.id)} replying={replyingTo === review.id} replyDraft={replyDrafts[review.id] || ""} mentionColors={mentionColors} onEdit={() => setComposing(true)} onToggle={() => setExpanded((current) => { const next = new Set(current); if (next.has(review.id)) next.delete(review.id); else next.add(review.id); return next; })} onReply={(author) => openReply(review, author)} onReplyDraft={(value) => setReplyDrafts((current) => ({ ...current, [review.id]: value }))} onReplyClose={() => setReplyingTo(null)} onReplySaved={async () => { setReplyingTo(null); setReplyDrafts((current) => ({ ...current, [review.id]: "" })); await refresh(); }} />)}
           </Stack>}
         </Box>
-        <Fab color="primary" aria-label="关闭论文评论" onClick={() => setOpen(false)} sx={{ position: "fixed", zIndex: (theme) => theme.zIndex.drawer + 1, left: "50%", bottom: "calc(20px + env(safe-area-inset-bottom))", transform: "translateX(-50%)" }}><CloseRounded /></Fab>
       </Stack>
     </Drawer>
   </>;
