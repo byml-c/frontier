@@ -306,6 +306,7 @@ def _convert_document_task(paper_id: str, force: bool) -> None:
                         version=version,
                         root=root,
                         schema_version=DOCUMENT_SCHEMA_VERSION,
+                        known_authors=paper.authors or [],
                         on_progress=report_progress,
                     )
                 except ArxivHtmlUnavailable as exc:
@@ -335,6 +336,16 @@ def _convert_document_task(paper_id: str, force: bool) -> None:
                     root=root,
                     on_progress=report_progress,
                 )
+            if payload.get("reader_source") == "arxiv_html":
+                from .author_metadata import apply_arxiv_html_author_metadata
+
+                apply_arxiv_html_author_metadata(
+                    session,
+                    paper,
+                    payload.get("author_metadata") or {},
+                    source_url=str(payload.get("source_url") or "") or None,
+                )
+                session.commit()
             report_progress("finalizing", "正在写入阅读缓存", 98, 4)
             temporary = cache.with_suffix(".tmp")
             temporary.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")

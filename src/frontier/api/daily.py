@@ -78,7 +78,11 @@ def _public_paper(session: Session, paper: Paper) -> dict:
         "id": paper.id,
         "title": paper.title,
         "abstract": paper.abstract,
-        "authors": paper.authors,
+        "authors": [
+            {"name": str(author.get("name") or "")}
+            for author in (paper.authors or [])
+            if str(author.get("name") or "").strip()
+        ],
         "first_author": paper.first_author,
         "corresponding_author": paper.corresponding_author,
         "primary_affiliation": paper.primary_affiliation,

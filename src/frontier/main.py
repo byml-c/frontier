@@ -15,6 +15,7 @@ from .auth import request_is_internal, request_is_trusted
 from .config import settings
 from .database import SessionLocal, create_tables
 from .scheduler import start_scheduler, stop_scheduler
+from .services.author_metadata import queue_cached_arxiv_author_metadata_backfill
 from .services.common import ensure_default_settings
 from .services.completion_summary import migrate_legacy_completion_summaries
 from .services.daily_selections import migrate_legacy_daily_selections
@@ -28,6 +29,7 @@ async def lifespan(_app: FastAPI):
         ensure_default_settings(session)
         migrate_legacy_completion_summaries(session)
         migrate_legacy_daily_selections(session)
+    queue_cached_arxiv_author_metadata_backfill()
     conversations.mark_orphaned_conversation_streams()
     warm_translation_provider()
     start_scheduler()

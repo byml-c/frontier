@@ -49,6 +49,14 @@ from ..schemas import (
     TagCreate,
     TranslationRequest,
 )
+from ..services.author_metadata import (
+    BIBLIOGRAPHIC_FIELDS,
+    BIBLIOGRAPHIC_PROVENANCE_KEY,
+    MANUAL_BIBLIOGRAPHIC_FIELDS_KEY,
+    manual_bibliographic_fields,
+    preserve_author_details_for_unchanged_names,
+    record_manual_bibliographic_changes,
+)
 from ..services.common import compact_search_key, log_operation, model_dict, normalize_title
 from ..services.completion_summary import (
     COMPLETION_SUMMARY_METADATA_KEY,
@@ -349,6 +357,10 @@ def update_paper(
     paper = _paper_or_404(session, paper_id)
     changes = payload.model_dump(exclude_unset=True)
     suggested_tags = changes.pop("suggested_tags", None)
+    protected_fields = manual_bibliographic_fields(session, paper)
+    skipped_fields = sorted(protected_fields.intersection(changes))
+    for field in skipped_fields:
+        changes.pop(field, None)
     if "metadata_json" in changes:
         current_metadata = paper.metadata_json or {}
         changes["metadata_json"] = {
@@ -359,6 +371,8 @@ def update_paper(
                     "manual_analysis",
                     "agent_metadata_analysis",
                     COMPLETION_SUMMARY_METADATA_KEY,
+                    BIBLIOGRAPHIC_PROVENANCE_KEY,
+                    MANUAL_BIBLIOGRAPHIC_FIELDS_KEY,
                 )
                 if key in current_metadata
             },
@@ -375,7 +389,7 @@ def update_paper(
         action="paper.updated",
         entity_type="paper",
         entity_id=paper.id,
-        detail={"fields": sorted(changes)},
+        detail={"fields": sorted(changes), "protected_fields_skipped": skipped_fields},
     )
     session.commit()
     return _serialize_paper(session, paper, detail=True)
@@ -392,6 +406,11 @@ def update_paper_metadata(
     tag_ids = changes.pop("tag_ids", None)
     new_tags = changes.pop("new_tags", [])
     structured = changes.pop("completion_summary_structured", None)
+    original_values = {field: getattr(paper, field) for field in BIBLIOGRAPHIC_FIELDS}
+    if "authors" in changes and changes["authors"] is not None:
+        changes["authors"] = preserve_author_details_for_unchanged_names(
+            paper.authors or [], changes["authors"]
+        )
     if "metadata_json" in changes:
         current_metadata = paper.metadata_json or {}
         changes["metadata_json"] = {
@@ -403,6 +422,8 @@ def update_paper_metadata(
                     "agent_metadata_analysis",
                     "suggested_tags",
                     COMPLETION_SUMMARY_METADATA_KEY,
+                    BIBLIOGRAPHIC_PROVENANCE_KEY,
+                    MANUAL_BIBLIOGRAPHIC_FIELDS_KEY,
                 )
                 if key in current_metadata
             },
@@ -411,6 +432,9 @@ def update_paper_metadata(
         changes["normalized_title"] = normalize_title(changes["title"])
     for key, value in changes.items():
         setattr(paper, key, value)
+    manually_changed = record_manual_bibliographic_changes(
+        paper, original_values, changes
+    )
     if structured is not None:
         save_completion_summary(paper, structured)
     if tag_ids is not None:
@@ -421,7 +445,11 @@ def update_paper_metadata(
         action="paper.metadata_updated",
         entity_type="paper",
         entity_id=paper.id,
-        detail={"fields": sorted(changes), "tags_updated": tag_ids is not None},
+        detail={
+            "fields": sorted(changes),
+            "manually_changed_bibliographic_fields": sorted(manually_changed),
+            "tags_updated": tag_ids is not None,
+        },
     )
     session.commit()
     return _serialize_paper(session, paper, detail=True)

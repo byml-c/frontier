@@ -21,6 +21,7 @@ def _paper(client: TestClient) -> dict:
             "source": "arxiv",
             "source_url": "https://arxiv.org/abs/2608.00001",
             "arxiv_id": "2608.00001",
+            "authors": [{"name": "Ada", "email": "private@example.edu"}],
             "first_author": "Ada",
             "primary_affiliation": "Frontier Lab",
             "summary": "公开简介",
@@ -88,6 +89,8 @@ def test_daily_selection_exposes_only_read_only_share_data(client: TestClient) -
     assert "pdf_path" not in body["selection"]["paper"]
     assert "metadata_json" not in body["selection"]["paper"]
     public_paper = body["selection"]["paper"]
+    assert public_paper["authors"] == [{"name": "Ada"}]
+    assert "private@example.edu" not in str(public_paper)
     assert public_paper["completion_summary_structured"] == {
         key: value for key, value in structured.items() if key != "user_attitude"
     }

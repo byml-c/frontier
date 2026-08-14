@@ -38,6 +38,7 @@ def convert_from_arxiv_html(
     version: str,
     root: Path,
     schema_version: int,
+    known_authors: list[dict[str, Any]] | None = None,
     on_progress: Callable[..., None] | None = None,
 ) -> dict[str, Any]:
     source_id = arxiv_id.strip().removeprefix("arXiv:")
@@ -77,6 +78,7 @@ def convert_from_arxiv_html(
                 version=version,
                 root=root,
                 schema_version=schema_version,
+                known_authors=known_authors,
                 fetch_asset=lambda url, target: _fetch_asset(client, url, target),
                 on_progress=on_progress,
             )
@@ -95,6 +97,7 @@ def convert_arxiv_html_content(
     version: str,
     root: Path,
     schema_version: int,
+    known_authors: list[dict[str, Any]] | None = None,
     fetch_asset: Callable[[str, Path], Path] | None = None,
     on_progress: Callable[..., None] | None = None,
 ) -> dict[str, Any]:
@@ -157,6 +160,8 @@ def convert_arxiv_html_content(
 
     if not blocks:
         raise ArxivHtmlUnavailable("arXiv HTML 正文为空")
+    from .author_metadata import extract_arxiv_html_author_metadata
+
     return {
         "paper_id": paper_id,
         "version": version,
@@ -165,6 +170,7 @@ def convert_arxiv_html_content(
         "reader_source": "arxiv_html",
         "source_url": base_url,
         "title": title,
+        "author_metadata": extract_arxiv_html_author_metadata(html, known_authors or []),
         "blocks": blocks,
         "updated_at": datetime.now(UTC).isoformat(),
     }
