@@ -14,7 +14,9 @@ from sqlalchemy.orm import Session
 from .config import PROJECT_ROOT, settings
 from .database import SessionLocal
 from .interactive_stream import register_codex_run, unregister_codex_run
-from .models import Brief, Conversation, Message, Paper, TaskRun, utcnow
+from .models import ArchitectureDocument, Brief, Conversation, Message, Paper, TaskRun, utcnow
+from .services.architecture_progress import persist_architecture_progress
+from .services.architecture_scene import release_agent_lock_for_task
 from .services.common import log_operation
 from .services.manual_recommendations import set_manual_analysis_state
 from .services.outbound_network import agent_environment
@@ -216,6 +218,36 @@ experiment evidence, limitations, research score, relevance score, recommendatio
 be established. Do not attach the paper to the graph or add node progress before user-confirmed
 reading is completed. Finish with a short summary of fields updated and any concrete source failure.
 """
+    if task.kind == "architecture_generation":
+        paper_id = payload["paper_id"]
+        work_path = f"data/tasks/{task.id}/scene.architecture.json"
+        return f"""{workflow_common}
+
+Build the canonical Architecture Scene for paper {paper_id}. The Server already holds the Agent
+editing lock for task {task.id}. Read the complete paper and inspect exact figures, tables, formulas,
+appendices, and official code only when they materially determine the architecture. Do not guess
+missing structure. Preserve the paper's broad composition while using the canonical semantic model.
+
+Checkout the current Scene to `{work_path}` with `frontier architecture checkout`, keeping the
+reported revision. Edit only that task-local JSON file. Include Module, Data, Tensor, Edge,
+Annotation, Group, minimal SourceReference, and asset references only when supported by evidence.
+Keep each Module's fields semantically distinct: `title` is its functional role; optional `symbol`
+is only its TeX identifier without `$` delimiters; `architecture` is the concrete model family,
+backbone, layer stack, or operator; and `keywords` are only behavioral properties or configurations.
+Never place a model architecture such as ViT, DINOv2-B/14, T5, ResNet, Transformer, MLP, or DiT in
+`keywords`, and never combine a symbol or a property such as shared weights with `architecture`.
+For example, a shared online vision encoder may use `symbol: "g_\\psi"`,
+`architecture: "DINOv2-B/14"`, and `keywords: ["shared weights", "fine-tuned"]`. Store Data and
+Tensor symbols as TeX without `$` delimiters. In descriptions, annotations, labels, and keywords,
+wrap mathematical expressions in `$...$` so the Web can render them as formulas.
+
+Use stable semantic IDs. Run `frontier architecture validate --data @{work_path}` and fix every
+error; review geometry and provenance warnings. This MVP does not use automated screenshots: do not
+install or launch a browser automation dependency. Commit the complete file with `frontier
+architecture commit`, the checkout revision, and task id {task.id}. Do not modify Server data files
+directly and do not finish without a successful commit. Return one concise Chinese sentence stating
+that the architecture is ready and mentioning any important evidence limitation.
+"""
     if task.kind == "finish_reading":
         paper_id = payload["paper_id"]
         return f"""{workflow_common}
@@ -266,7 +298,13 @@ Text:
 Answer the user's paper-reading question about paper {paper_id}. Use `frontier paper context` to
 load PDF text and reading artifacts. Discuss through problem decomposition and mutual inquiry.
 Do not mix simple translation results into this conversation. Cite every material paper claim with
-[[page:N]]. Current UI context: {context}
+[[page:N]]. When the current UI context is the Architecture Reader, use `frontier architecture
+status` to read its revision. Use validated `frontier architecture command` calls for focus,
+expand, highlight, dim, or tensor explanation. If the user asks for a persistent architecture
+change, acquire the Agent lock with `frontier architecture checkout --lock --task-id {task.id}`,
+edit only the task-local checkout, validate it, commit the whole Scene with the reported revision,
+and release the lock after a failed or abandoned edit. Never mutate Server files directly. Current
+UI context: {context}
 
 User message:
 {message}
@@ -398,6 +436,8 @@ def run_task(task_id: str) -> None:
                         event = json.loads(line)
                     except json.JSONDecodeError:
                         continue
+                    if task.kind == "architecture_generation" and isinstance(event, dict):
+                        persist_architecture_progress(task_id, event)
                     session_id = session_id or _find_session_id(event)
                 return_code = process.wait()
             finally:
@@ -408,6 +448,17 @@ def run_task(task_id: str) -> None:
             if not task:
                 return
             if task.status == "cancelled":
+                document = session.scalar(
+                    select(ArchitectureDocument).where(
+                        ArchitectureDocument.generation_task_id == task_id
+                    )
+                )
+                if document:
+                    document.status = "ready" if document.scene_json else "missing"
+                    document.error = None
+                    document.generation_task_id = None
+                release_agent_lock_for_task(session, task_id)
+                session.commit()
                 return
             task.codex_session_id = session_id
             daily_brief = None
@@ -431,6 +482,19 @@ def run_task(task_id: str) -> None:
                 ):
                     final_status = "failed"
                     final_error = "Agent finished without saving the required paper analysis fields."
+            elif task.kind == "architecture_generation":
+                document = session.get(
+                    ArchitectureDocument, task.payload_json.get("paper_id")
+                )
+                base_revision = int(task.payload_json.get("base_revision") or 0)
+                if (
+                    document is None
+                    or document.status != "ready"
+                    or not document.scene_json
+                    or document.revision <= base_revision
+                ):
+                    final_status = "failed"
+                    final_error = "Agent finished without committing a valid Architecture Scene."
             transition = session.execute(
                 update(TaskRun)
                 .where(TaskRun.id == task_id, TaskRun.status == "running")
@@ -452,6 +516,19 @@ def run_task(task_id: str) -> None:
                     "completed" if final_status == "completed" else "failed",
                     error=final_error,
                 )
+            if task.kind == "architecture_generation":
+                document = session.get(
+                    ArchitectureDocument, task.payload_json.get("paper_id")
+                )
+                if document:
+                    if final_status == "failed":
+                        document.status = "ready" if document.scene_json else "failed"
+                        document.error = final_error
+                    else:
+                        document.status = "ready"
+                        document.error = None
+                    document.generation_task_id = None
+                release_agent_lock_for_task(session, task.id)
             conversation_id = task.payload_json.get("conversation_id")
             if conversation_id:
                 conversation = session.get(Conversation, conversation_id)
@@ -477,6 +554,7 @@ def run_task(task_id: str) -> None:
                 entity_id=task.id,
                 task_id=task.id,
             )
+            release_agent_lock_for_task(session, task.id)
             session.commit()
     except Exception as exc:  # noqa: BLE001 - persist all runner failures for the user
         with SessionLocal() as session:
@@ -487,6 +565,17 @@ def run_task(task_id: str) -> None:
                 task.finished_at = utcnow()
                 if task.kind in {"manual_paper_analysis", "paper_metadata_analysis"}:
                     set_manual_analysis_state(session, task, "failed", error=task.error)
+                if task.kind == "architecture_generation":
+                    document = session.get(
+                        ArchitectureDocument, task.payload_json.get("paper_id")
+                    )
+                    if document:
+                        document.status = "ready" if document.scene_json else "failed"
+                        document.error = task.error
+                        document.generation_task_id = None
+                    release_agent_lock_for_task(session, task.id)
+                else:
+                    release_agent_lock_for_task(session, task.id)
                 session.commit()
 
 

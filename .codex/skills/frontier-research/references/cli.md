@@ -41,6 +41,27 @@ When a figure/table has `asset_path`, inspect that local file with the image-vie
 response means conversion is still pending; retry later rather than treating the partial result as
 the complete paper.
 
+## Architecture Reader
+
+```bash
+uv run frontier architecture status PAPER_ID
+uv run frontier architecture checkout PAPER_ID --output data/tasks/TASK_ID/scene.architecture.json --task-id TASK_ID --lock
+uv run frontier architecture validate --data @data/tasks/TASK_ID/scene.architecture.json
+uv run frontier architecture commit PAPER_ID --file data/tasks/TASK_ID/scene.architecture.json --revision REVISION --task-id TASK_ID
+uv run frontier architecture unlock PAPER_ID --task-id TASK_ID
+uv run frontier architecture command PAPER_ID --data '{"commands":[{"type":"focus","target":"action_expert"}]}'
+uv run frontier architecture upload-asset PAPER_ID data/tasks/TASK_ID/example.png
+```
+
+`checkout --lock` acquires the same single-writer lock used by the Web editor and then reads the
+latest Scene. Edit only the returned task-local file. `commit` rejects stale revisions and every
+validation error; warnings are returned for human review. Use `unlock` when an edit is abandoned.
+Initial generation tasks already hold the lock, so their checkout does not need `--lock`.
+
+`architecture command` accepts `focus`, `expand`, `collapse`, `highlight`, `highlight-path`,
+`dim-others`, `show-tensor`, and `clear-transient`. It validates all referenced IDs and emits a safe
+UI event through the paper conversation stream; it does not mutate the Scene.
+
 ## arXiv
 
 ```bash

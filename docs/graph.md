@@ -290,12 +290,17 @@ Line 2 → architecture / implementation
 Line 3 → keywords / defining characteristics
 ```
 
+Module 还可以保存独立的 `symbol`。`symbol` 只表示 TeX 数学标识符；
+`architecture` 回答“该模块采用什么具体模型、骨干、层堆栈或运算”；
+`keywords` 只描述训练状态、行为属性与配置。模型名不得放入 `keywords`，数学标识符也
+不得与 architecture 文本混写。
+
 例如：
 
 ```text
 Vision Encoder
-SigLIP
-ViT · pretrained
+SigLIP ViT-B/16
+pretrained
 ```
 
 或者：
@@ -889,7 +894,7 @@ React Store
 
 ## 18.1 Agent-facing format
 
-Agent直接读写：
+Agent 的工作交换格式为：
 
 ```text
 *.architecture.json
@@ -902,6 +907,11 @@ JSON 应：
 * 易编辑；
 * 有稳定 ID；
 * 不包含前端实现细节。
+
+在 Frontier 宿主应用中，这不表示 Agent 可以直接修改 Server 的应用数据文件。
+Server 仍然是唯一数据写入口：Agent 通过 CLI 将当前 Scene checkout 到
+`data/tasks/<task_id>/`，编辑临时 `*.architecture.json`，完成校验后再通过 CLI
+提交。Server 原子地校验 revision 并替换 canonical Scene。
 
 ---
 
@@ -925,7 +935,8 @@ React component 不应在各处直接操作 raw JSON。
 
 ```ts
 interface ArchitectureScene {
-  version: string
+  schemaVersion: 1
+  layoutEpoch: number
 
   nodes: ArchitectureNode[]
   tensors: TensorEntity[]
@@ -933,9 +944,28 @@ interface ArchitectureScene {
   annotations: AnnotationEntity[]
   groups: ArchitectureGroup[]
 
+  sources?: SourceReference[]
   assets?: AssetReference[]
 }
 ```
+
+`schemaVersion` 表示数据契约版本。`layoutEpoch` 只在 Agent 有意重做 canonical
+layout 时递增；普通文案、批注和知识更新不得使用户的 local view override 失效。
+
+Server 在 Scene 之外维护：
+
+```ts
+interface ArchitectureDocument {
+  paperId: string
+  status: "missing" | "generating" | "ready" | "failed"
+  revision: number
+  scene?: ArchitectureScene
+  taskId?: string
+  error?: string
+}
+```
+
+`revision` 由 Server 管理，不属于 Agent 可编辑的 Scene。
 
 ---
 
@@ -947,6 +977,7 @@ interface ModuleNode {
   type: "module"
 
   title: string
+  symbol?: string
   architecture?: string
   keywords?: string[]
 
@@ -955,11 +986,18 @@ interface ModuleNode {
   position: XYPosition
   size?: Size
 
-  children?: string[]
+  parentModuleId?: string
+  groupId?: string
 
   annotationIds?: string[]
+  sourceIds?: string[]
 }
 ```
+
+根节点 position 使用 Canvas 绝对坐标；子节点 position 相对 `parentModuleId`。
+v1 中一个节点最多有一个父 Module、最多属于一个 Group，Group 不嵌套，Module
+层级必须无环。children 和 Group membership 均由上述单向引用派生，禁止同时保存
+`children` / `childIds` 形成双重 source of truth。
 
 ---
 
@@ -982,7 +1020,11 @@ interface DataNode {
   position: XYPosition
   size?: Size
 
+  parentModuleId?: string
+  groupId?: string
+
   annotationIds?: string[]
+  sourceIds?: string[]
 }
 ```
 
@@ -1016,8 +1058,15 @@ interface ArchitectureEdge {
 
   kind?: "flow" | "conditioning"
   label?: string
+
+  sourceAnchor?: "left" | "right" | "top" | "bottom"
+  targetAnchor?: "left" | "right" | "top" | "bottom"
+  sourceIds?: string[]
 }
 ```
+
+Renderer 默认根据节点相对位置推断 anchor；只有复杂 composition 需要有限枚举覆盖，
+Agent 不能提交任意路径或 CSS。
 
 ---
 
@@ -1027,7 +1076,10 @@ interface ArchitectureEdge {
 interface AnnotationEntity {
   id: string
 
-  targetId?: string
+  target?: {
+    type: "node" | "edge" | "tensor"
+    id: string
+  }
 
   title?: string
   markdown: string
@@ -1048,31 +1100,57 @@ interface ArchitectureGroup {
 
   title: string
 
-  childIds: string[]
-
   position: XYPosition
   size: Size
 }
 ```
 
+Group membership 从 node 的 `groupId` 派生。
+
+---
+
+## 19.7 Source reference
+
+Architecture 是 Agent 对论文和代码的重构，MVP 必须保留最小可核验来源：
+
+```ts
+interface SourceReference {
+  id: string
+  kind: "paper-page" | "paper-figure" | "code" | "web"
+  pageNumber?: number
+  blockId?: string
+  url?: string
+  label?: string
+}
+```
+
+Module、Data、Tensor 和 Edge 可以通过 `sourceIds` 引用来源。高级 provenance 和
+自动 lineage 仍然不属于 MVP，但关键架构判断不能成为无法追溯的 Agent 断言。
+
 ---
 
 # 20. Scene Source of Truth
 
-外部 JSON 是架构的 canonical source。
+Architecture JSON 是组件和 Agent 工作流中的 canonical logical document。在 Frontier
+宿主应用中，Server 持有的数据库 JSON 是持久化 source of truth；`*.architecture.json`
+是 CLI checkout / validate / commit 的工作格式，而不是 Agent 可绕过 Server 直接写入的
+应用数据文件。
 
 Agent可以：
 
 ```text
-read architecture.json
-edit architecture.json
+checkout architecture.json
+edit task-local architecture.json
 validate
 render
 inspect
 edit again
+commit through CLI
 ```
 
 不要求 Agent 手工构造 JSON Patch。
+
+Server 保存前必须验证 Scene，并使用 expected revision 做 optimistic concurrency check。
 
 ---
 
@@ -1134,6 +1212,31 @@ Architecture Reader 是 controlled component。
 * backend API。
 
 宿主应用负责持久化。
+
+Frontier 宿主使用 SQLite JSON 保存 Scene、revision 和生成状态，使用
+`data/architectures/<paper_id>/assets/` 保存图片资产。这样 Scene 能进入现有可读 JSON
+备份，而图片沿用应用文件资产边界。
+
+---
+
+# 22.1 Single-writer editing lock
+
+Canonical Scene 任意时刻只允许一个写入者。锁是双向的，而不是只在 Agent 保存时做
+最后一次冲突检测：
+
+* 用户进入显式编辑模式时获取锁，Agent 此时不能修改 Scene；
+* Agent 确定需要修改时获取同一把锁，然后重新 checkout 最新 Scene；
+* 初次生成和重建任务在完整任务期间持有 Agent 锁；
+* 普通问答及 focus / highlight 等 view command 不获取编辑锁；
+* Agent 持锁时，用户仍可浏览、缩放、展开、使用 local displacement 和对话，只禁用
+  Module / Data / Annotation 等 canonical 内容编辑；
+* 用户锁通过浏览器心跳续期，退出编辑模式时释放；
+* Agent 锁绑定 TaskRun，在任务完成、失败或取消时释放；Server 启动时清理不再处于
+  queued / running 状态的遗留 Agent 锁；
+* 第二个写入者获取锁失败时必须得到明确的 locked response，禁止排队后静默覆盖。
+
+revision 校验仍作为进程异常、过期页面和多设备访问的最终安全边界。正常流程不提供
+复杂三方合并 UI；遇到异常 revision mismatch 时拒绝保存并重新加载。
 
 ---
 
@@ -1318,7 +1421,7 @@ upload implementation
 {
   "id": "rgb-example-1",
   "type": "image",
-  "src": "asset://paper/pi0/rgb-example-1",
+  "src": "asset://architecture/rgb-example-1",
   "caption": "Current RGB observation"
 }
 ```
@@ -1371,7 +1474,8 @@ localStorage 保存纯阅读状态。
 
 ```text
 paperId
-architecture version
+schemaVersion
+layoutEpoch
 ```
 
 例如：
@@ -1396,7 +1500,9 @@ interface ArchitectureViewState {
 }
 ```
 
-architecture version 大幅变化时，可以选择失效部分 override。
+普通 Scene revision 变化时保留 local view。`layoutEpoch` 变化时清除 canonical position
+相关 override，但稳定 ID 对应的 expand、pin 和 selection 状态仍可保留；schemaVersion
+不兼容时才整体失效。
 
 ---
 
@@ -1409,12 +1515,30 @@ JSON 应通过 schema validation 再进入 React。
 * ID 唯一；
 * Edge source/target 存在；
 * tensorId 存在；
-* children 存在；
+* parentModuleId 引用存在且父对象是 Module；
 * annotation target 存在；
-* group child 存在；
+* groupId 引用存在；
 * primary example 存在；
 * Position 数值有效；
 * hierarchy 不存在明显非法循环。
+
+Server 对 error 级问题拒绝保存。warning 可以保存，并在 Reader 中显示 diagnostics。
+由于 MVP 不引入自动浏览器截图，CLI validation 还应提供确定性的几何诊断：
+
+* canonical 节点明显重叠；
+* 子节点超出展开区域；
+* Group 无法容纳成员；
+* 非法或异常尺寸；
+* 缺失关键来源；
+* 无效 asset reference。
+
+用户在真实浏览器中检查最终视觉效果，并通过选中节点后的论文对话反馈问题。Agent
+根据 selected node IDs 和当前 revision 重新 checkout、修改和提交 Scene，不执行自动
+截图迭代。
+
+生成等待页只展示真实、文字形式的活动进度，包括论文读取、工具调用、Scene 校验与
+提交状态，以及任务目录中 `scene.architecture.json` 当前实际行数。不使用推测百分比，
+也不渲染尚未提交的中间 Scene。活动快照写入 TaskRun，因此刷新页面后仍可恢复。
 
 Validation error 不应造成整个 Reader crash。
 
@@ -1552,11 +1676,9 @@ Agent应该尽量保留：
 
 # 35. Codex Skill
 
-Codex Skill 的具体设计暂不属于本组件 v0.1 的实现范围。
+Codex Skill 更偏行为规范，而不是大量工具包装。
 
-未来 Skill 更偏行为规范，而不是大量工具包装。
-
-可能包括：
+至少包括：
 
 ```text
 how to research architecture
@@ -1564,13 +1686,14 @@ how to choose main-figure granularity
 how to reference original figure composition
 how to edit architecture JSON
 how to validate
-how to render
-how to inspect screenshot
+how to validate geometry
+how to use human visual feedback
 when to search cited papers
 when not to guess
 ```
 
-具体内容应结合现有项目和 Code Agent 的实际工作方式继续确定。
+Frontier 的 MVP 不要求 Agent 自动截图。`render / inspect` 在当前阶段指结构校验和用户
+反馈后的定向检查；未来可以再加入可选的视觉自动化。
 
 ---
 
@@ -1667,6 +1790,8 @@ Popout
 edit content / annotation
         ↓
 onSceneChange
+        ↓
+Server revision + single-writer lock
 ```
 
 同时加入：
@@ -1678,6 +1803,9 @@ Data thumbnail
 localStorage view state
 highlight command
 focus command
+on-demand Agent generation
+CLI checkout / validate / commit
+minimal source references
 ```
 
 做到这里已经可以实际用于论文阅读。
@@ -1700,6 +1828,7 @@ focus command
 * multiplayer；
 * complete Codex Skill；
 * automatic paper-to-architecture pipeline UI；
+* automatic screenshot / visual iteration；
 * animation-heavy data flow；
 * executable model graph。
 

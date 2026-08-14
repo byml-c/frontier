@@ -90,6 +90,42 @@ class PaperVersion(Base, TimestampMixin):
     metadata_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
 
 
+class ArchitectureDocument(Base, TimestampMixin):
+    __tablename__ = "architecture_documents"
+
+    paper_id: Mapped[str] = mapped_column(
+        ForeignKey("papers.id", ondelete="CASCADE"), primary_key=True
+    )
+    status: Mapped[str] = mapped_column(String(32), default="missing", index=True)
+    revision: Mapped[int] = mapped_column(Integer, default=0)
+    schema_version: Mapped[int] = mapped_column(Integer, default=1)
+    layout_epoch: Mapped[int] = mapped_column(Integer, default=1)
+    scene_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    source_pdf_version: Mapped[str | None] = mapped_column(String(128))
+    generation_task_id: Mapped[str | None] = mapped_column(String(36), index=True)
+    error: Mapped[str | None] = mapped_column(Text)
+    lock_owner_type: Mapped[str | None] = mapped_column(String(16), index=True)
+    lock_owner_id: Mapped[str | None] = mapped_column(String(128), index=True)
+    lock_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class ArchitectureAsset(Base, TimestampMixin):
+    __tablename__ = "architecture_assets"
+    __table_args__ = (
+        UniqueConstraint("paper_id", "content_hash", name="uq_architecture_asset_hash"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    paper_id: Mapped[str] = mapped_column(
+        ForeignKey("papers.id", ondelete="CASCADE"), index=True
+    )
+    content_hash: Mapped[str] = mapped_column(String(64), index=True)
+    original_name: Mapped[str] = mapped_column(String(255))
+    stored_name: Mapped[str] = mapped_column(String(128))
+    media_type: Mapped[str] = mapped_column(String(100))
+    size_bytes: Mapped[int] = mapped_column(Integer)
+
+
 class ResearchNode(Base, TimestampMixin):
     __tablename__ = "research_nodes"
 

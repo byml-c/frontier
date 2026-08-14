@@ -10,11 +10,12 @@ from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
-from .api import auth, briefs, conversations, daily, graph, papers, system
+from .api import architectures, auth, briefs, conversations, daily, graph, papers, system
 from .auth import request_is_internal, request_is_trusted
 from .config import settings
 from .database import SessionLocal, create_tables
 from .scheduler import start_scheduler, stop_scheduler
+from .services.architecture_scene import cleanup_stale_architecture_locks
 from .services.author_metadata import queue_cached_arxiv_author_metadata_backfill
 from .services.common import ensure_default_settings
 from .services.completion_summary import migrate_legacy_completion_summaries
@@ -27,6 +28,7 @@ async def lifespan(_app: FastAPI):
     create_tables()
     with SessionLocal() as session:
         ensure_default_settings(session)
+        cleanup_stale_architecture_locks(session)
         migrate_legacy_completion_summaries(session)
         migrate_legacy_daily_selections(session)
     queue_cached_arxiv_author_metadata_backfill()
@@ -98,6 +100,7 @@ app.include_router(auth.router)
 app.include_router(daily.router)
 app.include_router(papers.router)
 app.include_router(papers.tags_router)
+app.include_router(architectures.router)
 app.include_router(graph.router)
 app.include_router(briefs.router)
 app.include_router(conversations.router)

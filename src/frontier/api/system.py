@@ -415,6 +415,11 @@ def retry_task(
         raise HTTPException(status_code=404, detail="Task not found")
     if old.status not in {"failed", "completed"}:
         raise HTTPException(status_code=409, detail="Only finished tasks can be rerun")
+    if old.kind == "architecture_generation":
+        raise HTTPException(
+            status_code=409,
+            detail="请从论文架构页重新生成，以便先获取最新 revision 和编辑锁",
+        )
     new_id = enqueue_task(old.kind, {**old.payload_json, "retry_of": old.id})
     if settings.enable_codex_runs:
         background_tasks.add_task(run_task, new_id)

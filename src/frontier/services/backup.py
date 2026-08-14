@@ -10,6 +10,8 @@ from ..config import settings
 from ..database import SessionLocal
 from ..models import (
     AppSetting,
+    ArchitectureAsset,
+    ArchitectureDocument,
     Brief,
     BriefItem,
     Memory,
@@ -26,6 +28,8 @@ from ..models import (
 from .common import model_dict
 
 EXPORT_MODELS = {
+    "architecture_documents": ArchitectureDocument,
+    "architecture_assets": ArchitectureAsset,
     "papers": Paper,
     "research_nodes": ResearchNode,
     "research_edges": ResearchEdge,

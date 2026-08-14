@@ -66,6 +66,29 @@ Load the paper, PDF pages, annotations, reading progress, and existing paper con
 
 Keep simple word or sentence translations out of the Agent conversation. When the user asks about selected text, use its saved page and selection context.
 
+## Architecture Reader
+
+- Treat a paper Architecture Scene as a separate paper-reading asset, never as the cross-paper research graph.
+- Read the current architecture status before answering an architecture-grounded question. Use
+  `architecture command` for transient focus, expansion, highlighting, dimming, and tensor display;
+  these commands do not acquire the editing lock.
+- For a persistent change, checkout with `--lock --task-id`, edit only the task-local
+  `*.architecture.json`, validate it, and commit the complete Scene with the checkout revision.
+  Release the lock after an abandoned or failed edit. Never modify Server architecture files directly.
+- During initial generation, read the complete paper and inspect exact figures, tables, appendices,
+  cited architecture papers, or official code only when needed. Do not guess missing structure.
+- Use stable semantic IDs and preserve the paper's broad composition. Keep Module, Data, Tensor,
+  Edge, Annotation, and Group meanings distinct.
+- Keep Module fields strict: `title` is the functional role, `symbol` is a TeX identifier without
+  `$` delimiters, `architecture` is the concrete model family/backbone/layer stack/operator, and
+  `keywords` contain only properties or configurations. Architecture names such as ViT,
+  DINOv2-B/14, T5, ResNet, Transformer, MLP, and DiT never belong in `keywords`. Wrap formulas in
+  prose, labels, annotations, and keywords with `$...$`.
+- Add minimal `SourceReference` evidence for material architecture claims. Geometry and missing-source
+  warnings require review; validation errors must be fixed before commit.
+- Do not install or launch automatic screenshot tooling. The user reviews the real browser rendering
+  and provides visual feedback for the next targeted edit.
+
 ## Complete reading
 
 When the user explicitly finishes reading:

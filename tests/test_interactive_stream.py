@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from frontier import interactive_stream
-from frontier.interactive_stream import CodexStreamError, _tool_activity
+from frontier.interactive_stream import CodexStreamError, _architecture_ui_event, _tool_activity
 
 
 def test_app_server_command_uses_configured_profile(monkeypatch) -> None:
@@ -49,6 +49,27 @@ def test_python_command_is_exposed_as_computation_activity() -> None:
     assert activity is not None
     assert activity["label"] == "已完成数据计算"
     assert activity["status"] == "completed"
+
+
+def test_architecture_command_result_becomes_safe_ui_event() -> None:
+    event = _architecture_ui_event(
+        {
+            "type": "commandExecution",
+            "command": "uv run frontier architecture command paper-1 --data @commands.json",
+            "exitCode": 0,
+            "aggregatedOutput": (
+                '{"paperId":"paper-1","revision":3,'
+                '"architectureCommands":[{"type":"focus","target":"encoder"}]}'
+            ),
+        }
+    )
+
+    assert event == {
+        "type": "architecture_command",
+        "paper_id": "paper-1",
+        "revision": 3,
+        "commands": [{"type": "focus", "target": "encoder"}],
+    }
 
 
 def test_paper_commands_are_exposed_as_specific_activities() -> None:

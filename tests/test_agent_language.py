@@ -37,6 +37,18 @@ def test_interactive_agent_requires_chinese_public_reasoning(kind: str) -> None:
     assert "Simplified Chinese" in prompt
 
 
+def test_architecture_generation_separates_symbol_model_and_properties() -> None:
+    prompt = build_prompt(
+        TaskRun(id="architecture-task", kind="architecture_generation", payload_json={"paper_id": "paper-1"})
+    )
+
+    assert "is only its TeX identifier" in prompt
+    assert "`architecture` is the concrete model family" in prompt
+    assert "Never place a model architecture such as ViT" in prompt
+    assert 'architecture: "DINOv2-B/14"' in prompt
+    assert "wrap mathematical expressions in `$...$`" in prompt
+
+
 @pytest.mark.parametrize(
     ("kind", "payload", "ambiguity_action"),
     [

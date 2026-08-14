@@ -355,6 +355,8 @@ def _frontier_command_actions(command: str, payload: Any = None) -> tuple[str, s
         return f"正在搜索 arXiv 论文{suffix}", f"已搜索 arXiv 论文{suffix}"
     if group == "graph":
         return "正在读取或更新研究图谱", "已完成研究图谱操作"
+    if group == "architecture":
+        return "正在读取或更新论文架构", "已完成论文架构操作"
     if group == "memory":
         return "正在读取或更新研究记忆", "已完成研究记忆操作"
     return None
@@ -377,6 +379,36 @@ def _frontier_result_detail(command: str, payload: Any) -> str | None:
     visible = "；".join(titles[:3])
     remaining = len(titles) - 3
     return f"找到 {len(titles)} 篇：{visible}" + (f"；另有 {remaining} 篇" if remaining > 0 else "")
+
+
+def _architecture_ui_event(item: dict[str, Any]) -> dict[str, Any] | None:
+    if item.get("type") != "commandExecution" or item.get("exitCode") not in {None, 0}:
+        return None
+    command = str(item.get("command") or "")
+    tokens = _command_tokens(command)
+    payload = _command_output_payload(item)
+    if not isinstance(payload, dict):
+        return None
+    if tokens[:2] == ["architecture", "command"]:
+        commands = payload.get("architectureCommands")
+        paper_id = payload.get("paperId")
+        if isinstance(commands, list) and isinstance(paper_id, str):
+            return {
+                "type": "architecture_command",
+                "paper_id": paper_id,
+                "revision": payload.get("revision"),
+                "commands": commands,
+            }
+    if tokens[:2] == ["architecture", "commit"]:
+        paper_id = payload.get("paperId")
+        revision = payload.get("revision")
+        if isinstance(paper_id, str) and isinstance(revision, int):
+            return {
+                "type": "architecture_scene_updated",
+                "paper_id": paper_id,
+                "revision": revision,
+            }
+    return None
 
 
 def _tool_activity(item: dict[str, Any], status: str) -> dict[str, Any] | None:
@@ -623,6 +655,9 @@ def _stream_turn(
                 activity = _tool_activity(item, "completed")
                 if activity:
                     yield activity
+                ui_event = _architecture_ui_event(item)
+                if ui_event:
+                    yield ui_event
         elif method == "turn/completed":
             turn = params.get("turn", {})
             status = turn.get("status") if isinstance(turn, dict) else None

@@ -26,6 +26,7 @@ export default function App() {
         <Route path="/graph/:nodeId" element={<Suspense fallback={<Loading label="正在加载图谱" />}><GraphPage /></Suspense>} />
         <Route path="/library" element={<LibraryPage />} />
         <Route path="/paper/:paperId" element={<Suspense fallback={<Loading label="正在加载阅读器" />}><ReaderPage /></Suspense>} />
+        <Route path="/paper/:paperId/architecture" element={<Suspense fallback={<Loading label="正在加载架构" />}><ReaderPage /></Suspense>} />
         <Route path="/memory" element={<MemoryPage />} />
         <Route path="/tasks" element={<TasksPage />} />
         <Route path="/settings" element={<SettingsPage />} />

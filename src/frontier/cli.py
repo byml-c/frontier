@@ -3,12 +3,13 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
-from typing import Any
+from typing import Annotated, Any
 
 import httpx
 import typer
 
 from .auth import INTERNAL_TOKEN_HEADER, internal_api_token
+from .config import settings
 from .services.generated_content import (
     PAPER_ANALYSIS_PROSE_FIELDS,
     non_chinese_prose_fields,
@@ -24,6 +25,7 @@ task_app = typer.Typer(no_args_is_help=True)
 setting_app = typer.Typer(no_args_is_help=True)
 source_app = typer.Typer(no_args_is_help=True)
 bootstrap_app = typer.Typer(no_args_is_help=True)
+architecture_app = typer.Typer(no_args_is_help=True)
 
 app.add_typer(paper_app, name="paper")
 app.add_typer(graph_app, name="graph")
@@ -33,6 +35,7 @@ app.add_typer(task_app, name="task")
 app.add_typer(setting_app, name="setting")
 app.add_typer(source_app, name="source")
 app.add_typer(bootstrap_app, name="bootstrap")
+app.add_typer(architecture_app, name="architecture")
 
 
 def emit(value: Any) -> None:
@@ -263,6 +266,140 @@ def paper_finish(paper_id: str, data: str = typer.Option(..., help="JSON string 
         )
         raise typer.Exit(1)
     emit(client.request("POST", f"/api/papers/{paper_id}/finish", json=payload))
+
+
+def _task_output_path(path: Path) -> Path:
+    resolved = path.resolve()
+    task_root = settings.task_dir.resolve()
+    if resolved != task_root and task_root not in resolved.parents:
+        emit(
+            {
+                "ok": False,
+                "error": "Architecture working files must be under data/tasks/.",
+                "path": str(resolved),
+            }
+        )
+        raise typer.Exit(1)
+    resolved.parent.mkdir(parents=True, exist_ok=True)
+    return resolved
+
+
+@architecture_app.command("status")
+def architecture_status(paper_id: str) -> None:
+    emit(client.request("GET", f"/api/papers/{paper_id}/architecture"))
+
+
+@architecture_app.command("checkout")
+def architecture_checkout(
+    paper_id: str,
+    output: Annotated[Path, typer.Option("--output", "-o")],
+    task_id: Annotated[str | None, typer.Option("--task-id")] = None,
+    lock: Annotated[bool, typer.Option("--lock")] = False,
+) -> None:
+    if lock and not task_id:
+        emit({"ok": False, "error": "--lock requires --task-id"})
+        raise typer.Exit(1)
+    if lock:
+        client.request(
+            "POST",
+            f"/api/papers/{paper_id}/architecture/agent-lock",
+            json={"ownerId": task_id},
+        )
+    document = client.request("GET", f"/api/papers/{paper_id}/architecture")
+    scene = document.get("scene")
+    if not isinstance(scene, dict):
+        scene = {
+            "schemaVersion": 1,
+            "layoutEpoch": 1,
+            "nodes": [],
+            "tensors": [],
+            "edges": [],
+            "annotations": [],
+            "groups": [],
+            "sources": [],
+            "assets": [],
+        }
+    target = _task_output_path(output)
+    target.write_text(json.dumps(scene, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    emit(
+        {
+            "paper_id": paper_id,
+            "revision": document["revision"],
+            "status": document["status"],
+            "path": str(target),
+            "locked": lock,
+        }
+    )
+
+
+@architecture_app.command("validate")
+def architecture_validate(data: str = typer.Option(..., help="JSON string or @file")) -> None:
+    emit(client.request("POST", "/api/papers/_/architecture/validate", json=parse_json(data)))
+
+
+@architecture_app.command("commit")
+def architecture_commit(
+    paper_id: str,
+    file: Annotated[Path, typer.Option("--file", exists=True, dir_okay=False)],
+    revision: Annotated[int, typer.Option("--revision", min=0)],
+    task_id: Annotated[str, typer.Option("--task-id")],
+) -> None:
+    scene = json.loads(file.read_text(encoding="utf-8"))
+    emit(
+        client.request(
+            "POST",
+            f"/api/papers/{paper_id}/architecture/agent-commit",
+            json={"expectedRevision": revision, "taskId": task_id, "scene": scene},
+        )
+    )
+
+
+@architecture_app.command("unlock")
+def architecture_unlock(paper_id: str, task_id: str = typer.Option(..., "--task-id")) -> None:
+    emit(
+        client.request(
+            "POST",
+            f"/api/papers/{paper_id}/architecture/agent-lock/release",
+            json={"ownerId": task_id},
+        )
+    )
+
+
+@architecture_app.command("command")
+def architecture_command(paper_id: str, data: str = typer.Option(...)) -> None:
+    payload = parse_json(data)
+    if isinstance(payload, list):
+        payload = {"commands": payload}
+    emit(
+        client.request(
+            "POST", f"/api/papers/{paper_id}/architecture/commands", json=payload
+        )
+    )
+
+
+@architecture_app.command("upload-asset")
+def architecture_upload_asset(paper_id: str, path: Path) -> None:
+    if not path.is_file():
+        emit({"ok": False, "error": f"File not found: {path}"})
+        raise typer.Exit(1)
+    media_type = {
+        ".png": "image/png",
+        ".jpg": "image/jpeg",
+        ".jpeg": "image/jpeg",
+        ".webp": "image/webp",
+    }.get(path.suffix.lower())
+    if not media_type:
+        emit({"ok": False, "error": "Only PNG, JPEG, and WebP images are supported."})
+        raise typer.Exit(1)
+    with path.open("rb") as file_handle:
+        emit(
+            client.request(
+                "POST",
+                f"/api/papers/{paper_id}/architecture/assets",
+                files={"file": (path.name, file_handle, media_type)},
+                timeout=180,
+            )
+        )
 
 
 @graph_app.command("list")

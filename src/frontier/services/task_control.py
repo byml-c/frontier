@@ -4,7 +4,8 @@ from sqlalchemy.orm import Session
 from sqlalchemy.sql import select, update
 
 from ..interactive_stream import cancel_codex_run
-from ..models import Conversation, Message, TaskRun, utcnow
+from ..models import ArchitectureDocument, Conversation, Message, TaskRun, utcnow
+from .architecture_scene import release_agent_lock_for_task
 
 ACTIVE_TASK_STATUSES = {"queued", "running"}
 
@@ -99,5 +100,12 @@ def cancel_task_run(session: Session, task: TaskRun) -> bool | None:
         session.rollback()
         session.refresh(task)
         return None
+    if task.kind == "architecture_generation":
+        document = session.get(ArchitectureDocument, task.payload_json.get("paper_id"))
+        if document:
+            document.status = "ready" if document.scene_json else "missing"
+            document.error = None
+            document.generation_task_id = None
+    release_agent_lock_for_task(session, task.id)
     session.commit()
     return cancel_codex_run(task.id)

@@ -20,6 +20,7 @@ from ..database import SessionLocal, get_session
 from ..interactive_stream import encode_stream_event, stream_codex_prompt
 from ..models import Conversation, Message, Paper, TaskRun, utcnow
 from ..schemas import ConversationCreate, MessageCreate
+from ..services.architecture_scene import release_agent_lock_for_task
 from ..services.common import model_dict
 from ..services.task_control import cancelled_activities
 
@@ -563,6 +564,14 @@ def stream_message(
                     yield activity_event(
                         **{key: value for key, value in event.items() if key != "type"}
                     )
+                elif event["type"] in {
+                    "architecture_command",
+                    "architecture_scene_updated",
+                }:
+                    yield encode_stream_event(
+                        event["type"],
+                        **{key: value for key, value in event.items() if key != "type"},
+                    )
             with SessionLocal() as runner_session:
                 current_conversation = runner_session.get(Conversation, conversation_id)
                 running = runner_session.get(TaskRun, task.id)
@@ -628,6 +637,7 @@ def stream_message(
                 }
                 if current_conversation:
                     current_conversation.codex_session_id = thread_id
+                release_agent_lock_for_task(runner_session, task.id)
                 runner_session.commit()
                 assistant_payload = model_dict(assistant)
             terminal = True
@@ -648,6 +658,7 @@ def stream_message(
                         runtime=runtime,
                         usage=usage,
                     )
+                    release_agent_lock_for_task(runner_session, task.id)
                     runner_session.commit()
                 else:
                     failed_activities = _failed_activities(activity_log, str(exc))
@@ -672,6 +683,7 @@ def stream_message(
                         "activities": failed_activities,
                         **_runtime_usage_payload(runtime, usage),
                     }
+                release_agent_lock_for_task(runner_session, task.id)
                 runner_session.commit()
             terminal = True
             if cancelled:
@@ -716,6 +728,7 @@ def stream_message(
                             "activities": interrupted_activities,
                             **_runtime_usage_payload(runtime, usage),
                         }
+                    release_agent_lock_for_task(runner_session, task.id)
                     runner_session.commit()
 
     return StreamingResponse(
