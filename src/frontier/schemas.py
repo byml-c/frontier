@@ -230,6 +230,7 @@ class MessageCreate(BaseModel):
     content: str
     selected_text: str | None = None
     page_number: int | None = None
+    retry_assistant_id: str | None = None
     context_json: dict[str, Any] = Field(default_factory=dict)
 
 

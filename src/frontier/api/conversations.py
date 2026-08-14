@@ -293,31 +293,111 @@ def stream_message(
     session: Annotated[Session, Depends(get_session)],
 ) -> StreamingResponse:
     conversation = _conversation_or_404(session, conversation_id)
-    context = dict(payload.context_json)
-    if payload.selected_text:
-        context["selected_text"] = payload.selected_text
-    if payload.page_number:
-        context["page_number"] = payload.page_number
-    message = Message(
-        conversation_id=conversation.id,
-        role="user",
-        content=payload.content,
-        context_json=context,
-    )
-    session.add(message)
-    session.flush()
     task_kind = "paper_chat" if conversation.kind == "paper" else "global_chat"
-    task_payload = {
-        "conversation_id": conversation.id,
-        "message": payload.content,
-        "context": context,
-    }
+    message: Message | None = None
+    assistant: Message
+    initial_content = ""
+    assistant_context_base: dict = {}
+    if payload.retry_assistant_id:
+        assistant = session.get(Message, payload.retry_assistant_id)
+        latest_assistant = session.scalar(
+            select(Message)
+            .where(
+                Message.conversation_id == conversation.id,
+                Message.role == "assistant",
+            )
+            .order_by(Message.created_at.desc())
+            .limit(1)
+        )
+        if (
+            not assistant
+            or assistant.conversation_id != conversation.id
+            or assistant.role != "assistant"
+        ):
+            raise HTTPException(status_code=404, detail="未找到需要继续的回答")
+        if not latest_assistant or latest_assistant.id != assistant.id:
+            raise HTTPException(status_code=409, detail="只能继续最后一条未完成回答")
+        previous_context = dict(assistant.context_json or {})
+        previous_status = previous_context.get("stream_status")
+        if previous_status not in {"failed", "interrupted"}:
+            raise HTTPException(status_code=409, detail="这条回答当前不能继续")
+        previous_task_id = previous_context.get("task_id")
+        previous_task = (
+            session.get(TaskRun, previous_task_id)
+            if isinstance(previous_task_id, str)
+            else None
+        )
+        initial_content = assistant.content.rstrip()
+        previous_activities = previous_context.get("activities")
+        activity_summary = "\n".join(
+            f"- [{item.get('status', 'unknown')}] {item.get('label', '')}"
+            + (f": {item.get('detail')}" if item.get("detail") else "")
+            for item in (
+                previous_activities if isinstance(previous_activities, list) else []
+            )
+            if isinstance(item, dict) and item.get("label")
+        )[-6_000:]
+        continuation_request = (
+            "Continue the previous unfinished answer from exactly where the persisted partial "
+            "response stopped. Do not repeat the existing response or redo completed tool calls "
+            "unless verification is necessary. Finish the original request in concise Simplified "
+            "Chinese.\n\nPersisted partial response:\n"
+            f"{initial_content[-12_000:] or '（尚未生成正文）'}\n\n"
+            "Persisted activity log (it may be incomplete):\n"
+            f"{activity_summary or '（没有已保存的工具活动）'}"
+        )
+        context = dict((previous_task.payload_json or {}).get("context", {})) if previous_task else {}
+        task_payload = {
+            "conversation_id": conversation.id,
+            "message": continuation_request,
+            "context": context,
+            "retry_of": previous_task_id,
+            "retry_assistant_id": assistant.id,
+        }
+        retry_history = previous_context.get("retry_history")
+        assistant_context_base = {
+            "retry_history": [
+                *(
+                    [item for item in retry_history if isinstance(item, dict)]
+                    if isinstance(retry_history, list)
+                    else []
+                ),
+                {
+                    "task_id": previous_task_id,
+                    "stream_status": previous_status,
+                    "stream_error": previous_context.get("stream_error"),
+                },
+            ],
+            "retry_of": previous_task_id,
+        }
+    else:
+        if not payload.content.strip():
+            raise HTTPException(status_code=422, detail="消息不能为空")
+        context = dict(payload.context_json)
+        if payload.selected_text:
+            context["selected_text"] = payload.selected_text
+        if payload.page_number:
+            context["page_number"] = payload.page_number
+        message = Message(
+            conversation_id=conversation.id,
+            role="user",
+            content=payload.content,
+            context_json=context,
+        )
+        session.add(message)
+        session.flush()
+        task_payload = {
+            "conversation_id": conversation.id,
+            "message": payload.content,
+            "context": context,
+        }
     if conversation.kind == "paper":
         task_payload["paper_id"] = conversation.reference_id
     task = TaskRun(kind=task_kind, payload_json=task_payload)
     session.add(task)
     session.flush()
-    message.context_json = {**context, "task_id": task.id}
+    if message:
+        message.context_json = {**context, "task_id": task.id}
     session_id = conversation.codex_session_id
     paper_id = conversation.reference_id if conversation.kind == "paper" else None
     prompt = build_prompt(task)
@@ -325,25 +405,29 @@ def stream_message(
         session,
         conversation.id,
         prompt,
-        exclude_message_id=message.id,
+        exclude_message_id=message.id if message else None,
     )
-    assistant = Message(
-        conversation_id=conversation_id,
-        role="assistant",
-        content="",
-        context_json={
-            "task_id": task.id,
-            "stream_status": "queued",
-            "activities": [],
-        },
-    )
-    session.add(assistant)
+    if not payload.retry_assistant_id:
+        assistant = Message(
+            conversation_id=conversation_id,
+            role="assistant",
+            content="",
+            context_json={},
+        )
+        session.add(assistant)
+    assistant.context_json = {
+        **assistant_context_base,
+        "task_id": task.id,
+        "stream_status": "queued",
+        "activities": [],
+    }
     session.commit()
     assistant_id = assistant.id
 
     def generate():  # type: ignore[no-untyped-def]
         activity_log: list[dict] = []
-        content = ""
+        content = initial_content
+        continuation_started = False
         thread_id = session_id
         last_snapshot_at = 0.0
         last_snapshot_length = 0
@@ -404,7 +488,10 @@ def stream_message(
             )
             return encode_stream_event("activity", **event)
 
-        yield encode_stream_event("meta", task_id=task.id, message=model_dict(message))
+        meta = {"task_id": task.id, "retry_assistant_id": payload.retry_assistant_id}
+        if message:
+            meta["message"] = model_dict(message)
+        yield encode_stream_event("meta", **meta)
         yield activity_event(
             activity_id="agent-startup",
             kind="status",
@@ -464,9 +551,14 @@ def stream_message(
                     persist_snapshot(force=True)
                     yield encode_stream_event("usage", **usage)
                 elif event["type"] == "delta":
-                    content += event["delta"]
+                    delta = event["delta"]
+                    if initial_content and not continuation_started:
+                        if not content.endswith("\n") and not delta.startswith("\n"):
+                            content += "\n\n"
+                        continuation_started = True
+                    content += delta
                     persist_snapshot()
-                    yield encode_stream_event("delta", delta=event["delta"])
+                    yield encode_stream_event("delta", delta=delta)
                 elif event["type"] == "activity":
                     yield activity_event(
                         **{key: value for key, value in event.items() if key != "type"}
@@ -528,6 +620,7 @@ def stream_message(
                 assistant.content = content
                 assistant.citations_json = _parse_citations(content, paper_id)
                 assistant.context_json = {
+                    **(assistant.context_json or {}),
                     "task_id": task.id,
                     "stream_status": "completed",
                     "activities": completed_activities,
@@ -572,6 +665,7 @@ def stream_message(
                 if failed_assistant and not cancelled:
                     failed_assistant.content = content
                     failed_assistant.context_json = {
+                        **(failed_assistant.context_json or {}),
                         "task_id": task.id,
                         "stream_status": "failed",
                         "stream_error": str(exc),
@@ -615,6 +709,7 @@ def stream_message(
                     if interrupted_assistant and not cancelled:
                         interrupted_assistant.content = content
                         interrupted_assistant.context_json = {
+                            **(interrupted_assistant.context_json or {}),
                             "task_id": task.id,
                             "stream_status": "interrupted",
                             "stream_error": interruption,

@@ -9,7 +9,12 @@ from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from ..auth import anonymous_device_id, anonymous_profile
+from ..auth import (
+    anonymous_device_id,
+    anonymous_profile,
+    current_anonymous_device_id,
+    replace_anonymous_device,
+)
 from ..database import get_session
 from ..models import (
     Annotation,
@@ -168,12 +173,43 @@ def _discussion(session: Session, paper: Paper, viewer_id: str) -> dict:
         .order_by(DailyReview.created_at.desc())
     ).all()
     average = sum(item.score for item in reviews) / len(reviews) if reviews else None
+    has_posted = bool(
+        session.scalar(select(DailyReview.id).where(DailyReview.device_id == viewer_id).limit(1))
+        or session.scalar(select(DailyReply.id).where(DailyReply.device_id == viewer_id).limit(1))
+    )
     return {
         "paper_id": paper.id,
         "viewer": anonymous_profile(viewer_id),
+        "can_rotate_identity": not has_posted,
         "review_count": len(reviews),
         "average_score": round(average, 2) if average is not None else None,
         "reviews": [_serialize_review(session, review, viewer_id) for review in reviews],
+    }
+
+
+@router.post("/identity/rotate")
+def rotate_identity(
+    request: Request,
+    response: Response,
+    session: Annotated[Session, Depends(get_session)],
+) -> dict:
+    viewer_id = current_anonymous_device_id(request)
+    has_posted = bool(
+        viewer_id
+        and (
+            session.scalar(
+                select(DailyReview.id).where(DailyReview.device_id == viewer_id).limit(1)
+            )
+            or session.scalar(
+                select(DailyReply.id).where(DailyReply.device_id == viewer_id).limit(1)
+            )
+        )
+    )
+    if has_posted:
+        raise HTTPException(status_code=409, detail="发表内容后不能更换匿名 ID")
+    return {
+        "viewer": anonymous_profile(replace_anonymous_device(response)),
+        "can_rotate_identity": True,
     }
 
 

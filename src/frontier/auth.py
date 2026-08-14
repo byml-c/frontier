@@ -84,17 +84,7 @@ def _anonymous_token(device_id: str) -> str:
     return f"{device_id}.{_signature(device_id, 'anonymous')}"
 
 
-def anonymous_device_id(request: Request, response: Response) -> str:
-    token = request.cookies.get(ANONYMOUS_COOKIE_NAME)
-    if token:
-        try:
-            device_id, signature = token.split(".", 1)
-            if len(device_id) == 32 and hmac.compare_digest(
-                signature, _signature(device_id, "anonymous")
-            ):
-                return device_id
-        except ValueError:
-            pass
+def replace_anonymous_device(response: Response) -> str:
     device_id = uuid.uuid4().hex
     response.set_cookie(
         ANONYMOUS_COOKIE_NAME,
@@ -106,6 +96,26 @@ def anonymous_device_id(request: Request, response: Response) -> str:
         path="/",
     )
     return device_id
+
+
+def current_anonymous_device_id(request: Request) -> str | None:
+    token = request.cookies.get(ANONYMOUS_COOKIE_NAME)
+    if token:
+        try:
+            device_id, signature = token.split(".", 1)
+            if len(device_id) == 32 and hmac.compare_digest(
+                signature, _signature(device_id, "anonymous")
+            ):
+                return device_id
+        except ValueError:
+            pass
+    return None
+
+
+def anonymous_device_id(request: Request, response: Response) -> str:
+    if device_id := current_anonymous_device_id(request):
+        return device_id
+    return replace_anonymous_device(response)
 
 
 def anonymous_profile(device_id: str) -> dict[str, str]:

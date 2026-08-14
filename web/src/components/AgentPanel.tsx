@@ -1,9 +1,11 @@
 import CloseRounded from "@mui/icons-material/CloseRounded";
 import PsychologyRounded from "@mui/icons-material/PsychologyRounded";
+import ReplayRounded from "@mui/icons-material/ReplayRounded";
 import {
   Alert,
   Avatar,
   Box,
+  Button,
   Drawer,
   IconButton,
   Paper,
@@ -112,6 +114,32 @@ export function AgentPanel({ open, onClose, width, onWidthChange }: Props) {
     }
   }
 
+  async function retryAssistant(assistantId: string) {
+    if (!conversation.data || active) return;
+    const controller = new AbortController();
+    streamController.current = controller;
+    cancellingRef.current = false;
+    setStreaming(""); setActivities([]); setError(""); setLiveTaskId(null); setLiveAgentState({}); setSending(true);
+    try {
+      await streamApi(`/api/conversations/${conversation.data.id}/messages/stream`, { content: "继续未完成的回答", retry_assistant_id: assistantId }, (streamEvent) => {
+        setLiveAgentState((value) => updateAgentStateFromStream(value, streamEvent));
+        if (streamEvent.type === "meta" && typeof streamEvent.task_id === "string") setLiveTaskId(streamEvent.task_id);
+        if (streamEvent.type === "delta") setStreaming((value) => value + String(streamEvent.delta ?? ""));
+        if (streamEvent.type === "activity") setActivities((value) => updateActivities(value, streamEvent));
+      }, controller.signal);
+    } catch (cause) {
+      if (!cancellingRef.current && !isRequestAbort(cause)) {
+        setActivities((value) => failRunningActivities(value));
+        setError(cause instanceof Error ? cause.message : String(cause));
+      }
+    } finally {
+      streamController.current = null;
+      setSending(false);
+      await queryClient.invalidateQueries({ queryKey: ["global-conversation"] });
+      setStreaming(""); setActivities([]); setLiveTaskId(null); setLiveAgentState({});
+    }
+  }
+
   function startResize(event: React.PointerEvent) {
     event.preventDefault();
     const startX = event.clientX;
@@ -131,7 +159,7 @@ export function AgentPanel({ open, onClose, width, onWidthChange }: Props) {
       </Stack>
       <ConversationScroller contentVersion={`${open}:${conversation.data?.messages.length ?? 0}:${liveUser.length}:${streaming.length}:${activities.map((item) => item.status).join(",")}:${sending}`}>
         {!conversation.data?.messages.length && !liveUser && <Paper sx={{ p: 2.5, bgcolor: "background.default" }}><Typography fontWeight={700}>可以从这里开始</Typography><Typography variant="body2" color="text.secondary" sx={{ mt: .75 }}>询问近期研究进展、比较论文，或直接要求整理当前图谱。</Typography></Paper>}
-        {conversation.data?.messages.map((message) => <ChatBubble key={message.id} role={message.role} content={message.content} activities={activitiesFromContext(message.context_json)} pending={message.context_json.stream_status === "queued" || message.context_json.stream_status === "running"} turnStatus={typeof message.context_json.stream_status === "string" ? message.context_json.stream_status : undefined} />)}
+        {conversation.data?.messages.map((message) => <ChatBubble key={message.id} role={message.role} content={message.content} activities={activitiesFromContext(message.context_json)} pending={message.context_json.stream_status === "queued" || message.context_json.stream_status === "running"} turnStatus={typeof message.context_json.stream_status === "string" ? message.context_json.stream_status : undefined} retryDisabled={active} onRetry={message.role === "assistant" ? () => retryAssistant(message.id) : undefined} />)}
         {liveUser && <ChatBubble role="user" content={liveUser} />}
         {(streaming || sending || activities.length > 0) && <Box sx={{ alignSelf: "stretch" }}><AgentActivity items={activities} pending={sending && !cancelling}>{streaming ? <MarkdownMessage content={streaming} /> : undefined}</AgentActivity></Box>}
         {error && <Alert severity="error">{error}</Alert>}
@@ -145,7 +173,8 @@ export function AgentPanel({ open, onClose, width, onWidthChange }: Props) {
 
 function hasActiveConversationTurn(conversation?: Conversation): boolean { return Boolean(activeConversationTask(conversation)); }
 
-function ChatBubble({ role, content, activities = [], pending = false, turnStatus }: { role: "user" | "assistant"; content: string; activities?: AgentActivityItem[]; pending?: boolean; turnStatus?: string }) {
-  if (role === "assistant") return <Box sx={{ alignSelf: "stretch" }}><AgentActivity items={activities} pending={pending} turnStatus={turnStatus}>{content ? <MarkdownMessage content={content} /> : undefined}</AgentActivity></Box>;
+function ChatBubble({ role, content, activities = [], pending = false, turnStatus, retryDisabled = false, onRetry }: { role: "user" | "assistant"; content: string; activities?: AgentActivityItem[]; pending?: boolean; turnStatus?: string; retryDisabled?: boolean; onRetry?: () => void }) {
+  const retryable = turnStatus === "failed" || turnStatus === "interrupted";
+  if (role === "assistant") return <Box sx={{ alignSelf: "stretch" }}><AgentActivity items={activities} pending={pending} turnStatus={turnStatus}>{content ? <MarkdownMessage content={content} /> : undefined}</AgentActivity>{retryable && onRetry && <Button size="small" startIcon={<ReplayRounded />} disabled={retryDisabled} onClick={onRetry} sx={{ mt: .75 }}>继续生成</Button>}</Box>;
   return <Box sx={{ alignSelf: "flex-end", maxWidth: "85%" }}><Paper elevation={0} sx={{ px: 1.75, py: 1.25, bgcolor: "primary.main", border: 0, color: "primary.contrastText", borderRadius: "16px 16px 4px 16px" }}><MarkdownMessage content={content} inverted /></Paper></Box>;
 }

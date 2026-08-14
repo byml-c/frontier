@@ -1033,6 +1033,83 @@ def test_streamed_conversation_persists_partial_answer_and_failed_activity(
     assert task["result_json"]["response"] == "已经生成的部分回答"
 
 
+def test_failed_conversation_answer_can_continue_without_a_duplicate_user_message(
+    client: TestClient,
+    monkeypatch,
+) -> None:
+    from frontier.api import conversations
+
+    monkeypatch.setattr(conversations.settings, "enable_codex_runs", True)
+
+    def failed_stream(*_args, **_kwargs):
+        yield {"type": "thread", "thread_id": "thread-retry"}
+        yield {"type": "delta", "delta": "已有的部分回答。"}
+        raise RuntimeError("temporary disconnect")
+
+    monkeypatch.setattr(conversations, "stream_codex_prompt", failed_stream)
+    conversation = client.post(
+        "/api/conversations", json={"kind": "global", "title": "Retry continuation"}
+    ).json()
+    first = client.post(
+        f"/api/conversations/{conversation['id']}/messages/stream",
+        json={"content": "请完整回答"},
+    )
+    assert first.status_code == 200
+    failed_detail = client.get(f"/api/conversations/{conversation['id']}").json()
+    failed_assistant = failed_detail["messages"][-1]
+    assert failed_assistant["context_json"]["stream_status"] == "failed"
+
+    def continued_stream(prompt, **_kwargs):
+        assert "Persisted partial response" in prompt
+        assert "已有的部分回答。" in prompt
+        yield {"type": "thread", "thread_id": "thread-retry"}
+        yield {"type": "delta", "delta": "这是继续完成的内容。"}
+
+    monkeypatch.setattr(conversations, "stream_codex_prompt", continued_stream)
+    retried = client.post(
+        f"/api/conversations/{conversation['id']}/messages/stream",
+        json={
+            "content": "继续未完成的回答",
+            "retry_assistant_id": failed_assistant["id"],
+        },
+    )
+    assert retried.status_code == 200, retried.text
+    detail = client.get(f"/api/conversations/{conversation['id']}").json()
+    assert [message["role"] for message in detail["messages"]] == ["user", "assistant"]
+    assistant = detail["messages"][-1]
+    assert assistant["id"] == failed_assistant["id"]
+    assert assistant["content"] == "已有的部分回答。\n\n这是继续完成的内容。"
+    assert assistant["context_json"]["stream_status"] == "completed"
+    assert assistant["context_json"]["retry_history"][0]["stream_status"] == "failed"
+
+
+def test_completed_or_cancelled_conversation_answer_cannot_be_retried(
+    client: TestClient,
+) -> None:
+    from frontier.database import SessionLocal
+    from frontier.models import Message
+
+    conversation = client.post(
+        "/api/conversations", json={"kind": "global", "title": "No retry"}
+    ).json()
+    with SessionLocal() as session:
+        assistant = Message(
+            conversation_id=conversation["id"],
+            role="assistant",
+            content="已经完成",
+            context_json={"stream_status": "completed"},
+        )
+        session.add(assistant)
+        session.commit()
+        assistant_id = assistant.id
+
+    response = client.post(
+        f"/api/conversations/{conversation['id']}/messages/stream",
+        json={"content": "继续", "retry_assistant_id": assistant_id},
+    )
+    assert response.status_code == 409
+
+
 def test_streamed_conversation_keeps_runtime_usage_when_cancelled(
     client: TestClient,
     monkeypatch,

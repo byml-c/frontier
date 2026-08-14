@@ -3,6 +3,7 @@ import CloseRounded from "@mui/icons-material/CloseRounded";
 import EditRounded from "@mui/icons-material/EditRounded";
 import ExpandMoreRounded from "@mui/icons-material/ExpandMoreRounded";
 import ReplyRounded from "@mui/icons-material/ReplyRounded";
+import RefreshRounded from "@mui/icons-material/RefreshRounded";
 import SendRounded from "@mui/icons-material/SendRounded";
 import {
   Alert,
@@ -71,6 +72,10 @@ export function DailyDiscussion({ paperId }: { paperId: string }) {
     queryFn: () => api<DailyDiscussionPayload>(`/api/daily/papers/${paperId}/reviews`),
     enabled: open,
   });
+  const rotateIdentity = useMutation({
+    mutationFn: () => api("/api/daily/identity/rotate", jsonBody({})),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["daily-discussion", paperId] }),
+  });
   const mentionColors = useMemo(() => {
     const profiles = discussion.data?.reviews.flatMap((review) => [review.author, ...review.replies.map((reply) => reply.author)]) ?? [];
     return Object.fromEntries(profiles.map((profile) => [profile.name, profile.color]));
@@ -90,10 +95,11 @@ export function DailyDiscussion({ paperId }: { paperId: string }) {
       <Stack sx={{ height: "100%", minHeight: 0 }}>
         <Stack direction="row" alignItems="center" spacing={1.5} sx={{ px: { xs: 2, md: 3 }, py: 1.5, borderBottom: 1, borderColor: "divider" }}>
           <Box sx={{ flex: 1, minWidth: 0 }}><Typography variant="h3">论文评分与讨论</Typography>{discussion.data && <Typography variant="caption" color="text.secondary">{discussion.data.review_count} 份评价{discussion.data.average_score != null ? ` · 平均 ${discussion.data.average_score}/6` : ""}</Typography>}</Box>
-          {discussion.data?.viewer && <Profile profile={discussion.data.viewer} mine />}
+          {discussion.data?.viewer && <Stack direction="row" alignItems="center" spacing={.25}><Profile profile={discussion.data.viewer} mine />{discussion.data.can_rotate_identity && <Tooltip title="换一个随机 ID"><IconButton size="small" aria-label="换一个随机匿名 ID" disabled={rotateIdentity.isPending} onClick={() => rotateIdentity.mutate()}>{rotateIdentity.isPending ? <CircularProgress size={17} /> : <RefreshRounded fontSize="small" />}</IconButton></Tooltip>}</Stack>}
         </Stack>
         <Box sx={{ flex: 1, minHeight: 0, overflowY: "auto", p: { xs: 1.5, md: 3 }, pb: 12 }}>
-          {discussion.isLoading ? <Loading label="正在加载讨论" /> : discussion.error ? <ErrorState error={discussion.error} /> : <Stack spacing={2} sx={{ maxWidth: 920, mx: "auto" }}>
+          {discussion.isLoading ? <Loading label="正在加载讨论" /> : discussion.error ? <ErrorState error={discussion.error} /> : <Stack spacing={2} sx={{ width: "100%", maxWidth: { md: 680 }, mx: "auto" }}>
+            {rotateIdentity.error && <Alert severity="error">{rotateIdentity.error.message}</Alert>}
             {!composing ? <Button variant="contained" onClick={() => setComposing(true)} sx={{ alignSelf: "flex-start" }}>{myReview ? "编辑我的评审" : "发表评分与评论"}</Button> : <ReviewComposer key={myReview?.id || "new"} paperId={paperId} review={myReview} onCancel={() => setComposing(false)} onSaved={async () => { setComposing(false); await refresh(); }} />}
             {!discussion.data?.reviews.length ? <Typography color="text.secondary" sx={{ py: 5, textAlign: "center" }}>还没有评价，欢迎留下第一份匿名评审。</Typography> : discussion.data.reviews.map((review) => <ReviewCard key={review.id} review={review} open={expanded.has(review.id)} replying={replyingTo === review.id} replyDraft={replyDrafts[review.id] || ""} mentionColors={mentionColors} onEdit={() => setComposing(true)} onToggle={() => setExpanded((current) => { const next = new Set(current); if (next.has(review.id)) next.delete(review.id); else next.add(review.id); return next; })} onReply={(author) => openReply(review, author)} onReplyDraft={(value) => setReplyDrafts((current) => ({ ...current, [review.id]: value }))} onReplyClose={() => setReplyingTo(null)} onReplySaved={async () => { setReplyingTo(null); setReplyDrafts((current) => ({ ...current, [review.id]: "" })); await refresh(); }} />)}
           </Stack>}

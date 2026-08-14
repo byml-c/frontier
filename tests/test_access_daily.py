@@ -94,6 +94,15 @@ def test_daily_discussion_is_bound_to_the_paper_across_dates(client: TestClient)
             f"/api/daily/{target}", json={"paper_id": paper["id"]}
         ).status_code == 200
 
+    initial_discussion = client.get(f"/api/daily/papers/{paper['id']}/reviews").json()
+    assert initial_discussion["can_rotate_identity"] is True
+    old_identity = client.cookies.get("frontier_anonymous_device")
+    rotated = client.post("/api/daily/identity/rotate")
+    assert rotated.status_code == 200
+    assert rotated.json()["can_rotate_identity"] is True
+    assert len(rotated.json()["viewer"]["name"]) == 4
+    assert client.cookies.get("frontier_anonymous_device") != old_identity
+
     created = client.post(
         f"/api/daily/papers/{paper['id']}/reviews",
         json={"score": 5, "confidence": 4, "content": "**有价值**，但还需验证。"},
@@ -104,6 +113,7 @@ def test_daily_discussion_is_bound_to_the_paper_across_dates(client: TestClient)
     assert review["initial_score"] == 5
     assert len(review["author"]["name"]) == 4
     assert review["author"]["color"].startswith("#")
+    assert client.post("/api/daily/identity/rotate").status_code == 409
 
     duplicate = client.post(
         f"/api/daily/papers/{paper['id']}/reviews",

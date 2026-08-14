@@ -282,7 +282,21 @@ def _build_block(
 
 def _figure_asset_url(node: Tag, base_url: str) -> str | None:
     """Return the primary arXiv figure asset across LaTeXML media variants."""
-    for media in node.find_all(["img", "object", "embed", "source"]):
+    media_nodes = node.find_all(["img", "object", "embed", "source"])
+    if not media_nodes:
+        # LaTeXML sometimes emits a full-width teaser as a standalone, textless
+        # paragraph immediately before a caption-only figure (for example
+        # arXiv:2608.11739 Figure 1). Treat that pair as one semantic figure.
+        previous = node.find_previous_sibling()
+        if isinstance(previous, Tag):
+            previous_classes = set(previous.get("class") or [])
+            eligible_wrapper = (
+                (previous.name == "div" and "ltx_para" in previous_classes)
+                or (previous.name == "p" and "ltx_p" in previous_classes)
+            )
+            if eligible_wrapper and not _plain_text(previous):
+                media_nodes = previous.find_all(["img", "object", "embed", "source"])
+    for media in media_nodes:
         value: str | None = None
         if media.name == "object":
             value = str(media.get("data") or "")

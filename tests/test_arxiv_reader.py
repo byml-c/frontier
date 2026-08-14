@@ -25,6 +25,20 @@ ARXIV_HTML = """
 </article></body></html>
 """
 
+CAPTION_ONLY_FIGURE_HTML = """
+<html><body><article class="ltx_document">
+  <h1 class="ltx_title_document">A paper with a detached teaser</h1>
+  <div id="p1" class="ltx_para ltx_noindent">
+    <p class="ltx_p"><span class="ltx_inline-block">
+      <img src="2608.11739v1/teaser.png" alt="[Uncaptioned image]" />
+    </span></p>
+  </div>
+  <figure id="S0.F1" class="ltx_figure">
+    <figcaption>Figure 1: The teaser caption lives in the following figure.</figcaption>
+  </figure>
+</article></body></html>
+"""
+
 
 def test_arxiv_html_preserves_semantics_without_duplicate_captions(tmp_path: Path) -> None:
     pdf = tmp_path / "paper.pdf"
@@ -69,3 +83,36 @@ def test_arxiv_html_preserves_semantics_without_duplicate_captions(tmp_path: Pat
     reference = next(block for block in blocks if block["kind"] == "bibliography_item")
     assert reference["anchor"] == "bib.bib1"
     assert "A complete reference" in reference["text"]
+
+
+def test_arxiv_html_attaches_a_preceding_textless_image_to_its_caption(
+    tmp_path: Path,
+) -> None:
+    pdf = tmp_path / "paper.pdf"
+    document = pymupdf.open()
+    document.new_page()
+    document.save(pdf)
+    document.close()
+    fetched: list[str] = []
+
+    def fetch_asset(url: str, target: Path) -> Path:
+        fetched.append(url)
+        target.write_bytes(b"teaser")
+        return target
+
+    payload = convert_arxiv_html_content(
+        CAPTION_ONLY_FIGURE_HTML,
+        base_url="https://arxiv.org/html/2608.11739v1",
+        pdf_path=pdf,
+        paper_id="paper-with-teaser",
+        version="v1",
+        root=tmp_path / "reader",
+        schema_version=6,
+        fetch_asset=fetch_asset,
+    )
+
+    pictures = [block for block in payload["blocks"] if block["kind"] == "picture"]
+    assert len(pictures) == 1
+    assert pictures[0]["caption"].startswith("Figure 1:")
+    assert pictures[0]["image_url"].endswith(".png")
+    assert fetched == ["https://arxiv.org/html/2608.11739v1/teaser.png"]

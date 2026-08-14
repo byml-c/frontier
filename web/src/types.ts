@@ -145,6 +145,7 @@ export type DailyReview = {
 export type DailyDiscussionPayload = {
   paper_id: string;
   viewer: AnonymousProfile;
+  can_rotate_identity: boolean;
   review_count: number;
   average_score?: number | null;
   reviews: DailyReview[];
