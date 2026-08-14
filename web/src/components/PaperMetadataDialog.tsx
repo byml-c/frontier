@@ -20,7 +20,6 @@ import { useEffect, useState } from "react";
 import { api } from "../api";
 import type { Paper, Tag } from "../types";
 import { CompletionSummaryEditor } from "./CompletionSummaryEditor";
-import { CompletionSummarySections } from "./CompletionSummarySections";
 import { completionSummaryDraft, completionSummaryDraftIsComplete, type CompletionSummaryDraft } from "./completionSummary";
 import { Modal } from "./Modal";
 import { PaperTagSelector } from "./PaperTagSelector";
@@ -105,12 +104,10 @@ export function PaperMetadataDialog({
   paperId,
   open,
   onClose,
-  onJump,
 }: {
   paperId: string;
   open: boolean;
   onClose: () => void;
-  onJump?: (page: number) => void;
 }) {
   const queryClient = useQueryClient();
   const [tab, setTab] = useState("summary");
@@ -242,7 +239,7 @@ export function PaperMetadataDialog({
         <Stack sx={{ width: "100%", height: "100%", minHeight: 0 }}>
           <Tabs value={tab} onChange={(_, value) => setTab(value)} sx={{ flexShrink: 0 }}>
             <Tab value="summary" label="Agent 总结" />
-            {(paper.data?.completion_summary_structured || paper.data?.completion_summary) && <Tab value="reading" label="精读结论" />}
+            {paper.data?.completion_summary_structured && <Tab value="reading" label="精读结论" />}
             <Tab value="metadata" label="文献信息" />
           </Tabs>
 
@@ -347,17 +344,13 @@ export function PaperMetadataDialog({
               </Card>
             )}
 
-            {tab === "reading" && (paper.data?.completion_summary_structured || paper.data?.completion_summary) && (
+            {tab === "reading" && paper.data?.completion_summary_structured && summaryDraft && (
               <Card variant="outlined" sx={metadataCardSx}>
                 <CardContent>
-                  {summaryDraft ? <CompletionSummaryEditor
+                  <CompletionSummaryEditor
                     value={summaryDraft}
                     onChange={(value) => { setSummaryDraft(value); setDirty(true); }}
-                  /> : <CompletionSummarySections
-                    summary={paper.data.completion_summary_structured ?? { overview: paper.data.completion_summary }}
-                    scope="private"
-                    onJump={onJump}
-                  />}
+                  />
                 </CardContent>
               </Card>
             )}

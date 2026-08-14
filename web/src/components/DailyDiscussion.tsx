@@ -65,7 +65,7 @@ export function DailyDiscussion({ paperId }: { paperId: string }) {
   const queryClient = useQueryClient();
   const [open, setOpen] = useState(false);
   const [composing, setComposing] = useState(false);
-  const [expanded, setExpanded] = useState<Set<string>>(new Set());
+  const [collapsedReviews, setCollapsedReviews] = useState<Set<string>>(new Set());
   const [replyingTo, setReplyingTo] = useState<string | null>(null);
   const [replyDrafts, setReplyDrafts] = useState<Record<string, string>>({});
   const discussion = useQuery({
@@ -74,7 +74,7 @@ export function DailyDiscussion({ paperId }: { paperId: string }) {
   });
   const rotateIdentity = useMutation({
     mutationFn: () => api("/api/daily/identity/rotate", jsonBody({})),
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["daily-discussion", paperId] }),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["daily-discussion"] }),
   });
   const mentionColors = useMemo(() => {
     const profiles = discussion.data?.reviews.flatMap((review) => [review.author, ...review.replies.map((reply) => reply.author)]) ?? [];
@@ -82,11 +82,15 @@ export function DailyDiscussion({ paperId }: { paperId: string }) {
   }, [discussion.data]);
   const myReview = discussion.data?.reviews.find((review) => review.is_mine);
   function openReply(review: DailyReview, author: AnonymousProfile) {
-    setExpanded((current) => new Set(current).add(review.id));
+    setCollapsedReviews((current) => {
+      const next = new Set(current);
+      next.delete(review.id);
+      return next;
+    });
     setReplyingTo(review.id);
     setReplyDrafts((current) => ({ ...current, [review.id]: mentionDraft(current[review.id] || "", author.name) }));
   }
-  function refresh() { return queryClient.invalidateQueries({ queryKey: ["daily-discussion", paperId] }); }
+  function refresh() { return queryClient.invalidateQueries({ queryKey: ["daily-discussion"] }); }
   return <>
     <Portal>
       {!open ? <Badge badgeContent={discussion.data?.review_count} color="primary" overlap="circular" sx={{ position: "fixed", zIndex: (theme) => theme.zIndex.appBar + 1, left: "50%", bottom: "calc(20px + env(safe-area-inset-bottom))", transform: "translateX(-50%)", "& .MuiBadge-badge": { zIndex: 2, top: -3, right: -5, transform: "none", boxShadow: "0 0 0 2px", boxShadowColor: "background.paper" } }}>
@@ -103,7 +107,7 @@ export function DailyDiscussion({ paperId }: { paperId: string }) {
           {discussion.isLoading ? <Loading label="正在加载讨论" /> : discussion.error ? <ErrorState error={discussion.error} /> : <Stack spacing={2} sx={{ width: "100%", maxWidth: { md: 680 }, mx: "auto" }}>
             {rotateIdentity.error && <Alert severity="error">{rotateIdentity.error.message}</Alert>}
             {!composing ? <Button variant="contained" onClick={() => setComposing(true)} sx={{ alignSelf: "flex-start" }}>{myReview ? "编辑我的评审" : "发表评分与评论"}</Button> : <ReviewComposer key={myReview?.id || "new"} paperId={paperId} review={myReview} onCancel={() => setComposing(false)} onSaved={async () => { setComposing(false); await refresh(); }} />}
-            {!discussion.data?.reviews.length ? <Typography color="text.secondary" sx={{ py: 5, textAlign: "center" }}>还没有评价，欢迎留下第一份匿名评审。</Typography> : discussion.data.reviews.map((review) => <ReviewCard key={review.id} review={review} open={expanded.has(review.id)} replying={replyingTo === review.id} replyDraft={replyDrafts[review.id] || ""} mentionColors={mentionColors} onEdit={() => setComposing(true)} onToggle={() => setExpanded((current) => { const next = new Set(current); if (next.has(review.id)) next.delete(review.id); else next.add(review.id); return next; })} onReply={(author) => openReply(review, author)} onReplyDraft={(value) => setReplyDrafts((current) => ({ ...current, [review.id]: value }))} onReplyClose={() => setReplyingTo(null)} onReplySaved={async () => { setReplyingTo(null); setReplyDrafts((current) => ({ ...current, [review.id]: "" })); await refresh(); }} />)}
+            {!discussion.data?.reviews.length ? <Typography color="text.secondary" sx={{ py: 5, textAlign: "center" }}>还没有评价，欢迎留下第一份匿名评审。</Typography> : discussion.data.reviews.map((review) => <ReviewCard key={review.id} review={review} open={!collapsedReviews.has(review.id)} replying={replyingTo === review.id} replyDraft={replyDrafts[review.id] || ""} mentionColors={mentionColors} onEdit={() => setComposing(true)} onToggle={() => setCollapsedReviews((current) => { const next = new Set(current); if (next.has(review.id)) next.delete(review.id); else next.add(review.id); return next; })} onReply={(author) => openReply(review, author)} onReplyDraft={(value) => setReplyDrafts((current) => ({ ...current, [review.id]: value }))} onReplyClose={() => setReplyingTo(null)} onReplySaved={async () => { setReplyingTo(null); setReplyDrafts((current) => ({ ...current, [review.id]: "" })); await refresh(); }} />)}
           </Stack>}
         </Box>
       </Stack>

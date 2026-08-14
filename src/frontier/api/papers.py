@@ -53,6 +53,7 @@ from ..services.common import compact_search_key, log_operation, model_dict, nor
 from ..services.completion_summary import (
     COMPLETION_SUMMARY_METADATA_KEY,
     completion_summary_structured,
+    migrate_legacy_completion_summary,
     save_completion_summary,
 )
 from ..services.document_reader import (
@@ -518,6 +519,7 @@ def finish_reading(
         metadata = dict(paper.metadata_json or {})
         metadata.pop(COMPLETION_SUMMARY_METADATA_KEY, None)
         paper.metadata_json = metadata
+        migrate_legacy_completion_summary(paper)
     paper.pending_feedback = payload.model_dump(
         exclude={"summary", "completion_summary_structured"}
     )

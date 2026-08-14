@@ -31,15 +31,6 @@ test("public reading summary cannot expose user attitude", () => {
   assert.equal(JSON.stringify(sections).includes("用户很感兴趣"), false);
 });
 
-test("legacy overview is private-only", () => {
-  assert.equal(completionSummarySections({ overview: "包含历史态度" }, "public").length, 0);
-  assert.deepEqual(completionSummarySections({ overview: "旧总结" }, "private")[0], {
-    key: "overview",
-    title: "历史精读总结",
-    content: "旧总结",
-  });
-});
-
 test("daily replaces brief analysis with the public structured reading summary", () => {
   assert.match(dailySource, /scope="public"/);
   assert.match(dailySource, /paper\.completion_summary_structured/);
@@ -52,7 +43,6 @@ test("structured summary drafts require every editable section", () => {
   const draft = completionSummaryDraft(summary);
   assert.equal(completionSummaryDraftIsComplete(draft), true);
   assert.equal(completionSummaryDraftIsComplete(draft && { ...draft, experiments: " " }), false);
-  assert.equal(completionSummaryDraft({ overview: "旧总结" }), null);
 });
 
 test("generated and metadata reading summaries use the shared editor", () => {
@@ -60,4 +50,7 @@ test("generated and metadata reading summaries use the shared editor", () => {
   assert.match(readerSource, /completion_summary_structured: summaryDraft/);
   assert.match(metadataSource, /<CompletionSummaryEditor/);
   assert.match(metadataSource, /completion_summary_structured: summaryDraft/);
+  assert.doesNotMatch(metadataSource, /paper\.data\?\.completion_summary\b/);
+  assert.doesNotMatch(readerSource, /overview: paper\.completion_summary/);
+  assert.doesNotMatch(metadataSource + readerSource, /历史精读总结/);
 });

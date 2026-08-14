@@ -22,6 +22,7 @@ from ..models import (
     DailyReview,
     DailyReviewRevision,
     DailySelection,
+    DailySelectionItem,
     Paper,
     PaperNode,
     PaperTag,
@@ -31,6 +32,11 @@ from ..models import (
 from ..services.common import log_operation, model_dict
 from ..services.completion_summary import (
     completion_summary_structured,
+)
+from ..services.daily_selections import (
+    DailySelectionAppendConflictError,
+    append_daily_selection,
+    daily_selection_items,
 )
 from ..services.research_day import current_research_date
 
@@ -96,7 +102,7 @@ def _public_paper(session: Session, paper: Paper) -> dict:
     }
 
 
-def _serialize(session: Session, selection: DailySelection) -> dict:
+def _serialize(session: Session, selection: DailySelectionItem) -> dict:
     paper = session.get(Paper, selection.paper_id)
     if not paper:
         raise HTTPException(status_code=404, detail="精选论文不存在")
@@ -107,6 +113,7 @@ def _serialize(session: Session, selection: DailySelection) -> dict:
     ).all()
     return {
         "date": selection.selection_date.isoformat(),
+        "rank": selection.rank,
         "paper": _public_paper(session, paper),
         "annotations": [
             {
@@ -161,8 +168,16 @@ def _serialize_review(session: Session, review: DailyReview, viewer_id: str) -> 
 
 def _public_daily_paper_or_404(session: Session, paper_id: str) -> Paper:
     selected = session.scalar(
-        select(DailySelection.selection_date).where(DailySelection.paper_id == paper_id).limit(1)
+        select(DailySelectionItem.selection_date)
+        .where(DailySelectionItem.paper_id == paper_id)
+        .limit(1)
     )
+    if not selected:
+        selected = session.scalar(
+            select(DailySelection.selection_date)
+            .where(DailySelection.paper_id == paper_id)
+            .limit(1)
+        )
     paper = session.get(Paper, paper_id)
     if not selected or not paper:
         raise HTTPException(status_code=404, detail="这篇论文不在每日精选中")
@@ -223,13 +238,17 @@ def get_daily(
 ) -> dict:
     selected_date = target_date or current_research_date(session)
     available_dates = session.scalars(
-        select(DailySelection.selection_date).order_by(DailySelection.selection_date.desc())
+        select(DailySelectionItem.selection_date)
+        .distinct()
+        .order_by(DailySelectionItem.selection_date.desc())
     ).all()
-    selection = session.get(DailySelection, selected_date)
+    selections = daily_selection_items(session, selected_date)
+    serialized = [_serialize(session, selection) for selection in selections]
     return {
         "date": selected_date.isoformat(),
         "available_dates": [item.isoformat() for item in available_dates],
-        "selection": _serialize(session, selection) if selection else None,
+        "selections": serialized,
+        "selection": serialized[0] if serialized else None,
     }
 
 
@@ -359,20 +378,25 @@ def set_daily(
     paper = session.get(Paper, payload.paper_id)
     if not paper:
         raise HTTPException(status_code=404, detail="Paper not found")
-    selection = session.get(DailySelection, target_date)
-    previous_paper_id = selection.paper_id if selection else None
-    if selection:
-        selection.paper_id = paper.id
-    else:
-        selection = DailySelection(selection_date=target_date, paper_id=paper.id)
-        session.add(selection)
-    log_operation(
-        session,
-        actor="user",
-        action="daily_selection.set",
-        entity_type="paper",
-        entity_id=paper.id,
-        detail={"date": target_date.isoformat(), "previous_paper_id": previous_paper_id},
-    )
+    try:
+        selection, created = append_daily_selection(
+            session,
+            selection_date=target_date,
+            paper_id=paper.id,
+        )
+    except DailySelectionAppendConflictError as exc:
+        raise HTTPException(
+            status_code=409,
+            detail="同时添加的请求发生冲突，请重试",
+        ) from exc
+    if created:
+        log_operation(
+            session,
+            actor="user",
+            action="daily_selection.add",
+            entity_type="paper",
+            entity_id=paper.id,
+            detail={"date": target_date.isoformat(), "rank": selection.rank},
+        )
     session.commit()
     return _serialize(session, selection)

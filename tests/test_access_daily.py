@@ -3,9 +3,14 @@ from __future__ import annotations
 from datetime import date
 
 from fastapi.testclient import TestClient
+from sqlalchemy import func, select
 
 from frontier.auth import INTERNAL_TOKEN_HEADER, internal_api_token
 from frontier.config import settings
+from frontier.database import SessionLocal
+from frontier.models import DailySelection, DailySelectionItem
+from frontier.services import daily_selections as daily_selection_service
+from frontier.services.daily_selections import migrate_legacy_daily_selections
 
 
 def _paper(client: TestClient) -> dict:
@@ -75,6 +80,8 @@ def test_daily_selection_exposes_only_read_only_share_data(client: TestClient) -
     assert response.status_code == 200
     body = response.json()
     assert body["available_dates"] == [target]
+    assert len(body["selections"]) == 1
+    assert body["selections"][0] == body["selection"]
     assert body["selection"]["paper"]["title"] == "A Public Daily Paper"
     assert body["selection"]["annotations"][0]["content"] == "我的笔记"
     assert "position_json" not in body["selection"]["annotations"][0]
@@ -90,6 +97,192 @@ def test_daily_selection_exposes_only_read_only_share_data(client: TestClient) -
     assert "completion_summary" not in public_paper
     assert "is_interested" not in public_paper
     assert "is_quality" not in public_paper
+
+
+def test_daily_selection_appends_multiple_papers_in_stable_order(client: TestClient) -> None:
+    first = _paper(client)
+    response = client.post(
+        "/api/papers",
+        json={
+            "title": "A Second Public Daily Paper",
+            "source": "arxiv",
+            "source_url": "https://arxiv.org/abs/2608.00002",
+            "arxiv_id": "2608.00002",
+        },
+    )
+    assert response.status_code == 200, response.text
+    second = response.json()["paper"]
+    target = "2026-08-16"
+
+    first_add = client.put(f"/api/daily/{target}", json={"paper_id": first["id"]})
+    second_add = client.put(f"/api/daily/{target}", json={"paper_id": second["id"]})
+    duplicate = client.put(f"/api/daily/{target}", json={"paper_id": first["id"]})
+
+    assert first_add.status_code == 200, first_add.text
+    assert second_add.status_code == 200, second_add.text
+    assert duplicate.status_code == 200, duplicate.text
+    assert first_add.json()["rank"] == 1
+    assert second_add.json()["rank"] == 2
+    assert duplicate.json()["rank"] == 1
+
+    body = client.get("/api/daily", params={"target_date": target}).json()
+    assert [item["paper"]["id"] for item in body["selections"]] == [
+        first["id"],
+        second["id"],
+    ]
+    assert body["selection"] == body["selections"][0]
+    assert body["available_dates"].count(target) == 1
+
+
+def test_daily_selection_retries_a_stale_rank_without_poisoning_session(
+    client: TestClient,
+    monkeypatch,
+) -> None:
+    papers = []
+    for index in (5, 6):
+        response = client.post(
+            "/api/papers",
+            json={
+                "title": f"Concurrent Daily Paper {index}",
+                "source": "arxiv",
+                "source_url": f"https://arxiv.org/abs/2608.0000{index}",
+                "arxiv_id": f"2608.0000{index}",
+            },
+        )
+        assert response.status_code == 200, response.text
+        papers.append(response.json()["paper"])
+    first, second = papers
+    target = "2026-08-18"
+    assert client.put(
+        f"/api/daily/{target}", json={"paper_id": first["id"]}
+    ).status_code == 200
+
+    actual_next_rank = daily_selection_service._next_daily_rank
+    calls = 0
+
+    def stale_once(session, selection_date):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return 1
+        return actual_next_rank(session, selection_date)
+
+    monkeypatch.setattr(daily_selection_service, "_next_daily_rank", stale_once)
+    appended = client.put(f"/api/daily/{target}", json={"paper_id": second["id"]})
+
+    assert appended.status_code == 200, appended.text
+    assert appended.json()["rank"] == 2
+    assert calls == 2
+    body = client.get("/api/daily", params={"target_date": target}).json()
+    assert [item["paper"]["id"] for item in body["selections"]] == [
+        first["id"],
+        second["id"],
+    ]
+
+
+def test_daily_selection_returns_conflict_after_bounded_rank_retries(
+    client: TestClient,
+    monkeypatch,
+) -> None:
+    papers = []
+    for index in (7, 8):
+        response = client.post(
+            "/api/papers",
+            json={
+                "title": f"Bounded Conflict Daily Paper {index}",
+                "source": "arxiv",
+                "source_url": f"https://arxiv.org/abs/2608.0000{index}",
+                "arxiv_id": f"2608.0000{index}",
+            },
+        )
+        assert response.status_code == 200, response.text
+        papers.append(response.json()["paper"])
+    first, second = papers
+    target = "2026-08-19"
+    assert client.put(
+        f"/api/daily/{target}", json={"paper_id": first["id"]}
+    ).status_code == 200
+
+    monkeypatch.setattr(daily_selection_service, "_next_daily_rank", lambda *_args: 1)
+    conflicted = client.put(f"/api/daily/{target}", json={"paper_id": second["id"]})
+
+    assert conflicted.status_code == 409, conflicted.text
+    assert "请重试" in conflicted.json()["detail"]
+    healthy = client.get("/api/daily", params={"target_date": target})
+    assert healthy.status_code == 200, healthy.text
+    assert [item["paper"]["id"] for item in healthy.json()["selections"]] == [first["id"]]
+
+
+def test_daily_discussions_are_independent_for_papers_on_the_same_day(
+    client: TestClient,
+) -> None:
+    papers = []
+    for index in (3, 4):
+        response = client.post(
+            "/api/papers",
+            json={
+                "title": f"Independent Discussion Daily Paper {index}",
+                "source": "arxiv",
+                "source_url": f"https://arxiv.org/abs/2608.0000{index}",
+                "arxiv_id": f"2608.0000{index}",
+            },
+        )
+        assert response.status_code == 200, response.text
+        papers.append(response.json()["paper"])
+    first, second = papers
+    target = "2026-08-17"
+    for paper in (first, second):
+        assert client.put(
+            f"/api/daily/{target}", json={"paper_id": paper["id"]}
+        ).status_code == 200
+
+    first_review = client.post(
+        f"/api/daily/papers/{first['id']}/reviews",
+        json={"score": 5, "confidence": 4, "content": "第一篇的独立评审。"},
+    )
+    second_review = client.post(
+        f"/api/daily/papers/{second['id']}/reviews",
+        json={"score": 3, "confidence": 2, "content": "第二篇的独立评审。"},
+    )
+    assert first_review.status_code == 200, first_review.text
+    assert second_review.status_code == 200, second_review.text
+
+    first_discussion = client.get(f"/api/daily/papers/{first['id']}/reviews").json()
+    second_discussion = client.get(f"/api/daily/papers/{second['id']}/reviews").json()
+    assert first_discussion["review_count"] == 1
+    assert second_discussion["review_count"] == 1
+    assert first_discussion["reviews"][0]["content"] == "第一篇的独立评审。"
+    assert second_discussion["reviews"][0]["content"] == "第二篇的独立评审。"
+
+
+def test_legacy_daily_selection_migration_is_idempotent_and_preserves_source(
+    client: TestClient,
+) -> None:
+    paper = _paper(client)
+    target = date(2026, 8, 9)
+    with SessionLocal() as session:
+        legacy = session.get(DailySelection, target)
+        if not legacy:
+            session.add(DailySelection(selection_date=target, paper_id=paper["id"]))
+            session.commit()
+
+        assert migrate_legacy_daily_selections(session) == 1
+        assert migrate_legacy_daily_selections(session) == 0
+        count = session.scalar(
+            select(func.count(DailySelectionItem.id)).where(
+                DailySelectionItem.selection_date == target,
+                DailySelectionItem.paper_id == paper["id"],
+            )
+        )
+        migrated = session.scalar(
+            select(DailySelectionItem).where(
+                DailySelectionItem.selection_date == target,
+                DailySelectionItem.paper_id == paper["id"],
+            )
+        )
+        assert count == 1
+        assert migrated is not None and migrated.rank == 1
+        assert session.get(DailySelection, target) is not None
 
 
 def test_private_api_requires_a_trusted_device_while_daily_stays_public(

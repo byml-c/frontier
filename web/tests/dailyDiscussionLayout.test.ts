@@ -22,3 +22,9 @@ test("discussion starts collapsed and keeps its count above the floating action"
   assert.match(source, /top: -3, right: -5, transform: "none"/);
   assert.match(source, /打开论文评论[^\n]+sx=\{\{ zIndex: 0 \}\}/);
 });
+
+test("each review discussion starts expanded and can still be collapsed", () => {
+  assert.match(source, /const \[collapsedReviews, setCollapsedReviews\] = useState<Set<string>>\(new Set\(\)\)/);
+  assert.match(source, /open=\{!collapsedReviews\.has\(review\.id\)\}/);
+  assert.match(source, /setCollapsedReviews\(\(current\) =>/);
+});

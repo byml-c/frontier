@@ -172,9 +172,12 @@ export function LibraryPage() {
               onTagClick={setTag}
               onMetadata={() => setMetadataId(paper.id)}
               onCancelReading={() => setCancelPaper(paper)}
-              isDaily={daily.data?.selection?.paper.id === paper.id}
+              isDaily={Boolean(
+                daily.data?.selections?.some((selection) => selection.paper.id === paper.id)
+                || daily.data?.selection?.paper.id === paper.id
+              )}
               onSetDaily={() => setDaily.mutate(paper)}
-              settingDaily={setDaily.isPending && setDaily.variables?.id === paper.id}
+              settingDaily={setDaily.isPending}
               dailyReady={Boolean(daily.data?.date)}
             />
           ))}

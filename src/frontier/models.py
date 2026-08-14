@@ -195,6 +195,29 @@ class DailySelection(Base, TimestampMixin):
     )
 
 
+class DailySelectionItem(Base, TimestampMixin):
+    __tablename__ = "daily_selection_items"
+    __table_args__ = (
+        UniqueConstraint(
+            "selection_date",
+            "paper_id",
+            name="uq_daily_selection_item_date_paper",
+        ),
+        UniqueConstraint(
+            "selection_date",
+            "rank",
+            name="uq_daily_selection_item_date_rank",
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    selection_date: Mapped[date] = mapped_column(Date, index=True)
+    paper_id: Mapped[str] = mapped_column(
+        ForeignKey("papers.id", ondelete="CASCADE"), index=True
+    )
+    rank: Mapped[int] = mapped_column(Integer)
+
+
 class DailyReview(Base, TimestampMixin):
     __tablename__ = "daily_reviews"
     __table_args__ = (

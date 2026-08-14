@@ -489,7 +489,7 @@ def test_structured_completion_summary_requires_every_non_blank_section(
     assert confirm_blank.status_code == 422
 
 
-def test_legacy_completion_summary_has_structured_overview_fallback(
+def test_legacy_completion_summary_is_migrated_to_editable_structure(
     client: TestClient,
 ) -> None:
     paper = create_paper(client, "Legacy completion summary")
@@ -502,7 +502,52 @@ def test_legacy_completion_summary_has_structured_overview_fallback(
 
     assert response.status_code == 200, response.text
     assert response.json()["completion_summary"] == summary
-    assert response.json()["completion_summary_structured"] == {"overview": summary}
+    structured = response.json()["completion_summary_structured"]
+    assert structured["evidence_and_contribution"] == summary
+    assert structured["research_question"] == "历史记录未单独记录研究问题。"
+    assert structured["experiments"] == "历史记录未单独记录实验结论。"
+    assert structured["limitations"] == "历史记录未单独记录局限。"
+    assert structured["user_attitude"] == "历史记录中没有可确认的用户态度。"
+    assert "overview" not in structured
+
+
+def test_legacy_markdown_sections_are_migrated_without_losing_content(
+    client: TestClient,
+) -> None:
+    paper = create_paper(client, "Structured legacy completion summary")
+    legacy = """### 研究问题
+
+旧问题。
+
+### 核心贡献
+
+旧贡献。
+
+### 实验结果
+
+旧实验。
+
+### 局限与遗留问题
+
+旧局限。
+
+### 用户态度
+
+旧态度。"""
+
+    response = client.post(
+        f"/api/papers/{paper['id']}/finish",
+        json={"summary": legacy},
+    )
+
+    assert response.status_code == 200, response.text
+    assert response.json()["completion_summary_structured"] == {
+        "research_question": "旧问题。",
+        "evidence_and_contribution": "旧贡献。",
+        "experiments": "旧实验。",
+        "limitations": "旧局限。",
+        "user_attitude": "旧态度。",
+    }
 
 
 def test_agent_analysis_is_not_exposed_as_a_private_reading_summary(
@@ -716,9 +761,14 @@ def test_graph_and_brief_snapshot(client: TestClient) -> None:
         == 200
     )
     historical = client.get(f"/api/briefs/{brief['id']}").json()
-    assert historical["items"][0]["paper"]["completion_summary"] == (
-        "Reading complete after publication."
-    )
+    historical_paper = historical["items"][0]["paper"]
+    assert historical_paper["completion_summary_structured"][
+        "evidence_and_contribution"
+    ] == "Reading complete after publication."
+    assert "Reading complete after publication." in historical_paper[
+        "completion_summary"
+    ]
+    assert "用户态度" not in historical_paper["completion_summary"]
     assert (
         client.post(
             f"/api/briefs/{brief['id']}/items",

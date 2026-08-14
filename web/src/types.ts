@@ -13,7 +13,6 @@ export type CompletionSummaryStructured = {
   experiments?: string | null;
   limitations?: string | null;
   user_attitude?: string | null;
-  overview?: string | null;
 };
 
 export type Paper = {
@@ -137,16 +136,19 @@ export type PublicDailyPaper = {
   status: string;
   tags: Tag[];
   nodes: Array<Pick<NodeRef, "id" | "name">>;
-  completion_summary_structured?: Omit<CompletionSummaryStructured, "user_attitude" | "overview"> | null;
+  completion_summary_structured?: Omit<CompletionSummaryStructured, "user_attitude"> | null;
+};
+export type DailySelection = {
+  date: string;
+  rank: number;
+  paper: PublicDailyPaper;
+  annotations: DailyAnnotation[];
 };
 export type DailyPayload = {
   date: string;
   available_dates: string[];
-  selection: null | {
-    date: string;
-    paper: PublicDailyPaper;
-    annotations: DailyAnnotation[];
-  };
+  selections: DailySelection[];
+  selection?: DailySelection | null;
 };
 
 export type AnonymousProfile = { name: string; color: string };

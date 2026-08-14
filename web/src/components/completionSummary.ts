@@ -49,8 +49,5 @@ export function completionSummarySections(
       ? [{ key, title, content: content.trim() }]
       : [];
   });
-  if (scope === "private" && sections.length === 0 && summary.overview?.trim()) {
-    return [{ key: "overview", title: "历史精读总结", content: summary.overview.trim() }];
-  }
   return sections;
 }

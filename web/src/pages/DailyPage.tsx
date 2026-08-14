@@ -1,31 +1,64 @@
 import ArrowOutwardRounded from "@mui/icons-material/ArrowOutwardRounded";
 import CalendarMonthRounded from "@mui/icons-material/CalendarMonthRounded";
 import NotesRounded from "@mui/icons-material/NotesRounded";
-import { Box, Button, Card, CardContent, Chip, Container, Divider, IconButton, Menu, MenuItem, Stack, Typography } from "@mui/material";
+import { Box, Button, Card, CardContent, Chip, Container, Divider, IconButton, Stack, Tab, Tabs, Typography } from "@mui/material";
 import { useQuery } from "@tanstack/react-query";
-import { useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useSearchParams } from "react-router-dom";
 import { api, formatDate } from "../api";
 import { CompletionSummarySections } from "../components/CompletionSummarySections";
+import { DailyCalendar } from "../components/DailyCalendar";
 import { MarkdownMessage } from "../components/MarkdownMessage";
 import { DailyDiscussion } from "../components/DailyDiscussion";
 import { Empty, ErrorState, Loading } from "../components/States";
-import type { DailyPayload } from "../types";
+import type { DailyPayload, DailySelection } from "../types";
+
+function shortPaperTitle(title: string) {
+  const normalized = title.replace(/\s+/g, " ").trim();
+  return normalized.length > 24 ? `${normalized.slice(0, 24)}…` : normalized;
+}
 
 export function DailyPage() {
   const [searchParams, setSearchParams] = useSearchParams();
   const selectedDate = searchParams.get("date") || "";
   const [calendarAnchor, setCalendarAnchor] = useState<HTMLElement | null>(null);
+  const [selectedPaperId, setSelectedPaperId] = useState<string | null>(null);
   const daily = useQuery({ queryKey: ["daily", selectedDate], queryFn: () => api<DailyPayload>(`/api/daily${selectedDate ? `?target_date=${encodeURIComponent(selectedDate)}` : ""}`) });
-  function chooseDate(value: string) { setSearchParams({ date: value }); setCalendarAnchor(null); }
+  const selections = useMemo(() => {
+    if (daily.data?.selections?.length) return daily.data.selections;
+    return daily.data?.selection ? [daily.data.selection] : [];
+  }, [daily.data]);
+  const activeSelection = selections.find((item) => item.paper.id === selectedPaperId) || selections[0];
+
+  useEffect(() => {
+    setSelectedPaperId((current) => selections.some((item) => item.paper.id === current) ? current : selections[0]?.paper.id || null);
+  }, [daily.data?.date, selections]);
+
+  function chooseDate(value: string) {
+    setSelectedPaperId(null);
+    setSearchParams({ date: value });
+    setCalendarAnchor(null);
+  }
   return <Box sx={{ minHeight: "100%", bgcolor: "background.default" }}><Container maxWidth="md" sx={{ pt: { xs: 3, md: 5 }, pb: { xs: 14, md: 16 } }}>
-    <Stack direction="row" justifyContent="space-between" alignItems="center" spacing={2} sx={{ mb: 3 }}><Box><Typography variant="overline" color="primary.main" fontWeight={750}>Frontier Daily</Typography><Typography variant="h2" sx={{ mt: .25 }}>{formatDate(daily.data?.date || selectedDate)}</Typography></Box><IconButton aria-label="选择精选日期" aria-haspopup="menu" onClick={(event) => setCalendarAnchor(event.currentTarget)} sx={{ width: 42, height: 42, border: 1, borderColor: "divider", bgcolor: "background.paper" }}><CalendarMonthRounded /></IconButton></Stack>
-    <Menu anchorEl={calendarAnchor} open={Boolean(calendarAnchor)} onClose={() => setCalendarAnchor(null)} PaperProps={{ sx: { maxHeight: 360, minWidth: 180 } }}>{!daily.data?.available_dates.length && <MenuItem disabled>暂无历史精选</MenuItem>}{daily.data?.available_dates.map((value) => <MenuItem key={value} selected={value === daily.data?.date} onClick={() => chooseDate(value)}>{formatDate(value)}</MenuItem>)}</Menu>
-    {daily.isLoading ? <Loading label="正在加载每日精选" /> : daily.error ? <ErrorState error={daily.error} /> : !daily.data?.selection ? <Empty title="这一天还没有精选论文" body="有新的每日精选后，可以从右上角日历查看。" /> : <><DailyPaperCard selection={daily.data.selection} /><DailyDiscussion paperId={daily.data.selection.paper.id} /></>}
+    <Stack direction="row" justifyContent="space-between" alignItems="center" spacing={2} sx={{ mb: 3 }}><Box><Typography variant="overline" color="primary.main" fontWeight={750}>Frontier Daily</Typography><Typography variant="h2" sx={{ mt: .25 }}>{formatDate(daily.data?.date || selectedDate)}</Typography></Box><IconButton aria-label="选择精选日期" aria-haspopup="dialog" onClick={(event) => setCalendarAnchor(event.currentTarget)} sx={{ width: 42, height: 42, border: 1, borderColor: "divider", bgcolor: "background.paper" }}><CalendarMonthRounded /></IconButton></Stack>
+    <DailyCalendar anchorEl={calendarAnchor} date={daily.data?.date || selectedDate} availableDates={daily.data?.available_dates || []} onClose={() => setCalendarAnchor(null)} onSelect={chooseDate} />
+    {daily.isLoading ? <Loading label="正在加载每日精选" /> : daily.error ? <ErrorState error={daily.error} /> : !activeSelection ? <Empty title="这一天还没有精选论文" body="有新的每日精选后，可以从右上角日历查看。" /> : <>
+      {selections.length > 1 && <Box sx={{ display: "flex", justifyContent: "center", mb: 2.5, minWidth: 0 }}><Tabs
+        value={activeSelection.paper.id}
+        onChange={(_, value: string) => setSelectedPaperId(value)}
+        variant="scrollable"
+        scrollButtons="auto"
+        allowScrollButtonsMobile
+        aria-label="每日精选论文"
+        sx={{ maxWidth: "100%", minWidth: 0, "& .MuiTab-root": { minWidth: 0, maxWidth: { xs: 210, sm: 280 }, px: { xs: 1.5, sm: 2.5 } } }}
+      >{selections.map((selection, index) => <Tab key={selection.paper.id} value={selection.paper.id} label={`${index + 1} · ${shortPaperTitle(selection.paper.title)}`} />)}</Tabs></Box>}
+      <DailyPaperCard selection={activeSelection} />
+      <DailyDiscussion key={activeSelection.paper.id} paperId={activeSelection.paper.id} />
+    </>}
   </Container></Box>;
 }
 
-function DailyPaperCard({ selection }: { selection: NonNullable<DailyPayload["selection"]> }) {
+function DailyPaperCard({ selection }: { selection: DailySelection }) {
   const { paper, annotations } = selection;
   const sourceUrl = paper.arxiv_id ? `https://arxiv.org/abs/${paper.arxiv_id}` : paper.source_url;
   const authors = paper.authors?.map((author) => author.name).filter(Boolean).join(", ");

@@ -16,6 +16,8 @@ from .config import settings
 from .database import SessionLocal, create_tables
 from .scheduler import start_scheduler, stop_scheduler
 from .services.common import ensure_default_settings
+from .services.completion_summary import migrate_legacy_completion_summaries
+from .services.daily_selections import migrate_legacy_daily_selections
 from .services.translation_provider import close_translation_provider, warm_translation_provider
 
 
@@ -24,6 +26,8 @@ async def lifespan(_app: FastAPI):
     create_tables()
     with SessionLocal() as session:
         ensure_default_settings(session)
+        migrate_legacy_completion_summaries(session)
+        migrate_legacy_daily_selections(session)
     conversations.mark_orphaned_conversation_streams()
     warm_translation_provider()
     start_scheduler()
