@@ -29,10 +29,11 @@ def completion_summary_structured(
     *,
     include_user_attitude: bool,
 ) -> dict[str, str | None] | None:
-    """Return the canonical reading summary, with a legacy-string fallback.
+    """Return a reading summary without conflating it with routine paper analysis.
 
-    User attitude is deliberately opt-in so public serializers cannot expose it by
-    accidentally dumping all persisted metadata.
+    Private clients receive only a saved completion summary (or its legacy string).
+    Public clients may use non-personal analysis fields as an old-data fallback, but
+    never receive user attitude.
     """
     metadata = paper.metadata_json or {}
     stored = metadata.get(COMPLETION_SUMMARY_METADATA_KEY)
@@ -47,8 +48,10 @@ def completion_summary_structured(
             for field in fields
             if (value := stored.get(field)) is None or isinstance(value, str)
         }
-    if include_user_attitude and paper.completion_summary:
-        return {"overview": paper.completion_summary}
+    if include_user_attitude:
+        if paper.completion_summary:
+            return {"overview": paper.completion_summary}
+        return None
     public_fallback = {
         "research_question": paper.problem,
         "evidence_and_contribution": paper.innovation,

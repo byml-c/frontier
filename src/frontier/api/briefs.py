@@ -2,13 +2,11 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 from typing import Annotated
-from zoneinfo import ZoneInfo
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query
 from sqlalchemy import or_, select
 from sqlalchemy.orm import Session
 
-from ..config import settings
 from ..database import get_session
 from ..models import Brief, BriefItem, Paper, PaperNode, PaperTag, ResearchNode, Tag
 from ..schemas import BriefCreate, BriefItemCreate
@@ -74,15 +72,11 @@ def _paper_snapshot(session: Session, paper: Paper) -> dict:
 
 
 def _serialize_brief(session: Session, brief: Brief, *, detail: bool = True) -> dict:
+    # Brief membership is a historical recommendation decision. Eligibility is checked
+    # when an item is added and again at publish time, never recomputed while reading.
     payload = model_dict(brief)
     if not detail:
-        statement = (
-            select(BriefItem.id)
-            .join(Paper, Paper.id == BriefItem.paper_id)
-            .where(BriefItem.brief_id == brief.id)
-        )
-        if brief.brief_date == datetime.now(ZoneInfo(settings.timezone)).date():
-            statement = statement.where(Paper.status == "candidate")
+        statement = select(BriefItem.id).where(BriefItem.brief_id == brief.id)
         payload["item_count"] = len(session.scalars(statement).all())
         return payload
     rows = session.execute(
@@ -91,8 +85,6 @@ def _serialize_brief(session: Session, brief: Brief, *, detail: bool = True) -> 
         .where(BriefItem.brief_id == brief.id)
         .order_by(BriefItem.rank)
     ).all()
-    if brief.brief_date == datetime.now(ZoneInfo(settings.timezone)).date():
-        rows = [row for row in rows if is_daily_recommendation_eligible(row[1])]
     payload["items"] = [
         {
             **model_dict(item),

@@ -505,6 +505,25 @@ def test_legacy_completion_summary_has_structured_overview_fallback(
     assert response.json()["completion_summary_structured"] == {"overview": summary}
 
 
+def test_agent_analysis_is_not_exposed_as_a_private_reading_summary(
+    client: TestClient,
+) -> None:
+    paper = create_paper(client, "Analysis is not a completion summary")
+
+    response = client.patch(
+        f"/api/papers/{paper['id']}/metadata",
+        json={
+            "problem": "Agent 提取的研究问题",
+            "innovation": "Agent 提取的创新",
+            "experiment": "Agent 提取的实验",
+            "limitations": "Agent 提取的局限",
+        },
+    )
+
+    assert response.status_code == 200, response.text
+    assert response.json()["completion_summary_structured"] is None
+
+
 def test_papers_are_grouped_by_reading_status(client: TestClient) -> None:
     candidate = create_paper(client, "Status order candidate")
     reading = create_paper(client, "Status order reading")
@@ -709,7 +728,7 @@ def test_graph_and_brief_snapshot(client: TestClient) -> None:
     )
 
 
-def test_daily_brief_excludes_papers_that_are_being_or_have_been_read(
+def test_daily_brief_excludes_prior_reading_but_stays_stable_after_publish(
     client: TestClient,
 ) -> None:
     candidate = create_paper(client, "Unread daily candidate")
@@ -756,7 +775,11 @@ def test_daily_brief_excludes_papers_that_are_being_or_have_been_read(
 
     assert client.post(f"/api/papers/{candidate['id']}/start-reading").status_code == 200
     current = client.get(f"/api/briefs/{brief['id']}").json()
-    assert [item["paper"]["id"] for item in current["items"]] == [other_candidate["id"]]
+    assert [item["paper"]["id"] for item in current["items"]] == [
+        candidate["id"],
+        other_candidate["id"],
+    ]
+    assert current["items"][0]["current_status"] == "reading"
 
     assert client.post(f"/api/papers/{candidate['id']}/cancel-reading").status_code == 200
     restored = client.get(f"/api/briefs/{brief['id']}").json()
@@ -764,6 +787,20 @@ def test_daily_brief_excludes_papers_that_are_being_or_have_been_read(
         candidate["id"],
         other_candidate["id"],
     }
+
+    ignored = client.post(
+        f"/api/papers/{candidate['id']}/ignore",
+        json={"reason": "Not relevant after review"},
+    )
+    assert ignored.status_code == 200, ignored.text
+    retained = client.get(f"/api/briefs/{brief['id']}").json()
+    assert [item["paper"]["id"] for item in retained["items"]] == [
+        candidate["id"],
+        other_candidate["id"],
+    ]
+    assert retained["items"][0]["current_status"] == "ignored"
+    listed = client.get("/api/briefs").json()
+    assert next(item for item in listed if item["id"] == brief["id"])["item_count"] == 2
 
 
 def test_brief_publish_drops_papers_that_started_reading_after_ranking(

@@ -18,9 +18,9 @@ export function BriefPage() {
   if (!brief.data && !brief.error) return <Container sx={{ py: 6 }}><PageHeader title="研究简报" tabs={<BriefTabs value="today" />} /><Empty title="还没有简报" body="初始化论文库后，可以生成第一期研究简报。" action={<Button variant="contained" startIcon={<PlayArrowRounded />} onClick={() => run.mutate()} disabled={run.isPending}>生成简报</Button>} /></Container>;
   if (brief.error) return <Container sx={{ py: 6 }}><PageHeader title="研究简报" tabs={<BriefTabs value={briefId ? "archive" : "today"} />} /><ErrorState error={brief.error} /></Container>;
   const data = brief.data!;
-  const featured = data.items.filter((item) => item.tier === "featured" && item.current_status !== "ignored");
-  const manual = data.items.filter((item) => item.tier === "manual" && item.current_status !== "ignored");
-  const related = data.items.filter((item) => !["featured", "manual"].includes(item.tier) && item.current_status !== "ignored");
+  const featured = data.items.filter((item) => item.tier === "featured");
+  const manual = data.items.filter((item) => item.tier === "manual");
+  const related = data.items.filter((item) => !["featured", "manual"].includes(item.tier));
   const groups = related.reduce<Map<string, typeof related>>((result, item) => { const key = item.paper.nodes?.[0]?.name || "其他相关方向"; result.set(key, [...(result.get(key) ?? []), item]); return result; }, new Map());
   return <Container maxWidth="lg" sx={{ py: { xs: 4, md: 5 } }}>
     <PageHeader
