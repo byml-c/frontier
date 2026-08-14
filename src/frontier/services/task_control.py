@@ -10,6 +10,20 @@ from .architecture_scene import release_agent_lock_for_task
 ACTIVE_TASK_STATUSES = {"queued", "running"}
 
 
+def active_task_for_conversation(session: Session, conversation_id: str) -> TaskRun | None:
+    tasks = session.scalars(
+        select(TaskRun).where(TaskRun.status.in_(ACTIVE_TASK_STATUSES))
+    ).all()
+    return next(
+        (
+            task
+            for task in tasks
+            if (task.payload_json or {}).get("conversation_id") == conversation_id
+        ),
+        None,
+    )
+
+
 def cancelled_activities(values: object) -> list[dict]:
     """Turn durable in-flight activity rows into a neutral cancelled state."""
     if not isinstance(values, list):

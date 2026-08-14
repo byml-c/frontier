@@ -84,6 +84,15 @@ Keep simple word or sentence translations out of the Agent conversation. When th
   `keywords` contain only properties or configurations. Architecture names such as ViT,
   DINOv2-B/14, T5, ResNet, Transformer, MLP, and DiT never belong in `keywords`. Wrap formulas in
   prose, labels, annotations, and keywords with `$...$`.
+- Put a processing description and its Tensor on the same Edge via `label` plus `tensorId`. Never
+  create duplicate same-kind Edges solely to show those two pieces separately; reserve separate
+  Edges for genuinely different flow and conditioning semantics.
+- Model each semantic operator once. In feed-forward architectures, keep the main flow acyclic and
+  do not turn internal Q/K/V preparation, output splitting, residual addition, or normalization into
+  reciprocal Edges between two nodes. Keep those sub-steps in one Module's fields, merging
+  inseparable phases into one Module. Reciprocal flow is valid only for paper-evidenced recurrence,
+  iteration, or feedback. Fix `edge.duplicate_relation` and `edge.reciprocal_flow` diagnostics before
+  an Agent commit.
 - Add minimal `SourceReference` evidence for material architecture claims. Geometry and missing-source
   warnings require review; validation errors must be fixed before commit.
 - Do not install or launch automatic screenshot tooling. The user reviews the real browser rendering

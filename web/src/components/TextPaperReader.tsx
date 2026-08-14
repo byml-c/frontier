@@ -1,6 +1,5 @@
 import CloseRounded from "@mui/icons-material/CloseRounded";
 import ExpandMoreRounded from "@mui/icons-material/ExpandMoreRounded";
-import PictureAsPdfRounded from "@mui/icons-material/PictureAsPdfRounded";
 import KeyboardArrowDownRounded from "@mui/icons-material/KeyboardArrowDownRounded";
 import KeyboardArrowUpRounded from "@mui/icons-material/KeyboardArrowUpRounded";
 import SearchRounded from "@mui/icons-material/SearchRounded";
@@ -9,11 +8,11 @@ import katex from "katex";
 import "katex/contrib/copy-tex";
 import "katex/dist/katex.min.css";
 import { Box, Button, Dialog, DialogContent, DialogTitle, FormControl, IconButton, InputAdornment, LinearProgress, MenuItem, Paper, Select, Stack, TextField, Typography } from "@mui/material";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { TransformComponent, TransformWrapper } from "react-zoom-pan-pinch";
 import type { Annotation, DocumentBlock, PaperDocument } from "../types";
 import { caretAtPoint, offsetWithin, rangeFromOffsets, textSelectionFromRange, wordBounds } from "./readerSelection";
-import { compactReaderControlSx, readerControlSx, readerSearchFieldSx, readerSelectSx } from "./readerToolbarStyles";
+import { compactReaderControlSx, readerSearchFieldSx, readerSelectSx } from "./readerToolbarStyles";
 import { ErrorState } from "./States";
 
 export type TextReaderSelection = {
@@ -58,11 +57,12 @@ type Props = {
   toolsOpen: boolean;
   activeSelection?: TextReaderActiveSelection;
   onRetry: () => void;
-  onModeToggle: () => void;
+  modeControl?: ReactNode;
+  onUsePdf: () => void;
   onSelection: (selection: TextReaderSelection) => void;
 };
 
-export function TextPaperReader({ document, annotations, mobile, toolsOpen, activeSelection, onRetry, onModeToggle, onSelection }: Props) {
+export function TextPaperReader({ document, annotations, mobile, toolsOpen, activeSelection, onRetry, modeControl, onUsePdf, onSelection }: Props) {
   const scrollRef = useRef<HTMLDivElement>(null);
   const longPressTimer = useRef<number | undefined>(undefined);
   const longPressStart = useRef<{ x: number; y: number } | null>(null);
@@ -159,11 +159,11 @@ export function TextPaperReader({ document, annotations, mobile, toolsOpen, acti
   }
   function cancelMobileSelection() { window.clearTimeout(longPressTimer.current); longPressStart.current = null; }
 
-  if (!document || document.status === "processing" || document.status === "missing") return <DocumentConversionProgress document={document} onRetry={onRetry} />;
-  if (document.status === "failed") return <Stack alignItems="center" justifyContent="center" sx={{ flex: 1, p: 3 }}><ErrorState error={document.error || "文本模式生成失败"} /><Button variant="outlined" onClick={document.retryable === false ? onModeToggle : onRetry}>{document.retryable === false ? "使用 PDF 模式" : "重新生成"}</Button></Stack>;
+  if (!document || document.status === "processing" || document.status === "missing") return <Box sx={{ position: "relative", flex: 1 }}>{modeControl && <Box sx={{ position: "absolute", left: 8, top: 8, zIndex: 7 }}>{modeControl}</Box>}<DocumentConversionProgress document={document} onRetry={onRetry} /></Box>;
+  if (document.status === "failed") return <Box sx={{ position: "relative", flex: 1 }}>{modeControl && <Box sx={{ position: "absolute", left: 8, top: 8, zIndex: 7 }}>{modeControl}</Box>}<Stack alignItems="center" justifyContent="center" sx={{ height: "100%", p: 3 }}><ErrorState error={document.error || "文本模式生成失败"} /><Button variant="outlined" onClick={document.retryable === false ? onUsePdf : onRetry}>{document.retryable === false ? "使用 PDF 模式" : "重新生成"}</Button></Stack></Box>;
 
   return <Box sx={{ position: "relative", flex: 1, minHeight: 0, overflow: "hidden", bgcolor: "#f7f7f5" }}>
-    {toolsOpen && <TextToolbar mobile={mobile} search={search} matches={matches.length} matchIndex={matchIndex} fontSize={fontSize} lineHeight={lineHeight} onSearch={setSearch} onMatch={jumpMatch} onFontSize={(value) => setTypography(value)} onLineHeight={(value) => setTypography(fontSize, value)} onModeToggle={onModeToggle} />}
+    {toolsOpen && <TextToolbar mobile={mobile} search={search} matches={matches.length} matchIndex={matchIndex} fontSize={fontSize} lineHeight={lineHeight} onSearch={setSearch} onMatch={jumpMatch} onFontSize={(value) => setTypography(value)} onLineHeight={(value) => setTypography(fontSize, value)} modeControl={modeControl} />}
     <Box ref={scrollRef} className={mobile ? "mobile-reader-selection" : "desktop-reader-selection"} onContextMenu={mobile ? (event) => event.preventDefault() : undefined} onPointerDown={beginMobileSelection} onPointerMove={trackMobileSelection} onPointerUp={cancelMobileSelection} onPointerCancel={cancelMobileSelection} onMouseUp={!mobile ? (event) => capture({ x: event.clientX, y: event.clientY }) : undefined} sx={{ height: "100%", overflowY: "auto", WebkitOverflowScrolling: "touch", touchAction: "pan-y", px: { xs: 2, sm: 3 }, py: { xs: 2.5, sm: 4 } }}>
       <Box component="article" lang="en" sx={{ mx: "auto", maxWidth: 820, p: { xs: 2, sm: 5 }, bgcolor: "background.paper", borderRadius: { xs: 1.5, sm: 2 }, boxShadow: { xs: "none", sm: "0 8px 36px rgba(25,35,45,.08)" }, fontFamily: 'Georgia, "Noto Serif SC", "Songti SC", serif', fontSize, lineHeight, hyphens: "auto", WebkitHyphens: "auto", wordBreak: "normal", overflowWrap: "break-word", "& p": { mt: 0, mb: "1lh" }, "& mark.text-reader-search, & .katex.text-reader-search": { bgcolor: "rgba(255,193,7,.24)", color: "inherit", borderRadius: "1px" } }}>
         <ReaderBlocks blocks={blocks} scrollRoot={scrollRef} annotations={annotations} activeSelection={activeSelection} search={search} onOpenAsset={setAsset} />
@@ -220,9 +220,8 @@ function DocumentConversionProgress({ document, onRetry }: { document: PaperDocu
 
 function formatDuration(seconds: number) { if (seconds < 60) return `${seconds} 秒`; const minutes = Math.floor(seconds / 60); const rest = seconds % 60; return rest ? `${minutes} 分 ${rest} 秒` : `${minutes} 分钟`; }
 
-function TextToolbar({ mobile, search, matches, matchIndex, fontSize, lineHeight, onSearch, onMatch, onFontSize, onLineHeight, onModeToggle }: { mobile: boolean; search: string; matches: number; matchIndex: number; fontSize: number; lineHeight: number; onSearch: (value: string) => void; onMatch: (index: number) => void; onFontSize: (value: number) => void; onLineHeight: (value: number) => void; onModeToggle: () => void }) {
-  const controlSx = mobile ? compactReaderControlSx : readerControlSx;
-  return <Paper elevation={mobile ? 3 : 0} square sx={{ position: mobile ? "absolute" : "relative", zIndex: 6, top: 0, left: 0, right: 0, p: 1, px: { xs: 1, sm: 1.5 }, borderBottom: 1, borderColor: "divider" }}><Box sx={{ display: "grid", gridTemplateColumns: { xs: "auto minmax(0, 1fr)", sm: "auto minmax(0, 1fr) auto" }, gridTemplateAreas: { xs: '"search search" "mode controls"', sm: '"mode search controls"' }, gap: 1, alignItems: "center" }}><IconButton aria-label="切换到 PDF 模式" title="切换到 PDF 模式" onClick={onModeToggle} sx={{ ...controlSx, gridArea: "mode" }}><PictureAsPdfRounded sx={{ fontSize: mobile ? 18 : 20 }} /></IconButton><TextField size="small" value={search} onChange={(event) => onSearch(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter") onMatch(matchIndex + (event.shiftKey ? -1 : 1)); }} placeholder="搜索全文" sx={{ ...readerSearchFieldSx, gridArea: "search", width: "100%", minWidth: 0 }} InputProps={{ startAdornment: <InputAdornment position="start"><SearchRounded fontSize="small" /></InputAdornment>, endAdornment: <InputAdornment position="end"><Typography variant="caption">{matches ? matchIndex + 1 : 0}/{matches}</Typography><IconButton size="small" disabled={!matches} onClick={() => onMatch(matchIndex - 1)} sx={compactReaderControlSx}><KeyboardArrowUpRounded fontSize="small" /></IconButton><IconButton size="small" disabled={!matches} onClick={() => onMatch(matchIndex + 1)} sx={compactReaderControlSx}><KeyboardArrowDownRounded fontSize="small" /></IconButton></InputAdornment> }} /><Stack direction="row" justifyContent="flex-end" alignItems="center" spacing={1} sx={{ gridArea: "controls", minWidth: 0 }}><FormControl size="small"><Select value={fontSize} onChange={(event) => onFontSize(Number(event.target.value))} aria-label="正文字号" sx={{ ...readerSelectSx, minWidth: 82 }}>{[14, 15, 16, 17, 18].map((value) => <MenuItem key={value} value={value}>{value}px</MenuItem>)}</Select></FormControl><FormControl size="small"><Select value={lineHeight} onChange={(event) => onLineHeight(Number(event.target.value))} aria-label="正文行距" sx={{ ...readerSelectSx, minWidth: 108 }}>{[1.45, 1.6, 1.75, 1.9, 2.05].map((value) => <MenuItem key={value} value={value}>行距 {value}</MenuItem>)}</Select></FormControl></Stack></Box></Paper>;
+function TextToolbar({ mobile, search, matches, matchIndex, fontSize, lineHeight, onSearch, onMatch, onFontSize, onLineHeight, modeControl }: { mobile: boolean; search: string; matches: number; matchIndex: number; fontSize: number; lineHeight: number; onSearch: (value: string) => void; onMatch: (index: number) => void; onFontSize: (value: number) => void; onLineHeight: (value: number) => void; modeControl?: ReactNode }) {
+  return <Paper elevation={mobile ? 3 : 0} square sx={{ position: mobile ? "absolute" : "relative", zIndex: 6, top: 0, left: 0, right: 0, p: 1, px: { xs: 1, sm: 1.5 }, borderBottom: 1, borderColor: "divider" }}><Box sx={{ display: "grid", gridTemplateColumns: { xs: modeControl ? "auto minmax(0, 1fr)" : "minmax(0, 1fr)", sm: "auto minmax(0, 1fr) auto" }, gridTemplateAreas: { xs: modeControl ? '"search search" "mode controls"' : '"search" "controls"', sm: '"mode search controls"' }, gap: 1, alignItems: "center" }}>{modeControl && <Box sx={{ gridArea: "mode" }}>{modeControl}</Box>}<TextField size="small" value={search} onChange={(event) => onSearch(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter") onMatch(matchIndex + (event.shiftKey ? -1 : 1)); }} placeholder="搜索全文" sx={{ ...readerSearchFieldSx, gridArea: "search", width: "100%", minWidth: 0 }} InputProps={{ startAdornment: <InputAdornment position="start"><SearchRounded fontSize="small" /></InputAdornment>, endAdornment: <InputAdornment position="end"><Typography variant="caption" sx={{ mr: "10px" }}>{matches ? matchIndex + 1 : 0}/{matches}</Typography><IconButton size="small" disabled={!matches} onClick={() => onMatch(matchIndex - 1)} sx={compactReaderControlSx}><KeyboardArrowUpRounded fontSize="small" /></IconButton><IconButton size="small" disabled={!matches} onClick={() => onMatch(matchIndex + 1)} sx={compactReaderControlSx}><KeyboardArrowDownRounded fontSize="small" /></IconButton></InputAdornment> }} /><Stack direction="row" justifyContent="flex-end" alignItems="center" spacing={1} sx={{ gridArea: "controls", minWidth: 0 }}><FormControl size="small"><Select value={fontSize} onChange={(event) => onFontSize(Number(event.target.value))} aria-label="正文字号" sx={{ ...readerSelectSx, minWidth: 82 }}>{[14, 15, 16, 17, 18].map((value) => <MenuItem key={value} value={value}>{value}px</MenuItem>)}</Select></FormControl><FormControl size="small"><Select value={lineHeight} onChange={(event) => onLineHeight(Number(event.target.value))} aria-label="正文行距" sx={{ ...readerSelectSx, minWidth: 108 }}>{[1.45, 1.6, 1.75, 1.9, 2.05].map((value) => <MenuItem key={value} value={value}>行距 {value}</MenuItem>)}</Select></FormControl></Stack></Box></Paper>;
 }
 
 function DocumentBlockView({ block, blocks, scrollRoot, annotations, activeSelection, search, onOpenAsset }: { block: DocumentBlock; blocks: DocumentBlock[]; scrollRoot: React.RefObject<HTMLDivElement | null>; annotations: Annotation[]; activeSelection?: TextReaderActiveSelection; search: string; onOpenAsset: (asset: { url?: string; html?: string; title: string }) => void }) {

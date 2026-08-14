@@ -358,7 +358,9 @@ def validate_architecture_scene(raw: dict[str, Any]) -> tuple[dict[str, Any] | N
                         )
                     )
 
+    edge_relations: dict[tuple[str, str, str], list[Any]] = {}
     for edge in scene.edges:
+        edge_relations.setdefault((edge.source, edge.target, edge.kind), []).append(edge)
         if edge.source not in nodes or edge.target not in nodes:
             diagnostics.append(
                 _diagnostic(
@@ -378,6 +380,35 @@ def validate_architecture_scene(raw: dict[str, Any]) -> tuple[dict[str, Any] | N
                 )
             )
         require_ids(edge.id, edge.source_ids, sources, "edge.source_missing")
+
+    for (source, target, kind), relation_edges in edge_relations.items():
+        if len(relation_edges) > 1:
+            diagnostics.append(
+                _diagnostic(
+                    "warning",
+                    "edge.duplicate_relation",
+                    f"{len(relation_edges)} {kind} edges repeat {source} -> {target}; combine the processing label and Tensor reference on one semantic edge",
+                    relation_edges[0].id,
+                )
+            )
+
+    reported_reciprocals: set[frozenset[str]] = set()
+    for (source, target, kind), relation_edges in edge_relations.items():
+        if kind != "flow" or source == target:
+            continue
+        reverse_edges = edge_relations.get((target, source, kind))
+        pair = frozenset((source, target))
+        if not reverse_edges or pair in reported_reciprocals:
+            continue
+        reported_reciprocals.add(pair)
+        diagnostics.append(
+            _diagnostic(
+                "warning",
+                "edge.reciprocal_flow",
+                f"Reciprocal flow edges connect {source} and {target}; keep internal Q/K/V, split, and residual operations inside one Module unless the paper explicitly defines recurrence or feedback",
+                relation_edges[0].id,
+            )
+        )
 
     for tensor in scene.tensors:
         require_ids(tensor.id, tensor.source_ids, sources, "tensor.source_missing")

@@ -22,7 +22,7 @@ from ..models import Conversation, Message, Paper, TaskRun, utcnow
 from ..schemas import ConversationCreate, MessageCreate
 from ..services.architecture_scene import release_agent_lock_for_task
 from ..services.common import model_dict
-from ..services.task_control import cancelled_activities
+from ..services.task_control import active_task_for_conversation, cancelled_activities
 
 router = APIRouter(prefix="/api/conversations", tags=["conversations"])
 
@@ -258,6 +258,8 @@ def send_message(
     session: Annotated[Session, Depends(get_session)],
 ) -> dict:
     conversation = _conversation_or_404(session, conversation_id)
+    if active_task_for_conversation(session, conversation.id):
+        raise HTTPException(status_code=409, detail="该对话的 Agent 正在处理另一项任务")
     context = dict(payload.context_json)
     if payload.selected_text:
         context["selected_text"] = payload.selected_text
@@ -294,6 +296,8 @@ def stream_message(
     session: Annotated[Session, Depends(get_session)],
 ) -> StreamingResponse:
     conversation = _conversation_or_404(session, conversation_id)
+    if active_task_for_conversation(session, conversation.id):
+        raise HTTPException(status_code=409, detail="该对话的 Agent 正在处理另一项任务")
     task_kind = "paper_chat" if conversation.kind == "paper" else "global_chat"
     message: Message | None = None
     assistant: Message

@@ -114,6 +114,37 @@ def test_architecture_validation_preserves_module_tex_symbol(client: TestClient)
     assert result["scene"]["nodes"][1]["symbol"] == "g_\\psi"
 
 
+def test_architecture_validation_flags_duplicate_and_reciprocal_flows(
+    client: TestClient,
+) -> None:
+    scene = sample_scene()
+    scene["edges"].extend(
+        [
+            {
+                "id": "observation_to_encoder_process",
+                "source": "observation",
+                "target": "encoder",
+                "label": "projection",
+            },
+            {
+                "id": "encoder_to_observation_return",
+                "source": "encoder",
+                "target": "observation",
+                "label": "split output + residual",
+            },
+        ]
+    )
+
+    response = client.post("/api/papers/_/architecture/validate", json=scene)
+
+    assert response.status_code == 200
+    result = response.json()
+    assert result["valid"] is True
+    codes = {item["code"] for item in result["diagnostics"]}
+    assert "edge.duplicate_relation" in codes
+    assert "edge.reciprocal_flow" in codes
+
+
 def test_user_lock_commit_revision_and_agent_exclusion(client: TestClient) -> None:
     paper = create_architecture_paper(client, "locking")
     path = f"/api/papers/{paper['id']}/architecture"
@@ -165,6 +196,18 @@ def test_generation_lock_blocks_user_and_cancel_releases_it(client: TestClient) 
     assert payload["status"] == "generating"
     assert payload["lock"]["ownerType"] == "agent"
     assert payload["progress"]["activities"][0]["label"] == "正在启动 Agent"
+    task = client.get(f"/api/tasks/{payload['taskId']}").json()
+    conversation_id = task["payload_json"]["conversation_id"]
+    conversations = client.get(
+        f"/api/conversations?kind=paper&reference_id={paper['id']}"
+    ).json()
+    assert conversations[0]["id"] == conversation_id
+
+    concurrent = client.post(
+        f"/api/conversations/{conversation_id}/messages",
+        json={"content": "Explain the architecture while it is being generated."},
+    )
+    assert concurrent.status_code == 409
 
     blocked = client.post(f"{path}/lock", json={"ownerId": "browser-2"})
     assert blocked.status_code == 423

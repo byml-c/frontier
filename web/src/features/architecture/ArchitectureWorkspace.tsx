@@ -4,6 +4,7 @@ import AutoFixHighRounded from "@mui/icons-material/AutoFixHighRounded";
 import CheckRounded from "@mui/icons-material/CheckRounded";
 import LockRounded from "@mui/icons-material/LockRounded";
 import OpenInNewRounded from "@mui/icons-material/OpenInNewRounded";
+import SaveRounded from "@mui/icons-material/SaveRounded";
 import { Alert, Box, Button, CircularProgress, Divider, Stack, Typography } from "@mui/material";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { forwardRef, useEffect, useImperativeHandle, useRef, useState } from "react";
@@ -22,6 +23,8 @@ type Props = {
   onContextChange?: (context: ArchitectureReaderContext) => void;
   chatCardIds?: string[];
   onAddToChat?: (card: ArchitectureChatCard) => void;
+  onRequestExpand?: (card: ArchitectureChatCard) => void;
+  onAgentBusyChange?: (busy: boolean) => void;
 };
 
 export type ArchitectureWorkspaceHandle = {
@@ -33,7 +36,7 @@ const ownerId = () => {
   return globalThis.crypto?.randomUUID?.() ?? `browser-${Date.now()}-${Math.random()}`;
 };
 
-export const ArchitectureWorkspace = forwardRef<ArchitectureWorkspaceHandle, Props>(function ArchitectureWorkspace({ paperId, onJumpToPage, onContextChange, chatCardIds = [], onAddToChat }, ref) {
+export const ArchitectureWorkspace = forwardRef<ArchitectureWorkspaceHandle, Props>(function ArchitectureWorkspace({ paperId, onJumpToPage, onContextChange, chatCardIds = [], onAddToChat, onRequestExpand, onAgentBusyChange }, ref) {
   const queryClient = useQueryClient();
   const readerRef = useRef<ArchitectureReaderHandle>(null);
   const editorId = useRef(ownerId());
@@ -43,12 +46,11 @@ export const ArchitectureWorkspace = forwardRef<ArchitectureWorkspaceHandle, Pro
   const selectedRef = useRef<ArchitectureNode | null>(null);
   const latestDraftRef = useRef<ArchitectureNodeDraft | null>(null);
   const lastSavedDraftRef = useRef("");
-  const saveChainRef = useRef<Promise<void>>(Promise.resolve());
-  const persistDraftRef = useRef<(value: ArchitectureNodeDraft) => Promise<void>>(() => Promise.resolve());
   const [selected, setSelected] = useState<ArchitectureNode | null>(null);
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState<ArchitectureNodeDraft | null>(null);
   const [closing, setClosing] = useState(false);
+  const [pendingExit, setPendingExit] = useState<"close" | "chat" | null>(null);
   const [diagnostics, setDiagnostics] = useState<ArchitectureDiagnostic[]>([]);
   const architecture = useQuery({
     queryKey: ["paper-architecture", paperId],
@@ -66,6 +68,11 @@ export const ArchitectureWorkspace = forwardRef<ArchitectureWorkspaceHandle, Pro
     execute(commands) { readerRef.current?.execute(commands); },
     getContext() { return readerRef.current?.getContext() ?? null; },
   }), []);
+
+  useEffect(() => {
+    onAgentBusyChange?.(Boolean(document?.status === "generating" || document?.lock?.ownerType === "agent"));
+    return () => onAgentBusyChange?.(false);
+  }, [document?.lock?.ownerType, document?.status, onAgentBusyChange]);
 
   const generate = useMutation({
     mutationFn: (rebuild: boolean) => api<ArchitectureDocument>(`/api/papers/${paperId}/architecture/generate`, jsonBody({ rebuild })),
@@ -107,12 +114,6 @@ export const ArchitectureWorkspace = forwardRef<ArchitectureWorkspaceHandle, Pro
   }, [editing, paperId, queryClient]);
 
   useEffect(() => {
-    if (!editing || !draft || closing || document?.lock?.ownerId !== editorId.current) return;
-    const timer = window.setTimeout(() => { void persistDraftRef.current(draft).catch(() => undefined); }, 650);
-    return () => window.clearTimeout(timer);
-  }, [closing, document?.lock?.ownerId, draft, editing]);
-
-  useEffect(() => {
     const releaseOnExit = () => {
       if (!editingRef.current) return;
       void api<ArchitectureDocument>(`/api/papers/${paperId}/architecture/lock/release`, {
@@ -130,18 +131,21 @@ export const ArchitectureWorkspace = forwardRef<ArchitectureWorkspaceHandle, Pro
   async function beginEdit(target: ArchitectureNode | null = selected) {
     if (!target || !scene) return;
     const requestId = ++editRequestId.current;
-    const annotation = scene.annotations.find((item) => item.target?.type === "node" && item.target.id === target.id);
-    const initialDraft = { title: target.title, symbol: target.symbol ?? "", architecture: target.type === "module" ? target.architecture ?? "" : "", keywords: target.type === "module" ? (target.keywords ?? []).join(" · ") : (target.preprocessing ?? []).join(" → "), description: target.description ?? "", annotation: annotation?.markdown ?? "" };
-    latestDraftRef.current = initialDraft;
-    lastSavedDraftRef.current = JSON.stringify(initialDraft);
-    setDraft(initialDraft);
-    setEditing(true);
     try {
       await acquireLock.mutateAsync();
     } catch {
       return;
     }
-    if (editRequestId.current !== requestId) releaseLock.mutate();
+    if (editRequestId.current !== requestId) { releaseLock.mutate(); return; }
+    const currentScene = documentRef.current?.scene ?? scene;
+    const currentNode = currentScene.nodes.find((node) => node.id === target.id) ?? target;
+    const annotation = currentScene.annotations.find((item) => item.target?.type === "node" && item.target.id === currentNode.id);
+    const initialDraft = { title: currentNode.title, symbol: currentNode.symbol ?? "", architecture: currentNode.type === "module" ? currentNode.architecture ?? "" : "", keywords: currentNode.type === "module" ? (currentNode.keywords ?? []).join(" · ") : (currentNode.preprocessing ?? []).join(" → "), description: currentNode.description ?? "", annotation: annotation?.markdown ?? "" };
+    latestDraftRef.current = initialDraft;
+    lastSavedDraftRef.current = JSON.stringify(initialDraft);
+    setSelected(currentNode);
+    setDraft(initialDraft);
+    setEditing(true);
   }
   function openNode(node: ArchitectureNode) {
     setSelected(node);
@@ -152,23 +156,24 @@ export const ArchitectureWorkspace = forwardRef<ArchitectureWorkspaceHandle, Pro
     setClosing(false);
     void beginEdit(node);
   }
-  async function closeDetail() {
+  async function finishClose() {
     editRequestId.current += 1;
     if (acquireLock.isPending) {
       setEditing(false); setDraft(null); setSelected(null); saveNode.reset(); acquireLock.reset();
       return;
     }
     setClosing(true);
-    if (documentRef.current?.lock?.ownerId === editorId.current && latestDraftRef.current) {
-      try {
-        await persistDraft(latestDraftRef.current);
-      } catch {
-        setClosing(false);
-        return;
-      }
+    if (documentRef.current?.lock?.ownerId === editorId.current) {
       await releaseLock.mutateAsync().catch(() => undefined);
     }
     setClosing(false); setEditing(false); setDraft(null); setSelected(null); saveNode.reset(); acquireLock.reset();
+  }
+  function draftIsDirty() {
+    return Boolean(latestDraftRef.current && JSON.stringify(latestDraftRef.current) !== lastSavedDraftRef.current);
+  }
+  function closeDetail() {
+    if (draftIsDirty()) { setPendingExit("close"); return; }
+    void finishClose();
   }
   function sceneWithDraft(currentScene: ArchitectureScene, target: ArchitectureNode, value: ArchitectureNodeDraft): ArchitectureScene {
     const currentNode = currentScene.nodes.find((node) => node.id === target.id) ?? target;
@@ -184,48 +189,58 @@ export const ArchitectureWorkspace = forwardRef<ArchitectureWorkspaceHandle, Pro
     } else if (existing) annotations = currentScene.annotations.filter((item) => item.id !== existing.id);
     return { ...currentScene, nodes: currentScene.nodes.map((node) => node.id === target.id ? updatedNode : node), annotations };
   }
-  function persistDraft(value: ArchitectureNodeDraft): Promise<void> {
+  async function saveDraft(value: ArchitectureNodeDraft): Promise<void> {
     const fingerprint = JSON.stringify(value);
-    if (!value.title.trim() || fingerprint === lastSavedDraftRef.current) return saveChainRef.current;
-    const operation = saveChainRef.current.catch(() => undefined).then(async () => {
-      if (fingerprint === lastSavedDraftRef.current) return;
-      const current = documentRef.current;
-      const currentScene = current?.scene;
-      const target = selectedRef.current;
-      if (!current || !currentScene || !target || current.lock?.ownerId !== editorId.current) throw new Error("当前编辑锁不可用");
-      const valueDocument = await saveNode.mutateAsync({ current, nextScene: sceneWithDraft(currentScene, target, value) });
-      documentRef.current = valueDocument;
-      lastSavedDraftRef.current = fingerprint;
-    });
-    saveChainRef.current = operation;
-    return operation;
+    if (!value.title.trim() || fingerprint === lastSavedDraftRef.current) return;
+    const current = documentRef.current;
+    const currentScene = current?.scene;
+    const target = selectedRef.current;
+    if (!current || !currentScene || !target || current.lock?.ownerId !== editorId.current) throw new Error("当前编辑锁不可用");
+    const valueDocument = await saveNode.mutateAsync({ current, nextScene: sceneWithDraft(currentScene, target, value) });
+    documentRef.current = valueDocument;
+    lastSavedDraftRef.current = fingerprint;
   }
   function updateDraft(value: ArchitectureNodeDraft) {
     latestDraftRef.current = value;
     setDraft(value);
   }
-  persistDraftRef.current = persistDraft;
   function resolveAsset(asset: ArchitectureScene["assets"][number]) {
     if (asset.src.startsWith("asset://architecture/")) return `/api/papers/${paperId}/architecture/assets/${encodeURIComponent(asset.src.slice("asset://architecture/".length))}`;
     if (asset.src.startsWith("asset://document/")) return `/api/papers/${paperId}/document/assets/${encodeURIComponent(asset.src.slice("asset://document/".length))}`;
     return undefined;
   }
-  function addNodeToChat(node: ArchitectureNode) {
-    if (!onAddToChat) return;
-    const annotation = scene?.annotations
-      .filter((item) => item.target?.type === "node" && item.target.id === node.id)
+  function nodeChatCard(node: ArchitectureNode): ArchitectureChatCard {
+    const currentScene = documentRef.current?.scene ?? scene;
+    const currentNode = currentScene?.nodes.find((item) => item.id === node.id) ?? node;
+    const annotation = currentScene?.annotations
+      .filter((item) => item.target?.type === "node" && item.target.id === currentNode.id)
       .map((item) => item.markdown)
       .join("\n\n---\n\n");
-    onAddToChat({
-      id: node.id,
-      type: node.type,
-      title: node.title,
-      symbol: node.symbol,
-      architecture: node.type === "module" ? node.architecture : undefined,
-      details: node.type === "module" ? node.keywords ?? [] : node.preprocessing ?? [],
-      description: node.description,
+    return {
+      id: currentNode.id,
+      type: currentNode.type,
+      title: currentNode.title,
+      symbol: currentNode.symbol,
+      architecture: currentNode.type === "module" ? currentNode.architecture : undefined,
+      details: currentNode.type === "module" ? currentNode.keywords ?? [] : currentNode.preprocessing ?? [],
+      description: currentNode.description,
       annotation: annotation || undefined,
-    });
+    };
+  }
+  function addNodeToChat(node: ArchitectureNode) {
+    onAddToChat?.(nodeChatCard(node));
+  }
+  function addToChatAndClose() {
+    if (!selected || !onAddToChat) return;
+    if (draftIsDirty()) { setPendingExit("chat"); return; }
+    addNodeToChat(selected);
+    void finishClose();
+  }
+  function confirmDiscard() {
+    const action = pendingExit;
+    setPendingExit(null);
+    if (action === "chat" && selected) addNodeToChat(selected);
+    void finishClose();
   }
 
   if (architecture.isLoading) return <Loading label="正在加载论文架构" />;
@@ -238,12 +253,13 @@ export const ArchitectureWorkspace = forwardRef<ArchitectureWorkspaceHandle, Pro
   const agentLocked = document.lock?.ownerType === "agent";
 
   return <Box sx={{ width: "100%", height: "100%", position: "relative", overflow: "hidden" }}>
-    <ArchitectureReader ref={readerRef} paperId={paperId} revision={document.revision} scene={scene} resolveAsset={resolveAsset} onNodeOpen={openNode} onContextChange={onContextChange} />
-    {(document.status === "generating" || agentLocked) && <Stack spacing={1} sx={{ position: "absolute", left: 16, top: 16, zIndex: 9, width: "min(440px, calc(100% - 32px))" }}><Alert icon={<LockRounded />} severity="info" sx={{ boxShadow: 1 }} action={document.taskId ? <Button size="small" color="inherit" disabled={stopGeneration.isPending} onClick={() => stopGeneration.mutate(document.taskId!)}>停止</Button> : undefined}>Agent 正在更新架构，完成后可继续编辑。</Alert>{document.status === "generating" && <AgentActivity items={document.progress?.activities ?? []} pending />}</Stack>}
+    <ArchitectureReader ref={readerRef} paperId={paperId} revision={document.revision} scene={scene} resolveAsset={resolveAsset} onNodeOpen={openNode} onRequestExpand={onRequestExpand ? (node) => onRequestExpand(nodeChatCard(node)) : undefined} onContextChange={onContextChange} />
+    {(document.status === "generating" || agentLocked) && <Stack spacing={1} sx={{ position: "absolute", left: 60, top: 12, zIndex: 9, width: "min(440px, calc(100% - 72px))" }}><Alert icon={<LockRounded />} severity="info" sx={{ boxShadow: 1 }} action={document.taskId ? <Button size="small" color="inherit" disabled={stopGeneration.isPending} onClick={() => stopGeneration.mutate(document.taskId!)}>停止</Button> : undefined}>Agent 正在更新架构，完成后可继续编辑。</Alert>{document.status === "generating" && <AgentActivity items={document.progress?.activities ?? []} pending />}</Stack>}
     {document.error && scene && <Alert severity="warning" sx={{ position: "absolute", left: 16, bottom: 16, zIndex: 9, maxWidth: 500 }}>{document.error}</Alert>}
     {document.stale && <Alert severity="warning" sx={{ position: "absolute", left: 16, bottom: 16, zIndex: 9, maxWidth: 500 }} action={<Button size="small" color="inherit" disabled={generate.isPending} onClick={() => generate.mutate(true)}>更新</Button>}>架构可能基于旧版论文。</Alert>}
     {diagnostics.some((item) => item.level === "warning") && <Alert severity="warning" sx={{ position: "absolute", left: 16, bottom: 16, zIndex: 9, maxWidth: 500 }}>架构已保存，但有 {diagnostics.filter((item) => item.level === "warning").length} 项布局或来源提示。</Alert>}
-    <NodeDetail open={Boolean(selected)} node={selected} scene={scene} resolveAsset={resolveAsset} editing={editing} draft={draft} acquiring={acquireLock.isPending} locked={agentLocked || Boolean(document.lock && document.lock.ownerId !== editorId.current)} saving={saveNode.isPending || closing} error={saveNode.error?.message || acquireLock.error?.message} addedToChat={Boolean(selected && chatCardIds.includes(selected.id))} onAddToChat={selected && onAddToChat ? () => addNodeToChat(selected) : undefined} onClose={closeDetail} onDraft={updateDraft} onJumpToPage={onJumpToPage} />
+    <NodeDetail open={Boolean(selected)} node={selected} scene={scene} resolveAsset={resolveAsset} editing={editing} draft={draft} dirty={draftIsDirty()} acquiring={acquireLock.isPending} locked={agentLocked || Boolean(document.lock && document.lock.ownerId !== editorId.current)} saving={saveNode.isPending || closing} error={saveNode.error?.message || acquireLock.error?.message} addedToChat={Boolean(selected && chatCardIds.includes(selected.id))} onAddToChat={selected && onAddToChat ? addToChatAndClose : undefined} onClose={closeDetail} onDraft={updateDraft} onSave={() => draft && void saveDraft(draft)} onJumpToPage={onJumpToPage} />
+    <Modal open={pendingExit !== null} onClose={() => setPendingExit(null)} title="放弃未保存的修改？"><Typography color="text.secondary">当前节点还有未保存内容。继续将放弃这些修改。</Typography><Stack direction="row" justifyContent="flex-end" spacing={1} sx={{ mt: 3 }}><Button onClick={() => setPendingExit(null)}>继续编辑</Button><Button color="error" variant="contained" onClick={confirmDiscard}>{pendingExit === "chat" ? "放弃并添加到对话" : "放弃修改"}</Button></Stack></Modal>
   </Box>;
 });
 
@@ -255,24 +271,24 @@ function GeneratingArchitecture({ taskId, activities, stopping, onStop }: { task
   return <Box sx={{ height: "100%", overflowY: "auto", bgcolor: "#FAFBFC", p: 3 }}><Stack spacing={2} sx={{ width: "min(620px, 100%)", mx: "auto", minHeight: "100%", justifyContent: "center" }}><Box sx={{ textAlign: "center" }}><Typography variant="h2">Agent 正在生成架构图</Typography><Typography color="text.secondary" sx={{ mt: 1 }}>这里展示真实的工具调用与 JSON 写入进度；完成校验并提交后，画布会自动出现。</Typography></Box><AgentActivity items={activities} pending />{taskId && <Button color="inherit" disabled={stopping} onClick={() => onStop(taskId)}>{stopping ? "正在停止" : "停止生成"}</Button>}</Stack></Box>;
 }
 
-function NodeDetail({ open, node, scene, resolveAsset, editing, draft, acquiring, locked, saving, error, addedToChat, onAddToChat, onClose, onDraft, onJumpToPage }: { open: boolean; node: ArchitectureNode | null; scene: ArchitectureScene; resolveAsset: (asset: ArchitectureScene["assets"][number]) => string | undefined; editing: boolean; draft: ArchitectureNodeDraft | null; acquiring: boolean; locked: boolean; saving: boolean; error?: string; addedToChat: boolean; onAddToChat?: () => void; onClose: () => void; onDraft: (value: ArchitectureNodeDraft) => void; onJumpToPage: (page: number) => void }) {
+function NodeDetail({ open, node, scene, resolveAsset, editing, draft, dirty, acquiring, locked, saving, error, addedToChat, onAddToChat, onClose, onDraft, onSave, onJumpToPage }: { open: boolean; node: ArchitectureNode | null; scene: ArchitectureScene; resolveAsset: (asset: ArchitectureScene["assets"][number]) => string | undefined; editing: boolean; draft: ArchitectureNodeDraft | null; dirty: boolean; acquiring: boolean; locked: boolean; saving: boolean; error?: string; addedToChat: boolean; onAddToChat?: () => void; onClose: () => void; onDraft: (value: ArchitectureNodeDraft) => void; onSave: () => void; onJumpToPage: (page: number) => void }) {
   if (!node) return null;
   const annotations = scene.annotations.filter((item) => item.target?.type === "node" && item.target.id === node.id);
   const sourceMap = new Map(scene.sources.map((source) => [source.id, source]));
   const sources = (node.sourceIds ?? []).flatMap((id) => sourceMap.get(id) ?? []);
   const primaryExample = node.type === "data" ? node.examples?.find((item) => item.id === node.primaryExampleId) : undefined;
   const asset = primaryExample?.assetId ? scene.assets.find((item) => item.id === primaryExample.assetId) : undefined;
-  return <Modal open={open} onClose={onClose} title="架构节点" wide fixedHeight><Stack sx={{ height: "100%", minHeight: 0 }}>
+  return <Modal open={open} onClose={onClose} title={node.type === "module" ? "Module" : "Data"} wide fixedHeight><Stack sx={{ height: "100%", minHeight: 0 }}>
     <Stack spacing={2} sx={{ flex: "1 1 0", minHeight: 0, overflowY: "auto", pr: .5, pb: 2 }}>
-      {editing && draft ? <ArchitectureNodeCardEditor node={node} draft={draft} onDraft={onDraft} /> : <ArchitectureNodeCard node={node} assetUrl={asset ? resolveAsset(asset) : undefined} annotation={annotations.map((item) => item.markdown).join("\n\n---\n\n")} onJumpToPage={onJumpToPage} />}
+      {editing && draft ? <ArchitectureNodeCardEditor node={node} draft={draft} disabled={locked || saving} onDraft={onDraft} /> : <ArchitectureNodeCard node={node} assetUrl={asset ? resolveAsset(asset) : undefined} annotation={annotations.map((item) => item.markdown).join("\n\n---\n\n")} onJumpToPage={onJumpToPage} />}
       {sources.length > 0 && <><Divider /><Box><Typography variant="h3" sx={{ mb: 1 }}>来源</Typography><Stack alignItems="flex-start" spacing={.5}>{sources.map((source) => source.pageNumber ? <Button size="small" key={source.id} onClick={() => onJumpToPage(source.pageNumber!)}>第 {source.pageNumber} 页{source.label ? ` · ${source.label}` : ""}</Button> : source.url ? <Button size="small" component="a" href={source.url} target="_blank" rel="noreferrer" endIcon={<OpenInNewRounded />} key={source.id}>{source.label || source.url}</Button> : null)}</Stack></Box></>}
       {acquiring && <Alert severity="info">正在准备编辑…</Alert>}
-      {locked && <Alert icon={<LockRounded />} severity="warning">Agent 或另一个页面正在更新架构；当前修改会保留在输入框中，取得编辑权后才能自动保存。</Alert>}
+      {locked && <Alert icon={<LockRounded />} severity="warning">Agent 或另一个页面正在更新架构，当前只能查看。</Alert>}
       {error && <Alert severity="error">{error}</Alert>}
     </Stack>
     {(editing || onAddToChat) && <><Divider /><Stack direction="row" justifyContent="space-between" alignItems="center" spacing={1} sx={{ pt: 1.5 }}>
       {onAddToChat ? <Button color="inherit" startIcon={addedToChat ? <CheckRounded /> : <AddCommentRounded />} disabled={addedToChat} onClick={onAddToChat}>{addedToChat ? "已添加到对话" : "添加到对话"}</Button> : <Box />}
-      {editing && <Typography variant="caption" color={error ? "error" : "text.secondary"}>{error ? "自动保存失败" : saving ? "正在自动保存…" : acquiring ? "正在准备自动保存…" : locked ? "等待编辑权" : "修改会自动保存"}</Typography>}
+      {editing && <Stack direction="row" alignItems="center" spacing={1}><Typography variant="caption" color={error ? "error" : dirty ? "warning.main" : "text.secondary"}>{error ? "保存失败" : dirty ? "有未保存修改" : "已保存"}</Typography><Button variant="contained" startIcon={saving ? <CircularProgress size={15} color="inherit" /> : <SaveRounded />} disabled={saving || acquiring || locked || !dirty || !draft?.title.trim()} onClick={onSave}>{saving ? "正在保存" : "保存"}</Button></Stack>}
     </Stack></>}
   </Stack></Modal>;
 }

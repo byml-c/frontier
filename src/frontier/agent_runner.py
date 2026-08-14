@@ -240,6 +240,16 @@ For example, a shared online vision encoder may use `symbol: "g_\\psi"`,
 `architecture: "DINOv2-B/14"`, and `keywords: ["shared weights", "fine-tuned"]`. Store Data and
 Tensor symbols as TeX without `$` delimiters. In descriptions, annotations, labels, and keywords,
 wrap mathematical expressions in `$...$` so the Web can render them as formulas.
+When a processing step and a Tensor describe the same source-to-target relation, store both on one
+Edge with `label` and `tensorId`; never split them into duplicate same-kind Edges. Use separate Edges
+only for genuinely distinct flow and conditioning semantics.
+Model each semantic operator once. For a feed-forward architecture, keep the main flow acyclic and
+never encode an operator's input preparation and returned output as reciprocal Edges between the
+same pair of nodes. Keep internal Q/K/V projection, attention output splitting, residual addition,
+normalization, and similar sub-steps in that Module's `architecture`, `keywords`, or `description`;
+merge inseparable internal phases into one Module. Reciprocal flow Edges are allowed only when the
+paper explicitly establishes recurrence, iteration, or feedback. Fix every `edge.duplicate_relation`
+and `edge.reciprocal_flow` diagnostic before committing an Agent-generated Scene.
 
 Use stable semantic IDs. Run `frontier architecture validate --data @{work_path}` and fix every
 error; review geometry and provenance warnings. This MVP does not use automated screenshots: do not
@@ -534,7 +544,11 @@ def run_task(task_id: str) -> None:
                 conversation = session.get(Conversation, conversation_id)
                 if conversation:
                     conversation.codex_session_id = session_id or conversation.codex_session_id
-                    if return_code == 0:
+                    if return_code == 0 and task.kind in {
+                        "paper_chat",
+                        "global_chat",
+                        "graph_maintenance",
+                    }:
                         paper_id = (
                             task.payload_json.get("paper_id") if task.kind == "paper_chat" else None
                         )

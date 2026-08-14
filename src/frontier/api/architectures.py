@@ -4,6 +4,7 @@ from typing import Annotated, Any
 
 from fastapi import APIRouter, BackgroundTasks, Depends, File, HTTPException, UploadFile
 from fastapi.responses import FileResponse
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from ..agent_runner import run_task
@@ -16,7 +17,7 @@ from ..architecture_schemas import (
 )
 from ..config import settings
 from ..database import get_session
-from ..models import Paper, TaskRun
+from ..models import Conversation, Paper, TaskRun
 from ..services.architecture_progress import ARCHITECTURE_PROGRESS_KEY
 from ..services.architecture_scene import (
     ArchitectureError,
@@ -32,6 +33,7 @@ from ..services.architecture_scene import (
     validate_architecture_scene,
 )
 from ..services.common import log_operation, model_dict
+from ..services.task_control import active_task_for_conversation
 
 router = APIRouter(prefix="/api/papers/{paper_id}/architecture", tags=["architecture"])
 
@@ -249,10 +251,23 @@ def generate_architecture(
     current = architecture_document_payload(session, paper_id)
     if current["status"] == "ready" and not payload.rebuild:
         return current
+    conversation = session.scalar(
+        select(Conversation)
+        .where(Conversation.kind == "paper", Conversation.reference_id == paper_id)
+        .order_by(Conversation.created_at.asc())
+        .limit(1)
+    )
+    if conversation is None:
+        conversation = Conversation(kind="paper", reference_id=paper_id, title="论文问答")
+        session.add(conversation)
+        session.flush()
+    if active_task_for_conversation(session, conversation.id):
+        raise HTTPException(status_code=409, detail="该论文的 Agent 正在处理另一项任务")
     task = TaskRun(
         kind="architecture_generation",
         payload_json={
             "paper_id": paper_id,
+            "conversation_id": conversation.id,
             "base_revision": current["revision"],
             "rebuild": payload.rebuild,
         },

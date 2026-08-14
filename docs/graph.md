@@ -506,6 +506,16 @@ Canonical visual grammar 应至少支持有限的关系样式。
 ┄┄┄┄┄┄→  conditioning / auxiliary input
 ```
 
+同一起点、终点和关系类型上的处理说明与 Tensor 信息属于同一条 Edge：处理写入
+`label`，Tensor 通过 `tensorId` 引用，并在同一个连线标签中展示，不应拆成两条重叠边。
+只有 `flow` 与 `conditioning` 等语义确实不同的关系才保留为独立连线。
+
+一个语义算子只建一个 Module。对于前馈架构，主数据流默认保持无环；Q/K/V 投影、
+attention 输出拆分、residual、normalization 等同一算子内部步骤应放入该 Module 的
+`architecture`、`keywords` 或 `description`，不能用同一节点对之间的互反 Edge 表达
+“进入算子”和“返回结果”。只有论文明确存在 recurrence、iteration 或 feedback 时，
+才允许互反的 `flow` Edge，并需要在标签或描述中说明循环语义。
+
 是否增加其他 edge semantics 可以在实现中逐步扩展，但禁止让 Agent 自由选择 arbitrary CSS。
 
 ---
@@ -1539,6 +1549,11 @@ Server 对 error 级问题拒绝保存。warning 可以保存，并在 Reader �
 生成等待页只展示真实、文字形式的活动进度，包括论文读取、工具调用、Scene 校验与
 提交状态，以及任务目录中 `scene.architecture.json` 当前实际行数。不使用推测百分比，
 也不渲染尚未提交的中间 Scene。活动快照写入 TaskRun，因此刷新页面后仍可恢复。
+
+同一篇论文的架构生成、架构修改和论文对话绑定同一个 paper Conversation，并复用其
+`codex_session_id`。它们共享逻辑 Agent 上下文，但同一 Conversation 的 turn 必须串行；
+Server 在已有 queued / running task 时拒绝并发启动。底层执行进程按 turn 创建，不将
+“共享 Agent”误解为永久占用资源的常驻 OS 进程。
 
 Validation error 不应造成整个 Reader crash。
 

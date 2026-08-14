@@ -11,6 +11,7 @@ type Props = {
   active: boolean;
   cancelling: boolean;
   stopDisabled: boolean;
+  sendDisabled?: boolean;
   onStop: () => void;
   conversation?: Conversation;
   liveState?: AgentRuntimeState;
@@ -26,7 +27,7 @@ export type AgentComposerHandle = {
  * Shared two-level composer. Draft state deliberately lives here so typing does
  * not re-render the conversation history (especially Markdown and KaTeX).
  */
-const AgentComposerImpl = forwardRef<AgentComposerHandle, Props>(function AgentComposer({ onKeyDown, placeholder, active, cancelling, stopDisabled, onStop, conversation, liveState }, ref) {
+const AgentComposerImpl = forwardRef<AgentComposerHandle, Props>(function AgentComposer({ onKeyDown, placeholder, active, cancelling, stopDisabled, sendDisabled = false, onStop, conversation, liveState }, ref) {
   const [value, setValue] = useState("");
   const valueRef = useRef("");
   const updateValue = useCallback((nextValue: string) => {
@@ -110,7 +111,7 @@ const AgentComposerImpl = forwardRef<AgentComposerHandle, Props>(function AgentC
                 type="submit"
                 color="primary"
                 aria-label="发送"
-                disabled={!value.trim()}
+                disabled={sendDisabled || !value.trim()}
                 sx={{
                   width: 30,
                   height: 30,
