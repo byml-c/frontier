@@ -85,3 +85,57 @@ def test_private_api_requires_a_trusted_device_while_daily_stays_public(
     finally:
         settings.access_password = previous
         client.cookies.clear()
+
+
+def test_daily_discussion_is_bound_to_the_paper_across_dates(client: TestClient) -> None:
+    paper = _paper(client)
+    for target in ("2026-08-14", "2026-08-15"):
+        assert client.put(
+            f"/api/daily/{target}", json={"paper_id": paper["id"]}
+        ).status_code == 200
+
+    created = client.post(
+        f"/api/daily/papers/{paper['id']}/reviews",
+        json={"score": 5, "confidence": 4, "content": "**有价值**，但还需验证。"},
+    )
+    assert created.status_code == 200, created.text
+    review = created.json()
+    assert review["is_mine"] is True
+    assert review["initial_score"] == 5
+    assert len(review["author"]["name"]) == 4
+    assert review["author"]["color"].startswith("#")
+
+    duplicate = client.post(
+        f"/api/daily/papers/{paper['id']}/reviews",
+        json={"score": 3, "confidence": 3, "content": "不应创建第二份评审。"},
+    )
+    assert duplicate.status_code == 409
+
+    reply = client.post(
+        f"/api/daily/reviews/{review['id']}/replies",
+        json={"content": f"@{review['author']['name']} 同意。"},
+    )
+    assert reply.status_code == 200
+    assert "score" not in reply.json()
+
+    updated = client.put(
+        f"/api/daily/papers/{paper['id']}/reviews/mine",
+        json={"score": 4, "confidence": 3, "content": "更新后的 **评审**。"},
+    )
+    assert updated.status_code == 200, updated.text
+    assert updated.json()["initial_score"] == 5
+    assert updated.json()["score"] == 4
+    assert len(updated.json()["replies"]) == 1
+
+    discussion = client.get(f"/api/daily/papers/{paper['id']}/reviews")
+    assert discussion.status_code == 200
+    body = discussion.json()
+    assert body["paper_id"] == paper["id"]
+    assert body["review_count"] == 1
+    assert body["average_score"] == 4.0
+    assert body["reviews"][0]["initial_score"] == 5
+    assert body["reviews"][0]["replies"][0]["content"].endswith("同意。")
+    assert client.post(
+        f"/api/daily/papers/{paper['id']}/reviews",
+        json={"score": 7, "confidence": 4, "content": "invalid"},
+    ).status_code == 422

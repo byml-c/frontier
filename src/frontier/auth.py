@@ -2,27 +2,32 @@ from __future__ import annotations
 
 import hashlib
 import hmac
-import time
 import uuid
 
-from fastapi import Request
+from fastapi import Request, Response
 
 from .config import settings
 
 COOKIE_NAME = "frontier_trusted_device"
+ANONYMOUS_COOKIE_NAME = "frontier_anonymous_device"
 INTERNAL_TOKEN_HEADER = "X-Frontier-Internal-Token"
+PERSISTENT_COOKIE_SECONDS = 10 * 365 * 24 * 60 * 60
+ANONYMOUS_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789"
+ANONYMOUS_COLORS = (
+    "#1565C0", "#6A1B9A", "#00838F", "#2E7D32", "#AD1457",
+    "#EF6C00", "#5D4037", "#455A64", "#3949AB", "#00897B",
+)
 
 
-def _signature(value: str) -> str:
+def _signature(value: str, purpose: str = "trusted") -> str:
     secret = hashlib.sha256(
-        f"frontier-device-cookie:{settings.access_password}".encode()
+        f"frontier-device-cookie:{purpose}:{settings.access_password}".encode()
     ).digest()
     return hmac.new(secret, value.encode(), hashlib.sha256).hexdigest()
 
 
 def create_device_token() -> str:
-    expires_at = int(time.time()) + settings.trusted_device_days * 24 * 60 * 60
-    value = f"{uuid.uuid4().hex}.{expires_at}"
+    value = uuid.uuid4().hex
     return f"{value}.{_signature(value)}"
 
 
@@ -32,13 +37,22 @@ def trusted_device(token: str | None) -> bool:
     if not token:
         return False
     try:
-        device_id, expires_at, signature = token.split(".", 2)
-        value = f"{device_id}.{expires_at}"
-        return (
-            len(device_id) == 32
-            and int(expires_at) >= int(time.time())
-            and hmac.compare_digest(signature, _signature(value))
-        )
+        parts = token.split(".")
+        if len(parts) == 2:
+            device_id, signature = parts
+            return len(device_id) == 32 and hmac.compare_digest(signature, _signature(device_id))
+        # Keep previously issued expiring cookies valid until the next login.
+        if len(parts) == 3:
+            device_id, expires_at, signature = parts
+            value = f"{device_id}.{expires_at}"
+            import time
+
+            legacy_secret = hashlib.sha256(
+                f"frontier-device-cookie:{settings.access_password}".encode()
+            ).digest()
+            expected = hmac.new(legacy_secret, value.encode(), hashlib.sha256).hexdigest()
+            return len(device_id) == 32 and int(expires_at) >= int(time.time()) and hmac.compare_digest(signature, expected)
+        return False
     except (TypeError, ValueError):
         return False
 
@@ -64,3 +78,41 @@ def internal_api_token() -> str:
 def request_is_internal(request: Request) -> bool:
     provided = request.headers.get(INTERNAL_TOKEN_HEADER)
     return bool(provided) and hmac.compare_digest(provided, internal_api_token())
+
+
+def _anonymous_token(device_id: str) -> str:
+    return f"{device_id}.{_signature(device_id, 'anonymous')}"
+
+
+def anonymous_device_id(request: Request, response: Response) -> str:
+    token = request.cookies.get(ANONYMOUS_COOKIE_NAME)
+    if token:
+        try:
+            device_id, signature = token.split(".", 1)
+            if len(device_id) == 32 and hmac.compare_digest(
+                signature, _signature(device_id, "anonymous")
+            ):
+                return device_id
+        except ValueError:
+            pass
+    device_id = uuid.uuid4().hex
+    response.set_cookie(
+        ANONYMOUS_COOKIE_NAME,
+        _anonymous_token(device_id),
+        max_age=PERSISTENT_COOKIE_SECONDS,
+        httponly=True,
+        secure=settings.trusted_cookie_secure,
+        samesite="lax",
+        path="/",
+    )
+    return device_id
+
+
+def anonymous_profile(device_id: str) -> dict[str, str]:
+    digest = hmac.new(
+        hashlib.sha256(f"frontier-anonymous:{settings.access_password}".encode()).digest(),
+        device_id.encode(),
+        hashlib.sha256,
+    ).digest()
+    name = "".join(ANONYMOUS_ALPHABET[value % len(ANONYMOUS_ALPHABET)] for value in digest[:4])
+    return {"name": name, "color": ANONYMOUS_COLORS[digest[4] % len(ANONYMOUS_COLORS)]}

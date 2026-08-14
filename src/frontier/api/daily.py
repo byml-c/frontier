@@ -1,18 +1,30 @@
 from __future__ import annotations
 
-from datetime import date, datetime
+from datetime import date
 from typing import Annotated
-from zoneinfo import ZoneInfo
 
-from fastapi import APIRouter, Depends, HTTPException
-from pydantic import BaseModel
+from fastapi import APIRouter, Depends, HTTPException, Request, Response
+from pydantic import BaseModel, Field
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from ..config import settings
+from ..auth import anonymous_device_id, anonymous_profile
 from ..database import get_session
-from ..models import Annotation, DailySelection, Paper, PaperNode, PaperTag, ResearchNode, Tag
+from ..models import (
+    Annotation,
+    DailyReply,
+    DailyReview,
+    DailyReviewRevision,
+    DailySelection,
+    Paper,
+    PaperNode,
+    PaperTag,
+    ResearchNode,
+    Tag,
+)
 from ..services.common import log_operation, model_dict
+from ..services.research_day import current_research_date
 
 router = APIRouter(prefix="/api/daily", tags=["daily"])
 
@@ -21,8 +33,18 @@ class DailySelectionRequest(BaseModel):
     paper_id: str
 
 
-def _today() -> date:
-    return datetime.now(ZoneInfo(settings.timezone)).date()
+class DailyReviewCreate(BaseModel):
+    score: int = Field(ge=1, le=6)
+    confidence: int = Field(ge=1, le=5)
+    content: str = Field(min_length=1, max_length=12_000)
+
+
+class DailyReviewUpdate(DailyReviewCreate):
+    pass
+
+
+class DailyReplyCreate(BaseModel):
+    content: str = Field(min_length=1, max_length=8_000)
 
 
 def _public_paper(session: Session, paper: Paper) -> dict:
@@ -93,12 +115,74 @@ def _serialize(session: Session, selection: DailySelection) -> dict:
     }
 
 
+def _serialize_reply(reply: DailyReply, viewer_id: str) -> dict:
+    return {
+        "id": reply.id,
+        "author": anonymous_profile(reply.device_id),
+        "is_mine": reply.device_id == viewer_id,
+        "content": reply.content,
+        "created_at": model_dict(reply)["created_at"],
+    }
+
+
+def _serialize_review(session: Session, review: DailyReview, viewer_id: str) -> dict:
+    replies = session.scalars(
+        select(DailyReply)
+        .where(DailyReply.review_id == review.id)
+        .order_by(DailyReply.created_at)
+    ).all()
+    initial_score = session.scalar(
+        select(DailyReviewRevision.previous_score)
+        .where(DailyReviewRevision.review_id == review.id)
+        .order_by(DailyReviewRevision.created_at, DailyReviewRevision.id)
+        .limit(1)
+    )
+    return {
+        "id": review.id,
+        "author": anonymous_profile(review.device_id),
+        "is_mine": review.device_id == viewer_id,
+        "score": review.score,
+        "initial_score": initial_score if initial_score is not None else review.score,
+        "confidence": review.confidence,
+        "content": review.content,
+        "created_at": model_dict(review)["created_at"],
+        "updated_at": model_dict(review)["updated_at"],
+        "replies": [_serialize_reply(reply, viewer_id) for reply in replies],
+    }
+
+
+def _public_daily_paper_or_404(session: Session, paper_id: str) -> Paper:
+    selected = session.scalar(
+        select(DailySelection.selection_date).where(DailySelection.paper_id == paper_id).limit(1)
+    )
+    paper = session.get(Paper, paper_id)
+    if not selected or not paper:
+        raise HTTPException(status_code=404, detail="这篇论文不在每日精选中")
+    return paper
+
+
+def _discussion(session: Session, paper: Paper, viewer_id: str) -> dict:
+    reviews = session.scalars(
+        select(DailyReview)
+        .where(DailyReview.paper_id == paper.id)
+        .order_by(DailyReview.created_at.desc())
+    ).all()
+    average = sum(item.score for item in reviews) / len(reviews) if reviews else None
+    return {
+        "paper_id": paper.id,
+        "viewer": anonymous_profile(viewer_id),
+        "review_count": len(reviews),
+        "average_score": round(average, 2) if average is not None else None,
+        "reviews": [_serialize_review(session, review, viewer_id) for review in reviews],
+    }
+
+
 @router.get("")
 def get_daily(
     session: Annotated[Session, Depends(get_session)],
     target_date: date | None = None,
 ) -> dict:
-    selected_date = target_date or _today()
+    selected_date = target_date or current_research_date(session)
     available_dates = session.scalars(
         select(DailySelection.selection_date).order_by(DailySelection.selection_date.desc())
     ).all()
@@ -108,6 +192,123 @@ def get_daily(
         "available_dates": [item.isoformat() for item in available_dates],
         "selection": _serialize(session, selection) if selection else None,
     }
+
+
+@router.get("/papers/{paper_id}/reviews")
+def list_reviews(
+    paper_id: str,
+    request: Request,
+    response: Response,
+    session: Annotated[Session, Depends(get_session)],
+) -> dict:
+    paper = _public_daily_paper_or_404(session, paper_id)
+    viewer_id = anonymous_device_id(request, response)
+    return _discussion(session, paper, viewer_id)
+
+
+@router.post("/papers/{paper_id}/reviews")
+def create_review(
+    paper_id: str,
+    payload: DailyReviewCreate,
+    request: Request,
+    response: Response,
+    session: Annotated[Session, Depends(get_session)],
+) -> dict:
+    paper = _public_daily_paper_or_404(session, paper_id)
+    content = payload.content.strip()
+    if not content:
+        raise HTTPException(status_code=422, detail="评语不能为空")
+    viewer_id = anonymous_device_id(request, response)
+    existing = session.scalar(
+        select(DailyReview).where(
+            DailyReview.paper_id == paper.id,
+            DailyReview.device_id == viewer_id,
+        )
+    )
+    if existing:
+        raise HTTPException(status_code=409, detail="你已经评审过这篇论文，请编辑已有评审")
+    review = DailyReview(
+        paper_id=paper.id,
+        device_id=viewer_id,
+        score=payload.score,
+        confidence=payload.confidence,
+        content=content,
+    )
+    session.add(review)
+    try:
+        session.commit()
+    except IntegrityError as exc:
+        session.rollback()
+        raise HTTPException(
+            status_code=409,
+            detail="你已经评审过这篇论文，请编辑已有评审",
+        ) from exc
+    return _serialize_review(session, review, viewer_id)
+
+
+@router.put("/papers/{paper_id}/reviews/mine")
+def update_my_review(
+    paper_id: str,
+    payload: DailyReviewUpdate,
+    request: Request,
+    response: Response,
+    session: Annotated[Session, Depends(get_session)],
+) -> dict:
+    paper = _public_daily_paper_or_404(session, paper_id)
+    content = payload.content.strip()
+    if not content:
+        raise HTTPException(status_code=422, detail="评语不能为空")
+    viewer_id = anonymous_device_id(request, response)
+    review = session.scalar(
+        select(DailyReview).where(
+            DailyReview.paper_id == paper.id,
+            DailyReview.device_id == viewer_id,
+        )
+    )
+    if not review:
+        raise HTTPException(status_code=404, detail="你还没有评审这篇论文")
+    changed = (
+        review.score != payload.score
+        or review.confidence != payload.confidence
+        or review.content != content
+    )
+    if changed:
+        session.add(
+            DailyReviewRevision(
+                review_id=review.id,
+                previous_score=review.score,
+                score=payload.score,
+                previous_confidence=review.confidence,
+                confidence=payload.confidence,
+            )
+        )
+        review.score = payload.score
+        review.confidence = payload.confidence
+        review.content = content
+        session.commit()
+    return _serialize_review(session, review, viewer_id)
+
+
+@router.post("/reviews/{review_id}/replies")
+def create_reply(
+    review_id: str,
+    payload: DailyReplyCreate,
+    request: Request,
+    response: Response,
+    session: Annotated[Session, Depends(get_session)],
+) -> dict:
+    review = session.get(DailyReview, review_id)
+    if not review:
+        raise HTTPException(status_code=404, detail="评论不存在")
+    _public_daily_paper_or_404(session, review.paper_id)
+    content = payload.content.strip()
+    if not content:
+        raise HTTPException(status_code=422, detail="回复不能为空")
+    viewer_id = anonymous_device_id(request, response)
+    reply = DailyReply(review_id=review.id, device_id=viewer_id, content=content)
+    session.add(reply)
+    session.commit()
+    return _serialize_reply(reply, viewer_id)
 
 
 @router.put("/{target_date}")

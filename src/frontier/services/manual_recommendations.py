@@ -9,6 +9,7 @@ from sqlalchemy.orm import Session
 from ..config import settings
 from ..models import Brief, BriefItem, Paper, TaskRun
 from .common import log_operation
+from .research_day import current_research_date
 
 DAILY_RECOMMENDATION_STATUS = "candidate"
 
@@ -79,7 +80,7 @@ def stage_manual_recommendation(
     queue_analysis: bool = True,
 ) -> tuple[Brief, BriefItem, TaskRun | None, bool]:
     """Place a user-added paper in today's brief and queue missing analysis."""
-    brief_date = datetime.now(ZoneInfo(settings.timezone)).date()
+    brief_date = current_research_date(session)
     brief = session.scalar(select(Brief).where(Brief.brief_date == brief_date))
     if brief is None:
         brief = Brief(

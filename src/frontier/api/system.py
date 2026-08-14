@@ -1,8 +1,7 @@
 from __future__ import annotations
 
-from datetime import date, datetime
+from datetime import date
 from typing import Annotated, Literal
-from zoneinfo import ZoneInfo
 
 from fastapi import APIRouter, BackgroundTasks, Depends, File, HTTPException, Query, UploadFile
 from fastapi.responses import StreamingResponse
@@ -19,6 +18,7 @@ from ..services.backup import create_local_git_backup
 from ..services.bootstrap import import_bibtex
 from ..services.common import log_operation, model_dict
 from ..services.ingest import create_or_update_paper, search_arxiv
+from ..services.research_day import current_research_date
 from ..services.service_checks import check_service
 from ..services.task_control import ACTIVE_TASK_STATUSES, cancel_task_run
 from ..services.translation_provider import stream_translation_prompt
@@ -422,8 +422,12 @@ def retry_task(
 
 
 @router.post("/tasks/run-daily")
-def run_daily(background_tasks: BackgroundTasks, target_date: date | None = None) -> dict:
-    run_date = target_date or datetime.now(ZoneInfo(settings.timezone)).date()
+def run_daily(
+    background_tasks: BackgroundTasks,
+    session: Annotated[Session, Depends(get_session)],
+    target_date: date | None = None,
+) -> dict:
+    run_date = target_date or current_research_date(session)
     task_id = enqueue_task("daily_brief", {"date": run_date.isoformat()})
     if settings.enable_codex_runs:
         background_tasks.add_task(run_task, task_id)

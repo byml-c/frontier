@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from datetime import datetime
 from zoneinfo import ZoneInfo
 
 from apscheduler.schedulers.background import BackgroundScheduler
@@ -13,13 +12,14 @@ from .database import SessionLocal
 from .models import TaskRun
 from .services.backup import create_local_git_backup
 from .services.common import get_setting
+from .services.research_day import current_research_date
 
 scheduler = BackgroundScheduler(timezone=ZoneInfo(settings.timezone))
 
 
 def scheduled_daily() -> None:
-    target = datetime.now(ZoneInfo(settings.timezone)).date().isoformat()
     with SessionLocal() as session:
+        target = current_research_date(session).isoformat()
         existing = session.scalar(
             select(TaskRun).where(
                 TaskRun.kind == "daily_brief",

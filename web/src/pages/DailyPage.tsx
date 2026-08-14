@@ -8,6 +8,7 @@ import { useState } from "react";
 import { useSearchParams } from "react-router-dom";
 import { api, formatDate } from "../api";
 import { MarkdownMessage } from "../components/MarkdownMessage";
+import { DailyDiscussion } from "../components/DailyDiscussion";
 import { Empty, ErrorState, Loading } from "../components/States";
 import type { DailyPayload } from "../types";
 
@@ -17,10 +18,10 @@ export function DailyPage() {
   const [calendarAnchor, setCalendarAnchor] = useState<HTMLElement | null>(null);
   const daily = useQuery({ queryKey: ["daily", selectedDate], queryFn: () => api<DailyPayload>(`/api/daily${selectedDate ? `?target_date=${encodeURIComponent(selectedDate)}` : ""}`) });
   function chooseDate(value: string) { setSearchParams({ date: value }); setCalendarAnchor(null); }
-  return <Box sx={{ minHeight: "100%", bgcolor: "background.default" }}><Container maxWidth="md" sx={{ py: { xs: 3, md: 5 } }}>
+  return <Box sx={{ minHeight: "100%", bgcolor: "background.default" }}><Container maxWidth="md" sx={{ pt: { xs: 3, md: 5 }, pb: { xs: 14, md: 16 } }}>
     <Stack direction="row" justifyContent="space-between" alignItems="center" spacing={2} sx={{ mb: 3 }}><Box><Typography variant="overline" color="primary.main" fontWeight={750}>Frontier Daily</Typography><Typography variant="h2" sx={{ mt: .25 }}>{formatDate(daily.data?.date || selectedDate)}</Typography></Box><IconButton aria-label="选择精选日期" aria-haspopup="menu" onClick={(event) => setCalendarAnchor(event.currentTarget)} sx={{ width: 42, height: 42, border: 1, borderColor: "divider", bgcolor: "background.paper" }}><CalendarMonthRounded /></IconButton></Stack>
     <Menu anchorEl={calendarAnchor} open={Boolean(calendarAnchor)} onClose={() => setCalendarAnchor(null)} PaperProps={{ sx: { maxHeight: 360, minWidth: 180 } }}>{!daily.data?.available_dates.length && <MenuItem disabled>暂无历史精选</MenuItem>}{daily.data?.available_dates.map((value) => <MenuItem key={value} selected={value === daily.data?.date} onClick={() => chooseDate(value)}>{formatDate(value)}</MenuItem>)}</Menu>
-    {daily.isLoading ? <Loading label="正在加载每日精选" /> : daily.error ? <ErrorState error={daily.error} /> : !daily.data?.selection ? <Empty title="这一天还没有精选论文" body="有新的每日精选后，可以从右上角日历查看。" /> : <DailyPaperCard selection={daily.data.selection} />}
+    {daily.isLoading ? <Loading label="正在加载每日精选" /> : daily.error ? <ErrorState error={daily.error} /> : !daily.data?.selection ? <Empty title="这一天还没有精选论文" body="有新的每日精选后，可以从右上角日历查看。" /> : <><DailyPaperCard selection={daily.data.selection} /><DailyDiscussion paperId={daily.data.selection.paper.id} /></>}
   </Container></Box>;
 }
 

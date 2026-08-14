@@ -195,6 +195,46 @@ class DailySelection(Base, TimestampMixin):
     )
 
 
+class DailyReview(Base, TimestampMixin):
+    __tablename__ = "daily_reviews"
+    __table_args__ = (
+        UniqueConstraint("paper_id", "device_id", name="uq_daily_review_paper_device"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    paper_id: Mapped[str] = mapped_column(
+        ForeignKey("papers.id", ondelete="CASCADE"), index=True
+    )
+    device_id: Mapped[str] = mapped_column(String(32), index=True)
+    score: Mapped[int] = mapped_column(Integer)
+    confidence: Mapped[int] = mapped_column(Integer)
+    content: Mapped[str] = mapped_column(Text)
+
+
+class DailyReviewRevision(Base, TimestampMixin):
+    __tablename__ = "daily_review_revisions"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    review_id: Mapped[str] = mapped_column(
+        ForeignKey("daily_reviews.id", ondelete="CASCADE"), index=True
+    )
+    previous_score: Mapped[int] = mapped_column(Integer)
+    score: Mapped[int] = mapped_column(Integer)
+    previous_confidence: Mapped[int] = mapped_column(Integer)
+    confidence: Mapped[int] = mapped_column(Integer)
+
+
+class DailyReply(Base, TimestampMixin):
+    __tablename__ = "daily_replies"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    review_id: Mapped[str] = mapped_column(
+        ForeignKey("daily_reviews.id", ondelete="CASCADE"), index=True
+    )
+    device_id: Mapped[str] = mapped_column(String(32), index=True)
+    content: Mapped[str] = mapped_column(Text)
+
+
 class Tag(Base, TimestampMixin):
     __tablename__ = "tags"
 

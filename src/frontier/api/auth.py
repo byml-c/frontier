@@ -3,7 +3,13 @@ from __future__ import annotations
 from fastapi import APIRouter, HTTPException, Request, Response
 from pydantic import BaseModel, Field
 
-from ..auth import COOKIE_NAME, create_device_token, password_matches, request_is_trusted
+from ..auth import (
+    COOKIE_NAME,
+    PERSISTENT_COOKIE_SECONDS,
+    create_device_token,
+    password_matches,
+    request_is_trusted,
+)
 from ..config import settings
 
 router = APIRouter(prefix="/api/auth", tags=["auth"])
@@ -25,7 +31,7 @@ def login(payload: LoginRequest, response: Response) -> dict:
     response.set_cookie(
         COOKIE_NAME,
         create_device_token(),
-        max_age=settings.trusted_device_days * 24 * 60 * 60,
+        max_age=PERSISTENT_COOKIE_SECONDS,
         httponly=True,
         secure=settings.trusted_cookie_secure,
         samesite="lax",

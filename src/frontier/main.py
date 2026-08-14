@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from contextlib import asynccontextmanager
 
 import uvicorn
@@ -51,6 +52,18 @@ async def protect_private_api(request: Request, call_next):  # type: ignore[no-u
         or path == "/api/auth/status"
         or path == "/api/auth/login"
         or (request.method == "GET" and path == "/api/daily")
+        or (
+            request.method in {"GET", "POST"}
+            and bool(re.fullmatch(r"/api/daily/papers/[0-9a-f-]+/reviews", path))
+        )
+        or (
+            request.method == "PUT"
+            and bool(re.fullmatch(r"/api/daily/papers/[0-9a-f-]+/reviews/mine", path))
+        )
+        or (
+            request.method == "POST"
+            and bool(re.fullmatch(r"/api/daily/reviews/[0-9a-f-]+/replies", path))
+        )
     )
     protected_service_path = path == "/api" or path.startswith("/api/") or path in {
         "/docs", "/redoc", "/openapi.json"

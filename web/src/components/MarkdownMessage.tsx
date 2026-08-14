@@ -12,10 +12,12 @@ export function MarkdownMessage({
   content,
   onJump,
   inverted = false,
+  mentionColors,
 }: {
   content: string;
   onJump?: (page: number) => void;
   inverted?: boolean;
+  mentionColors?: Record<string, string>;
 }) {
   return (
     <Box
@@ -73,6 +75,11 @@ export function MarkdownMessage({
         rehypePlugins={[rehypeKatex]}
         components={{
           a: ({ href = "", children }) => {
+            const mentionMatch = href.match(/^#frontier-mention-([A-Za-z0-9]{4})$/);
+            if (mentionMatch) {
+              const color = mentionColors?.[mentionMatch[1]] || "#1976D2";
+              return <Box component="span" sx={{ display: "inline", color, fontWeight: 750, bgcolor: `${color}12`, borderRadius: .75, px: .35 }}>{children}</Box>;
+            }
             const pageMatch = href.match(/^#frontier-page-(\d+)(?:-(\d+))?$/);
             if (pageMatch && onJump) {
             return (

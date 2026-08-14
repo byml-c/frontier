@@ -33,7 +33,6 @@ class Settings(BaseSettings):
     enable_codex_runs: bool = True
     access_password: str = "byml-frontier"
     internal_api_token: str | None = None
-    trusted_device_days: int = 180
     trusted_cookie_secure: bool = False
     # Docling loads large layout models and is unsuitable for the default
     # low-memory deployment. arXiv HTML remains available independently.

@@ -122,6 +122,34 @@ export type DailyPayload = {
   };
 };
 
+export type AnonymousProfile = { name: string; color: string };
+export type DailyReply = {
+  id: string;
+  author: AnonymousProfile;
+  is_mine: boolean;
+  content: string;
+  created_at: string;
+};
+export type DailyReview = {
+  id: string;
+  author: AnonymousProfile;
+  is_mine: boolean;
+  score: number;
+  initial_score: number;
+  confidence: number;
+  content: string;
+  created_at: string;
+  updated_at: string;
+  replies: DailyReply[];
+};
+export type DailyDiscussionPayload = {
+  paper_id: string;
+  viewer: AnonymousProfile;
+  review_count: number;
+  average_score?: number | null;
+  reviews: DailyReview[];
+};
+
 export type DocumentBlock = {
   id: string;
   anchor?: string | null;
