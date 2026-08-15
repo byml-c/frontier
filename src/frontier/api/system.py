@@ -23,6 +23,8 @@ from ..services.backup import create_local_git_backup
 from ..services.bootstrap import import_bibtex
 from ..services.common import log_operation, model_dict
 from ..services.ingest import create_or_update_paper, search_arxiv
+from ..services.interest_evidence import DERIVED_INTEREST_PROFILE_ID
+from ..services.paper_agent_context import paper_agent_context_sync_required
 from ..services.paper_conversations import get_or_create_paper_conversation
 from ..services.research_day import current_research_date
 from ..services.service_checks import check_service
@@ -221,6 +223,11 @@ def update_memory(
     item = session.get(Memory, memory_id)
     if not item:
         raise HTTPException(status_code=404, detail="Memory not found")
+    if item.id == DERIVED_INTEREST_PROFILE_ID:
+        raise HTTPException(
+            status_code=409,
+            detail="The derived interest profile is maintained through the interest API",
+        )
     for key, value in payload.model_dump(exclude_unset=True).items():
         setattr(item, key, value)
     log_operation(
@@ -239,6 +246,11 @@ def delete_memory(memory_id: str, session: Annotated[Session, Depends(get_sessio
     item = session.get(Memory, memory_id)
     if not item:
         raise HTTPException(status_code=404, detail="Memory not found")
+    if item.id == DERIVED_INTEREST_PROFILE_ID:
+        raise HTTPException(
+            status_code=409,
+            detail="The derived interest profile cannot be deleted directly",
+        )
     session.delete(item)
     session.commit()
 
@@ -300,7 +312,8 @@ def _task_payload_with_paper_conversation(
             detail="finish_reading requires a non-empty paper_id",
         )
     paper_id = paper_id.strip()
-    if session.get(Paper, paper_id) is None:
+    paper = session.get(Paper, paper_id)
+    if paper is None:
         raise HTTPException(status_code=404, detail="Paper not found")
 
     conversation = get_or_create_paper_conversation(session, paper_id)
@@ -311,6 +324,9 @@ def _task_payload_with_paper_conversation(
         **task_payload,
         "paper_id": paper_id,
         "conversation_id": conversation.id,
+        "paper_context_sync_required": paper_agent_context_sync_required(
+            session, paper, conversation
+        ),
     }
 
 

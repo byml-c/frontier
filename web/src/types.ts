@@ -7,6 +7,31 @@ export type NodeRef = {
 
 export type Tag = { id: string; name: string; color?: string | null };
 
+export type InterestLevel = "ignored" | "neutral" | "interested";
+
+export type SuggestedNode = {
+  node_id?: string | null;
+  name: string;
+  core_question: string;
+  reason: string;
+  domain?: string | null;
+};
+
+export type ConfirmedNodeLink = {
+  node_id: string;
+  reason: string;
+  is_key?: boolean;
+};
+
+export type NewConfirmedNode = {
+  name: string;
+  core_question: string;
+  summary?: string | null;
+  domain?: string | null;
+  reason: string;
+  is_key?: boolean;
+};
+
 export type CompletionSummaryStructured = {
   research_question?: string | null;
   evidence_and_contribution?: string | null;
@@ -40,6 +65,7 @@ export type Paper = {
   relevance_score?: number | null;
   recommendation_reason?: string | null;
   is_interested: boolean;
+  interest_level?: InterestLevel | null;
   is_quality: boolean;
   completion_summary?: string | null;
   completion_summary_structured?: CompletionSummaryStructured | null;
@@ -61,6 +87,7 @@ export type BriefItem = {
   paper: Paper;
   current_status: string;
   is_interested: boolean;
+  interest_level?: InterestLevel | null;
   is_quality: boolean;
 };
 

@@ -4,7 +4,7 @@ from collections import deque
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Query
-from sqlalchemy import or_, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session
 
 from ..database import get_session
@@ -75,10 +75,22 @@ def list_nodes(
 
 @router.post("/nodes")
 def create_node(payload: NodeCreate, session: Annotated[Session, Depends(get_session)]) -> dict:
-    existing = session.scalar(select(ResearchNode).where(ResearchNode.name == payload.name.strip()))
+    name = payload.name.strip()
+    core_question = payload.core_question.strip()
+    if not name or not core_question:
+        raise HTTPException(status_code=422, detail="Node name and core question are required")
+    existing = session.scalar(
+        select(ResearchNode).where(func.lower(ResearchNode.name) == name.lower())
+    )
     if existing:
         return _node_summary(session, existing)
-    node = ResearchNode(**payload.model_dump())
+    node = ResearchNode(
+        **{
+            **payload.model_dump(),
+            "name": name,
+            "core_question": core_question,
+        }
+    )
     session.add(node)
     session.flush()
     log_operation(
@@ -252,6 +264,30 @@ def add_progress(
                 status_code=409,
                 detail="Paper must complete user-confirmed reading before updating node progress",
             )
+        existing = session.scalar(
+            select(NodeProgress).where(
+                NodeProgress.node_id == node_id,
+                NodeProgress.paper_id == payload.paper_id,
+            )
+        )
+        if existing:
+            changed = False
+            for field in ("title", "content", "happened_at"):
+                value = getattr(payload, field)
+                if getattr(existing, field) != value:
+                    setattr(existing, field, value)
+                    changed = True
+            if changed:
+                log_operation(
+                    session,
+                    actor="agent",
+                    action="graph.progress_updated",
+                    entity_type="node_progress",
+                    entity_id=existing.id,
+                    detail={"paper_id": payload.paper_id, "node_id": node_id},
+                )
+                session.commit()
+            return model_dict(existing)
     item = NodeProgress(node_id=node_id, **payload.model_dump())
     session.add(item)
     session.flush()

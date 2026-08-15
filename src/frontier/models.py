@@ -359,6 +359,23 @@ class Conversation(Base, TimestampMixin):
     status: Mapped[str] = mapped_column(String(32), default="active", index=True)
 
 
+class PaperAgentContextSync(Base, TimestampMixin):
+    """Transport cursor for one paper Conversation's Codex thread."""
+
+    __tablename__ = "paper_agent_context_syncs"
+
+    conversation_id: Mapped[str] = mapped_column(
+        ForeignKey("conversations.id", ondelete="CASCADE"), primary_key=True
+    )
+    paper_id: Mapped[str] = mapped_column(
+        ForeignKey("papers.id", ondelete="CASCADE"), index=True
+    )
+    codex_session_id: Mapped[str] = mapped_column(String(255))
+    schema_version: Mapped[int] = mapped_column(Integer, default=1)
+    revision: Mapped[str] = mapped_column(String(64))
+    section_hashes_json: Mapped[dict[str, str]] = mapped_column(JSON, default=dict)
+
+
 class Message(Base, TimestampMixin):
     __tablename__ = "messages"
 

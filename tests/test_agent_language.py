@@ -68,6 +68,45 @@ def test_paper_chat_uses_compact_agent_context_and_bounded_delegation() -> None:
     assert "can increase total token use" in prompt
 
 
+def test_paper_chat_skips_context_tool_when_server_revision_is_current() -> None:
+    prompt = build_prompt(
+        TaskRun(
+            id="paper-task-current",
+            kind="paper_chat",
+            payload_json={
+                "paper_id": "paper-1",
+                "conversation_id": "conversation-1",
+                "paper_context_sync_required": False,
+                "message": "继续解释",
+            },
+        )
+    )
+
+    command = "frontier paper agent-context paper-1 --conversation-id conversation-1"
+    assert f"Do not call `{command}` in this turn" in prompt
+    assert "previous Codex thread is unavailable" in prompt
+
+
+def test_paper_chat_requests_incremental_context_when_state_changed() -> None:
+    prompt = build_prompt(
+        TaskRun(
+            id="paper-task-delta",
+            kind="paper_chat",
+            payload_json={
+                "paper_id": "paper-1",
+                "conversation_id": "conversation-1",
+                "paper_context_sync_required": True,
+                "message": "批注更新了吗？",
+            },
+        )
+    )
+
+    assert (
+        "Start with `frontier paper agent-context paper-1 --conversation-id conversation-1`"
+        in prompt
+    )
+
+
 @pytest.mark.parametrize(
     ("kind", "payload", "ambiguity_action"),
     [

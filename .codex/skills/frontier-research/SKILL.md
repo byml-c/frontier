@@ -18,7 +18,7 @@ Use the `frontier` CLI as the only application-data interface. Let the Server ow
 ## Paper main Agent and delegation
 
 - Treat the active paper `Conversation` and its Codex thread as that paper's logical main Agent. Codex owns runtime context and automatic compaction; Frontier owns durable paper facts and user-visible conversation history.
-- Start paper-scoped work with `paper agent-context PAPER_ID`. It composes existing Paper fields, structured analysis, reading artifacts, graph links, architecture state, and the paper conversation without copying the full PDF or creating another paper-state record.
+- Follow the task prompt's paper-context sync decision. When it says the current Codex thread is current, do not call `paper agent-context`; when it supplies a required `paper agent-context PAPER_ID --conversation-id CONVERSATION_ID` command, run that exact command once. The sync cursor is bound to the existing Paper Conversation and Codex thread: `full` initializes a new/recovered thread, `delta` contains only changed paper-state sections, and `unchanged` means the current thread already has the latest state. Never request the stateless full form merely to repeat context. The command does not copy the PDF or create another paper-state record.
 - Keep one canonical owner per fact: normalized high-frequency conclusions remain in explicit Paper fields; `full_analysis` contains only deeper claim/evidence, method-component, figure/table-index, glossary, and unresolved-question structures; `metadata_json` remains provenance, workflow, compatibility, and user-adjacent metadata. Never mirror the same semantic field across these stores.
 - Fetch exact pages and resources only when the current claim needs them. Do not reread the complete PDF on every turn merely to refresh context.
 - Delegate only bounded, independent, read-heavy work that materially protects the main paper context: related-paper search, parallel evidence extraction, and Architecture Scene evidence review are good candidates. Answer direct questions and small single-source checks in the main Agent.
@@ -32,7 +32,14 @@ The `daily_brief` run is the root Agent for the whole daily ingestion workflow. 
 
 `Paper.summary` and the recommendation-analysis fields are pre-reading catalog conclusions. The daily Agent must never write `completion_summary` or `completion_summary_structured`; those belong exclusively to the paper main Agent after explicit reading completion.
 
-1. Read settings, active graph nodes, and active `interest_profile` and `agent_experience` memories.
+1. Start with `interest context`. It is the bounded, rebuildable handoff from confirmed paper
+   feedback and includes explicit interest memories, seed interests, the active graph, positive and
+   negative topic evidence, recent user attitude, recommendation attribution, and calibration.
+   Confirmed feedback outranks Agent suggestions and graph structure; interest and quality remain
+   independent axes.
+   When confirmed evidence changed, use `interest profile-update` to refresh the one derived semantic
+   profile with evidence-key citations, then reload `interest context` once before creating the
+   brief. It is a rebuildable cache, not a second owner of paper facts.
 2. Build focused arXiv queries from the current graph and interests. Include modest breadth for emerging cross-domain work.
 3. Ingest candidates and de-duplicate through the Server.
 4. Respect current limits exactly: abstract reads, full-text reads, total brief items, and featured items.
@@ -41,7 +48,9 @@ The `daily_brief` run is the root Agent for the whole daily ingestion workflow. 
 7. Record concise analysis: one-line summary, one-line comment, problem, innovation, experiments, limitations, scores, and recommendation reason.
 8. Do not attach daily or candidate papers to the graph. Record probable relevance in paper analysis or recommendation fields until the user completes reading and confirms feedback.
 9. Do not add paper-backed node progress during the daily workflow.
-10. Create one dated brief, add ranked items, verify the limits, and publish it.
+10. Create one dated brief with the context `source_digest` as `interest_context_digest`, add ranked
+    items, verify the limits, and publish it. The Server freezes the calibration/profile snapshot
+    used for later evaluation.
 11. Save only durable user preference or reusable workflow lessons as memory.
 
 Do not invent author roles, affiliations, experimental results, or limitations. Use `null`, “未标注”, or a concrete failure when evidence is absent.
@@ -77,7 +86,7 @@ When a task identifies one user-added paper and a brief date:
 
 ## Paper discussion
 
-Load `paper agent-context PAPER_ID` first, then read only the exact PDF pages required by the question. Use `paper resources` when exact formula TeX, original figures, tables, bibliography entries, or internal citation targets matter. Answer through problem decomposition and mutual inquiry. Cite every material PDF claim as `[[page:N]]` so the Web can jump to the source.
+Apply the task prompt's paper-context sync decision first, then read only the exact PDF pages required by the question. Use `paper resources` when exact formula TeX, original figures, tables, bibliography entries, or internal citation targets matter. Answer through problem decomposition and mutual inquiry. Cite every material PDF claim as `[[page:N]]` so the Web can jump to the source.
 
 Keep simple word or sentence translations out of the Agent conversation. When the user asks about selected text, use its saved page and selection context.
 
@@ -124,9 +133,12 @@ Then:
    `evidence_and_contribution`, `experiments`, `limitations`, and `user_attitude` fields. Cite every
    material paper claim in the first four fields as `[[page:N]]`; infer user attitude only from the
    user's own annotations, notes, or conversation.
-3. Suggest interest, paper quality, new-node need, and tags.
+3. Suggest one explicit interest level (`ignored`, `neutral`, or `interested`), paper quality,
+   tags, and concrete graph-node candidates. Existing-node candidates include the exact node ID;
+   new-node candidates include a distinct core research question and paper-specific relationship
+   reason.
 4. Save suggestions with `paper finish`.
-5. Never confirm feedback, select tags, or admit a paper to the quality library for the user.
+5. Never confirm feedback, select tags or nodes, or admit a paper to the quality library for the user.
 
 ## Maintain the graph
 

@@ -15,7 +15,7 @@ import ReplayRounded from "@mui/icons-material/ReplayRounded";
 import SearchRounded from "@mui/icons-material/SearchRounded";
 import ZoomInRounded from "@mui/icons-material/ZoomInRounded";
 import ZoomOutRounded from "@mui/icons-material/ZoomOutRounded";
-import { Alert, Box, Button, Chip, CircularProgress, FormControl, IconButton, InputAdornment, MenuItem, Paper as MuiPaper, Select, Stack, Tab, Tabs, TextField, Tooltip, Typography, useMediaQuery, useTheme } from "@mui/material";
+import { Alert, Box, Button, Chip, CircularProgress, FormControl, IconButton, InputAdornment, MenuItem, Paper as MuiPaper, Select, Stack, Tab, Tabs, TextField, ToggleButton, ToggleButtonGroup, Tooltip, Typography, useMediaQuery, useTheme } from "@mui/material";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { FormEvent, useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { Document, Page, pdfjs } from "react-pdf";
@@ -36,6 +36,8 @@ import { MobileConfirmAction } from "../components/MobileConfirmAction";
 import { PageHeader } from "../components/PageHeader";
 import { PaperMetadataDialog } from "../components/PaperMetadataDialog";
 import { PaperNotesPanel } from "../components/PaperNotesPanel";
+import { normalizeExactName } from "../components/exactName";
+import { PaperNodeSelector } from "../components/PaperNodeSelector";
 import { PaperTagSelector } from "../components/PaperTagSelector";
 import { ReaderModeMenu, type ReaderMode } from "../components/ReaderModeMenu";
 import { caretAtPoint, offsetWithin, rangeFromOffsets, textSelectionFromRange, wordBounds } from "../components/readerSelection";
@@ -45,7 +47,7 @@ import { TextPaperReader, type TextReaderSelection } from "../components/TextPap
 import { ArchitectureMath } from "../features/architecture/ArchitectureText";
 import { ArchitectureWorkspace, type ArchitectureWorkspaceHandle } from "../features/architecture/ArchitectureWorkspace";
 import type { ArchitectureChatCard, ArchitectureCommand, ArchitectureReaderContext } from "../features/architecture/types";
-import type { AgentRuntimeState, Annotation, Conversation, Message, Paper, PaperDocument, Tag } from "../types";
+import type { AgentRuntimeState, Annotation, ConfirmedNodeLink, Conversation, InterestLevel, Message, NewConfirmedNode, Paper, PaperDocument, ResearchNode, SuggestedNode, Tag } from "../types";
 
 pdfjs.GlobalWorkerOptions.workerSrc = new URL("pdfjs-dist/build/pdf.worker.min.mjs", import.meta.url).toString();
 type SelectionPosition = {
@@ -458,13 +460,166 @@ function ConversationBubble({ message, onJump, retryDisabled = false, onRetry }:
 function renderCitations(content: string, onJump: (page: number) => void, inverted = false) { return <MarkdownMessage content={content} onJump={onJump} inverted={inverted} />; }
 
 
+function suggestedInterestLevel(paper: Paper): InterestLevel {
+  const candidate = paper.pending_feedback?.suggested_interest_level;
+  if (candidate === "ignored" || candidate === "neutral" || candidate === "interested") {
+    return candidate;
+  }
+  return paper.pending_feedback?.suggested_interested ? "interested" : "neutral";
+}
+
 function FeedbackModal({ open, paper, processing, activities, processError, onClose, onSaved }: { open: boolean; paper: Paper; processing: boolean; activities: AgentActivityItem[]; processError: string; onClose: () => void; onSaved: () => void }) {
-  const [interested, setInterested] = useState(Boolean(paper.pending_feedback?.suggested_interested)); const [quality, setQuality] = useState(Boolean(paper.pending_feedback?.suggested_quality)); const [createNode, setCreateNode] = useState(Boolean(paper.pending_feedback?.suggested_create_node)); const [selected, setSelected] = useState<string[]>([]); const [newTags, setNewTags] = useState<string[]>([]); const [summaryDraft, setSummaryDraft] = useState<CompletionSummaryDraft | null>(() => completionSummaryDraft(paper.completion_summary_structured)); const wasOpen = useRef(false); const wasProcessing = useRef(false);
+  const queryClient = useQueryClient();
+  const [interestLevel, setInterestLevel] = useState<InterestLevel>(() => suggestedInterestLevel(paper));
+  const [quality, setQuality] = useState(Boolean(paper.pending_feedback?.suggested_quality));
+  const [selected, setSelected] = useState<string[]>([]);
+  const [newTags, setNewTags] = useState<string[]>([]);
+  const [selectedNodeLinks, setSelectedNodeLinks] = useState<ConfirmedNodeLink[]>([]);
+  const [newNodes, setNewNodes] = useState<NewConfirmedNode[]>([]);
+  const [summaryDraft, setSummaryDraft] = useState<CompletionSummaryDraft | null>(() => completionSummaryDraft(paper.completion_summary_structured));
+  const wasOpen = useRef(false);
+  const wasProcessing = useRef(false);
   const tags = useQuery({ queryKey: ["tags"], queryFn: () => api<Tag[]>("/api/tags"), enabled: open });
-  const confirm = useMutation({ mutationFn: () => api(`/api/papers/${paper.id}/confirm-feedback`, jsonBody({ interested, quality, create_node: createNode, tag_ids: selected, new_tags: newTags, completion_summary_structured: summaryDraft && completionSummaryDraftIsComplete(summaryDraft) ? summaryDraft : undefined })), onSuccess: onSaved }); const suggested = (paper.pending_feedback?.suggested_tags as string[] | undefined) ?? [];
-  useEffect(() => { if (open && (!wasOpen.current || (wasProcessing.current && !processing))) { setInterested(Boolean(paper.pending_feedback?.suggested_interested)); setQuality(Boolean(paper.pending_feedback?.suggested_quality)); setCreateNode(Boolean(paper.pending_feedback?.suggested_create_node)); setSelected(paper.tags.map((tag) => tag.id)); setNewTags([]); setSummaryDraft(completionSummaryDraft(paper.completion_summary_structured)); } wasOpen.current = open; wasProcessing.current = processing; }, [open, paper, processing]);
-  function acceptSuggestedTag(name: string) { const existing = (tags.data ?? paper.tags).find((tag) => tag.name.toLowerCase() === name.toLowerCase()); if (existing) setSelected((current) => current.includes(existing.id) ? current : [...current, existing.id]); else if (!newTags.some((tag) => tag.toLowerCase() === name.toLowerCase())) setNewTags((current) => [...current, name]); }
+  const nodes = useQuery({ queryKey: ["graph-nodes", "feedback"], queryFn: () => api<ResearchNode[]>("/api/graph/nodes?limit=500"), enabled: open });
+  const suggestedTags = (paper.pending_feedback?.suggested_tags as string[] | undefined) ?? [];
+  const suggestedNodes = (Array.isArray(paper.pending_feedback?.suggested_nodes)
+    ? paper.pending_feedback.suggested_nodes
+    : []) as SuggestedNode[];
+  const availableNodes = nodes.data ?? [];
+  const confirm = useMutation({
+    mutationFn: () => api(`/api/papers/${paper.id}/confirm-feedback`, jsonBody({
+      interest_level: interestLevel,
+      quality,
+      tag_ids: selected,
+      new_tags: newTags,
+      node_links: selectedNodeLinks,
+      new_nodes: newNodes,
+      completion_summary_structured: summaryDraft && completionSummaryDraftIsComplete(summaryDraft) ? summaryDraft : undefined,
+    })),
+    onSuccess: async () => {
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: ["graph-nodes"] }),
+        queryClient.invalidateQueries({ queryKey: ["subgraph"] }),
+        queryClient.invalidateQueries({ queryKey: ["node"] }),
+        queryClient.invalidateQueries({ queryKey: ["node-search"] }),
+        queryClient.invalidateQueries({ queryKey: ["tags"] }),
+        queryClient.invalidateQueries({ queryKey: ["papers"] }),
+        queryClient.invalidateQueries({ queryKey: ["brief"] }),
+      ]);
+      onSaved();
+    },
+  });
+
+  useEffect(() => {
+    if (open && (!wasOpen.current || (wasProcessing.current && !processing))) {
+      setInterestLevel(suggestedInterestLevel(paper));
+      setQuality(Boolean(paper.pending_feedback?.suggested_quality));
+      setSelected(paper.tags.map((tag) => tag.id));
+      setNewTags([]);
+      setSelectedNodeLinks(
+        paper.nodes.map((node) => ({
+          node_id: node.id,
+          reason: node.reason ?? "",
+          is_key: node.is_key ?? false,
+        })),
+      );
+      setNewNodes([]);
+      setSummaryDraft(completionSummaryDraft(paper.completion_summary_structured));
+    }
+    wasOpen.current = open;
+    wasProcessing.current = processing;
+  }, [open, paper, processing]);
+
+  function acceptSuggestedTag(name: string) {
+    const existing = (tags.data ?? paper.tags).find(
+      (tag) => normalizeExactName(tag.name) === normalizeExactName(name),
+    );
+    if (existing) {
+      setSelected((current) => current.includes(existing.id) ? current : [...current, existing.id]);
+    } else if (!newTags.some((tag) => normalizeExactName(tag) === normalizeExactName(name))) {
+      setNewTags((current) => [...current, name.trim()]);
+    }
+  }
+
+  function acceptSuggestedNode(candidate: SuggestedNode) {
+    const existing = candidate.node_id
+      ? { id: candidate.node_id }
+      : availableNodes.find(
+        (node) => normalizeExactName(node.name) === normalizeExactName(candidate.name),
+      );
+    if (existing) {
+      setSelectedNodeLinks((current) => current.some((item) => item.node_id === existing.id)
+        ? current
+        : [...current, { node_id: existing.id, reason: candidate.reason, is_key: false }]);
+      return;
+    }
+    if (!newNodes.some((node) => normalizeExactName(node.name) === normalizeExactName(candidate.name))) {
+      setNewNodes((current) => [...current, {
+        name: candidate.name.trim(),
+        core_question: candidate.core_question.trim(),
+        domain: candidate.domain?.trim() || null,
+        reason: candidate.reason.trim(),
+        is_key: false,
+      }]);
+    }
+  }
+
   const ready = !processing && !processError;
   const summaryComplete = !summaryDraft || completionSummaryDraftIsComplete(summaryDraft);
-  return <Modal open={open} onClose={onClose} title={processing ? "正在整理精读结论" : processError ? "精读整理失败" : "确认精读结论"} wide fixedHeight><Stack sx={{ height: "100%", minHeight: 0, overflow: "hidden" }}><Box data-feedback-scroll sx={{ flex: "1 1 0", height: 0, minHeight: 0, overflowY: "auto", overscrollBehavior: "contain", scrollbarGutter: "stable", scrollbarWidth: "thin", pr: { sm: .5 }, "&::-webkit-scrollbar": { width: 8 }, "&::-webkit-scrollbar-thumb": { bgcolor: "action.disabled", borderRadius: 999 }, "&::-webkit-scrollbar-track": { bgcolor: "transparent" } }}><Stack spacing={2.5} sx={{ pb: 1 }}><AgentActivity items={activities} pending={processing} autoCollapseWhenComplete={ready} />{processError && <Alert severity="error">{processError}</Alert>}{ready && <>{summaryDraft ? <CompletionSummaryEditor value={summaryDraft} onChange={setSummaryDraft} /> : <Alert severity="warning">本次整理没有生成结构化精读结论。</Alert>}{!summaryComplete && <Alert severity="warning">请补全所有精读总结后再保存。</Alert>}<Box><Typography variant="h3" sx={{ mb: 1 }}>你的判断</Typography><Stack direction={{ xs: "column", sm: "row" }} gap={1}>{[["我感兴趣", interested, setInterested], ["优质论文", quality, setQuality], ["创建新节点", createNode, setCreateNode]].map(([label, active, setter]) => <Chip clickable color={active ? "primary" : "default"} variant={active ? "filled" : "outlined"} icon={active ? <CheckRounded /> : undefined} label={String(label)} onClick={() => (setter as (value: boolean) => void)(!active)} key={String(label)} />)}</Stack></Box><Box><Typography variant="h3">标签</Typography>{suggested.length > 0 && <Stack direction="row" flexWrap="wrap" gap={1} sx={{ mt: 1 }}><Typography variant="body2" color="text.secondary" sx={{ alignSelf: "center" }}>Agent 建议</Typography>{suggested.map((name) => <Chip clickable color="primary" variant="outlined" label={name} key={name} onClick={() => acceptSuggestedTag(name)} />)}</Stack>}<PaperTagSelector tags={tags.data ?? paper.tags} selectedIds={selected} newTags={newTags} onSelectedIdsChange={setSelected} onNewTagsChange={setNewTags} /></Box>{confirm.error && <Alert severity="error">{confirm.error.message}</Alert>}</>}</Stack></Box><Stack direction="row" justifyContent="flex-end" spacing={1} sx={{ flexShrink: 0, pt: 1.5, mt: 1.5, borderTop: 1, borderColor: "divider" }}><Button onClick={onClose}>{processing ? "后台继续" : "稍后处理"}</Button>{ready && <Button variant="contained" onClick={() => confirm.mutate()} disabled={confirm.isPending || !summaryComplete}>保存结论</Button>}</Stack></Stack></Modal>;
+  const nodesComplete = selectedNodeLinks.every((link) => link.reason.trim())
+    && newNodes.every(
+      (node) => node.name.trim() && node.core_question.trim() && node.reason.trim(),
+    );
+
+  return (
+    <Modal open={open} onClose={onClose} title={processing ? "正在整理精读结论" : processError ? "精读整理失败" : "确认精读结论"} wide fixedHeight>
+      <Stack sx={{ height: "100%", minHeight: 0, overflow: "hidden" }}>
+        <Box data-feedback-scroll sx={{ flex: "1 1 0", height: 0, minHeight: 0, overflowY: "auto", overscrollBehavior: "contain", scrollbarGutter: "stable", scrollbarWidth: "thin", pr: { sm: .5 }, "&::-webkit-scrollbar": { width: 8 }, "&::-webkit-scrollbar-thumb": { bgcolor: "action.disabled", borderRadius: 999 }, "&::-webkit-scrollbar-track": { bgcolor: "transparent" } }}>
+          <Stack spacing={2.5} sx={{ pb: 1 }}>
+            <AgentActivity items={activities} pending={processing} autoCollapseWhenComplete={ready} />
+            {processError && <Alert severity="error">{processError}</Alert>}
+            {ready && <>
+              {summaryDraft ? <CompletionSummaryEditor value={summaryDraft} onChange={setSummaryDraft} /> : <Alert severity="warning">本次整理没有生成结构化精读结论。</Alert>}
+              {!summaryComplete && <Alert severity="warning">请补全所有精读总结后再保存。</Alert>}
+              <Box>
+                <Typography variant="h3" sx={{ mb: 1 }}>你的判断</Typography>
+                <Stack direction={{ xs: "column", sm: "row" }} gap={1} alignItems={{ sm: "center" }}>
+                  <ToggleButtonGroup
+                    exclusive
+                    size="small"
+                    value={interestLevel}
+                    onChange={(_, value: InterestLevel | null) => value && setInterestLevel(value)}
+                    aria-label="兴趣程度"
+                  >
+                    <ToggleButton value="ignored">忽略</ToggleButton>
+                    <ToggleButton value="neutral">一般</ToggleButton>
+                    <ToggleButton value="interested">感兴趣</ToggleButton>
+                  </ToggleButtonGroup>
+                  <Chip clickable aria-pressed={quality} color={quality ? "primary" : "default"} variant={quality ? "filled" : "outlined"} icon={quality ? <CheckRounded /> : undefined} label="优质论文" onClick={() => setQuality((value) => !value)} />
+                </Stack>
+                <Typography variant="caption" color="text.secondary">兴趣判断不会改变已精读状态；“一般”不会作为负兴趣训练。</Typography>
+              </Box>
+              <Box>
+                <Typography variant="h3">标签</Typography>
+                {suggestedTags.length > 0 && <Stack direction="row" flexWrap="wrap" gap={1} sx={{ mt: 1 }}><Typography variant="body2" color="text.secondary" sx={{ alignSelf: "center" }}>Agent 建议</Typography>{suggestedTags.map((name) => <Chip clickable color="primary" variant="outlined" label={name} key={name} onClick={() => acceptSuggestedTag(name)} />)}</Stack>}
+                <PaperTagSelector tags={tags.data ?? paper.tags} selectedIds={selected} newTags={newTags} onSelectedIdsChange={setSelected} onNewTagsChange={setNewTags} />
+              </Box>
+              <Box>
+                <Typography variant="h3">研究节点</Typography>
+                <Typography variant="body2" color="text.secondary" sx={{ mt: .5 }}>保存后论文会立即挂载到这里确认的节点。</Typography>
+                {suggestedNodes.length > 0 && <Stack direction="row" flexWrap="wrap" gap={1} sx={{ mt: 1 }}><Typography variant="body2" color="text.secondary" sx={{ alignSelf: "center" }}>Agent 建议</Typography>{suggestedNodes.map((node) => <Chip clickable color="primary" variant="outlined" label={node.name} key={`${node.node_id ?? "new"}:${node.name}`} onClick={() => acceptSuggestedNode(node)} />)}</Stack>}
+                <PaperNodeSelector nodes={availableNodes} selectedLinks={selectedNodeLinks} newNodes={newNodes} onSelectedLinksChange={setSelectedNodeLinks} onNewNodesChange={setNewNodes} />
+                {!nodesComplete && <Alert severity="warning" sx={{ mt: 1 }}>请补充核心研究问题和论文与节点的关系。</Alert>}
+              </Box>
+              {confirm.error && <Alert severity="error">{confirm.error.message}</Alert>}
+            </>}
+          </Stack>
+        </Box>
+        <Stack direction="row" justifyContent="flex-end" spacing={1} sx={{ flexShrink: 0, pt: 1.5, mt: 1.5, borderTop: 1, borderColor: "divider" }}>
+          <Button onClick={onClose}>{processing ? "后台继续" : "稍后处理"}</Button>
+          {ready && <Button variant="contained" onClick={() => confirm.mutate()} disabled={confirm.isPending || !summaryComplete || !nodesComplete}>保存结论</Button>}
+        </Stack>
+      </Stack>
+    </Modal>
+  );
 }

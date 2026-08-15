@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from datetime import UTC, datetime, timedelta
 from uuid import uuid4
 
@@ -13,6 +14,7 @@ from frontier.models import (
     Conversation,
     Message,
     Paper,
+    PaperAgentContextSync,
     PaperNode,
     PaperTag,
     ReadingProgress,
@@ -20,6 +22,7 @@ from frontier.models import (
     Tag,
 )
 from frontier.services.completion_summary import save_completion_summary
+from frontier.services.paper_agent_context import paper_agent_context_sync_required
 
 
 def _create_paper(client: TestClient) -> dict:
@@ -227,3 +230,220 @@ def test_paper_agent_context_cli_calls_composed_endpoint(monkeypatch, capsys) ->
         "params": {"query": "structure"},
     }
     assert '"schema_version": 1' in capsys.readouterr().out
+
+
+def test_paper_agent_context_cli_uses_incremental_sync_for_conversation(
+    monkeypatch, capsys
+) -> None:
+    captured: dict[str, object] = {}
+
+    def fake_request(method: str, path: str, **kwargs: object) -> dict:
+        captured.update({"method": method, "path": path, **kwargs})
+        return {"schema_version": 2, "sync": {"mode": "unchanged"}}
+
+    monkeypatch.setattr(cli.client, "request", fake_request)
+
+    cli.paper_agent_context("paper-1", None, "conversation-1")
+
+    assert captured == {
+        "method": "POST",
+        "path": "/api/papers/paper-1/agent-context/sync",
+        "json": {"conversation_id": "conversation-1", "query": None},
+    }
+    assert '"mode": "unchanged"' in capsys.readouterr().out
+
+
+def test_paper_agent_context_sync_is_incremental_and_thread_bound(
+    client: TestClient,
+) -> None:
+    paper_id = _create_paper(client)["id"]
+    with SessionLocal() as session:
+        conversation = Conversation(
+            kind="paper",
+            reference_id=paper_id,
+            title="论文问答",
+            codex_session_id="thread-incremental",
+        )
+        session.add(conversation)
+        session.commit()
+        conversation_id = conversation.id
+
+    endpoint = f"/api/papers/{paper_id}/agent-context/sync"
+    payload = {"conversation_id": conversation_id}
+
+    first = client.post(endpoint, json=payload)
+    assert first.status_code == 200, first.text
+    first_body = first.json()
+    assert first_body["sync"]["mode"] == "full"
+    assert set(first_body["context"]) == set(first_body["sync"]["changed_sections"])
+    assert "conversation" not in first_body["context"]
+
+    unchanged = client.post(endpoint, json=payload)
+    assert unchanged.status_code == 200, unchanged.text
+    assert unchanged.json()["sync"]["mode"] == "unchanged"
+    assert unchanged.json()["context"] == {}
+    assert len(unchanged.content) < 400
+    with SessionLocal() as session:
+        assert (
+            paper_agent_context_sync_required(
+                session,
+                session.get_one(Paper, paper_id),
+                session.get_one(Conversation, conversation_id),
+            )
+            is False
+        )
+
+    with SessionLocal() as session:
+        session.add(
+            Message(
+                conversation_id=conversation_id,
+                role="user",
+                content="这条消息已经存在于 Codex thread，不应再次同步。",
+            )
+        )
+        session.commit()
+
+    after_message = client.post(endpoint, json=payload)
+    assert after_message.status_code == 200, after_message.text
+    assert after_message.json()["sync"]["mode"] == "unchanged"
+
+    with SessionLocal() as session:
+        session.add(
+            ReadingProgress(
+                paper_id=paper_id,
+                page_number=4,
+                scroll_offset=0.6,
+                zoom=1.2,
+            )
+        )
+        session.commit()
+
+    after_scroll = client.post(endpoint, json=payload)
+    assert after_scroll.status_code == 200, after_scroll.text
+    assert after_scroll.json()["sync"]["mode"] == "unchanged"
+
+    with SessionLocal() as session:
+        paper = session.get_one(Paper, paper_id)
+        paper.problem = "增量更新后的研究问题"
+        session.commit()
+        assert (
+            paper_agent_context_sync_required(
+                session,
+                paper,
+                session.get_one(Conversation, conversation_id),
+            )
+            is True
+        )
+
+    paper_delta = client.post(endpoint, json=payload)
+    assert paper_delta.status_code == 200, paper_delta.text
+    assert paper_delta.json()["sync"]["mode"] == "delta"
+    assert paper_delta.json()["sync"]["changed_sections"] == ["paper"]
+    assert paper_delta.json()["context"]["paper"]["problem"] == "增量更新后的研究问题"
+
+    with SessionLocal() as session:
+        session.add(
+            Annotation(
+                paper_id=paper_id,
+                kind="note",
+                page_number=2,
+                selected_text="incremental evidence",
+                content="只同步 annotations 分区。",
+            )
+        )
+        session.commit()
+
+    annotation_delta = client.post(endpoint, json=payload)
+    assert annotation_delta.status_code == 200, annotation_delta.text
+    assert annotation_delta.json()["sync"]["changed_sections"] == ["annotations"]
+
+    with SessionLocal() as session:
+        conversation = session.get_one(Conversation, conversation_id)
+        conversation.codex_session_id = "thread-recovered"
+        session.commit()
+
+    recovered = client.post(endpoint, json=payload)
+    assert recovered.status_code == 200, recovered.text
+    assert recovered.json()["sync"]["mode"] == "full"
+    with SessionLocal() as session:
+        cursor = session.get_one(PaperAgentContextSync, conversation_id)
+        assert cursor.codex_session_id == "thread-recovered"
+
+
+def test_streamed_paper_turn_skips_sync_tool_when_context_is_current(
+    client: TestClient,
+    monkeypatch,
+) -> None:
+    from frontier.api import conversations
+
+    paper_id = _create_paper(client)["id"]
+    with SessionLocal() as session:
+        conversation = Conversation(
+            kind="paper",
+            reference_id=paper_id,
+            title="论文问答",
+            codex_session_id="thread-current",
+        )
+        session.add(conversation)
+        session.commit()
+        conversation_id = conversation.id
+
+    synced = client.post(
+        f"/api/papers/{paper_id}/agent-context/sync",
+        json={"conversation_id": conversation_id},
+    )
+    assert synced.status_code == 200, synced.text
+    captured: dict[str, str] = {}
+
+    def fake_stream(prompt: str, **_kwargs):
+        captured["prompt"] = prompt
+        yield {"type": "thread", "thread_id": "thread-current"}
+        yield {"type": "delta", "delta": "继续回答"}
+
+    monkeypatch.setattr(conversations.settings, "enable_codex_runs", True)
+    monkeypatch.setattr(conversations, "stream_codex_prompt", fake_stream)
+    response = client.post(
+        f"/api/conversations/{conversation_id}/messages/stream",
+        json={"content": "继续解释这个结论"},
+    )
+    assert response.status_code == 200, response.text
+    command = (
+        f"frontier paper agent-context {paper_id} --conversation-id {conversation_id}"
+    )
+    assert f"Do not call `{command}` in this turn" in captured["prompt"]
+
+
+def test_paper_agent_context_applies_hard_analysis_and_annotation_budgets(
+    client: TestClient,
+) -> None:
+    paper_id = _create_paper(client)["id"]
+    with SessionLocal() as session:
+        paper = session.get_one(Paper, paper_id)
+        paper.full_analysis = {
+            "claims": [
+                {"claim": f"claim-{index}-" + "x" * 1_000, "page": index + 1}
+                for index in range(40)
+            ]
+        }
+        session.add_all(
+            [
+                Annotation(
+                    paper_id=paper_id,
+                    kind="note",
+                    page_number=index + 1,
+                    selected_text="s" * 3_000,
+                    content="c" * 3_000,
+                )
+                for index in range(12)
+            ]
+        )
+        session.commit()
+
+    response = client.get(f"/api/papers/{paper_id}/agent-context")
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["context_limits"]["full_analysis"]["truncated"] is True
+    assert body["context_limits"]["annotations"]["truncated"] is True
+    assert len(json.dumps(body["full_analysis"], ensure_ascii=False)) <= 24_100
+    assert len(json.dumps(body["annotations"], ensure_ascii=False)) <= 16_100
+    assert len(body["annotations"]) < 12

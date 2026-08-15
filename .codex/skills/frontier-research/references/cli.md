@@ -21,15 +21,16 @@ uv run frontier paper resources PAPER_ID
 uv run frontier paper resources PAPER_ID --kind formula
 uv run frontier paper resources PAPER_ID --kind figure --block-id BLOCK_ID
 uv run frontier paper agent-context PAPER_ID
+uv run frontier paper agent-context PAPER_ID --conversation-id CONVERSATION_ID
 uv run frontier paper context PAPER_ID
-uv run frontier paper finish PAPER_ID --data '{"completion_summary_structured":{"research_question":"... [[page:1]]","evidence_and_contribution":"... [[page:4]]","experiments":"... [[page:7]]","limitations":"... [[page:12]]","user_attitude":"..."},"suggested_interested":true,"suggested_quality":true,"suggested_create_node":false,"suggested_tags":["VLA"]}'
+uv run frontier paper finish PAPER_ID --data '{"completion_summary_structured":{"research_question":"... [[page:1]]","evidence_and_contribution":"... [[page:4]]","experiments":"... [[page:7]]","limitations":"... [[page:12]]","user_attitude":"..."},"suggested_interest_level":"interested","suggested_quality":true,"suggested_tags":["VLA"],"suggested_nodes":[{"node_id":"EXISTING_NODE_ID","name":"VLA","core_question":"如何让机器人把视觉与语言理解转化为可泛化的动作策略？","reason":"论文为该问题提供新证据"}]}'
 ```
 
 `paper list --query` searches the saved library by title, abstract, all authors, primary
 affiliation, arXiv ID, DOI, and the discovery query that originally ingested the paper. Use it
 before an external search so an existing paper and its cached full text can be reused.
 
-Use `paper agent-context` at the start of paper chat and other incremental paper work. It composes the existing Paper analysis, reading artifacts, graph links, architecture state, and paper conversation while omitting full PDF text. Follow it with targeted `paper text --page`, `paper resources`, or `paper render-page` calls for exact evidence. Use the larger `paper context` only for workflows such as reading completion that genuinely need the page-separated full text.
+Use the task prompt's `paper agent-context --conversation-id` command only when it says synchronization is required. The first/new thread receives `full`, later state changes receive `delta`, and unchanged state skips the command entirely. The stateless form remains available for manual inspection. Both omit PDF text; follow them with targeted `paper text --page`, `paper resources`, or `paper render-page` calls for exact evidence. Use the larger `paper context` only for workflows that genuinely need page-separated full text.
 
 `full_analysis` is the reusable deep-analysis slot. Keep only non-duplicated structures such as claim/evidence items, method components, figure/table indexes, glossary entries, unresolved questions, a schema version, and the source PDF version. Explicit Paper summary fields remain canonical for their respective conclusions; `metadata_json` is not a second paper-knowledge store.
 
@@ -109,6 +110,8 @@ Published briefs are immutable. `featured` and total item counts are enforced by
 ## Memory, settings, tasks, and backup
 
 ```bash
+uv run frontier interest context --recent-limit 30
+uv run frontier interest profile-update --data @data/tasks/TASK_ID/interest-profile.json
 uv run frontier memory list --kind interest_profile --active
 uv run frontier memory create --data '{"kind":"agent_experience","title":"...","content":"...","source":"daily_brief"}'
 uv run frontier memory update MEMORY_ID --data '{"content":"...","active":true}'
@@ -118,5 +121,11 @@ uv run frontier task get TASK_ID
 uv run frontier task retry TASK_ID
 uv run frontier backup
 ```
+
+`interest context` is the daily Agent's compact closed-loop input. It derives confirmed positive
+and negative evidence from canonical Paper state, attributes feedback to immutable Brief items when
+possible, and reports hit-rate and score calibration without copying paper facts into Memory.
+`interest profile-update` compare-and-swaps the one derived semantic profile against the context
+`feedback_digest` and rejects stale or unknown evidence references.
 
 Memory kinds are normally `interest_profile` and `agent_experience`. Paper facts belong to paper analysis or graph nodes, not memory.

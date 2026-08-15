@@ -146,6 +146,20 @@ def convert_arxiv_html_content(
             block["page_number"] = page_locator.locate(
                 f"{block.get('caption', '')} {block.get('text', '')}"
             )
+            composite = bool(block.pop("_composite_figure", False))
+            aspect_ratio = block.pop("_figure_aspect_ratio", None)
+            if composite and isinstance(aspect_ratio, int | float):
+                rendered = _render_pdf_figure(
+                    pdf_path,
+                    page_number=int(block["page_number"]),
+                    caption=str(block.get("caption") or ""),
+                    aspect_ratio=float(aspect_ratio),
+                    target=assets / f"{block['id']}-composite.png",
+                )
+                if rendered is not None:
+                    block["image_url"] = (
+                        f"/api/papers/{paper_id}/document/assets/{rendered.name}"
+                    )
             blocks.append(block)
         processed = index + 1
         if on_progress and (processed == total_items or processed % update_interval == 0):
@@ -248,6 +262,8 @@ def _build_block(
                 block["html"] = figure_html
             if image_urls:
                 block["image_urls"] = image_urls
+            block["_composite_figure"] = True
+            block["_figure_aspect_ratio"] = _figure_aspect_ratio(visual_source)
         elif asset_url and fetch_asset:
             source_url = asset_url
             suffix = Path(urlparse(source_url).path).suffix.lower()
@@ -344,6 +360,33 @@ def _is_composite_figure(node: Tag) -> bool:
     return len(node.find_all(["img", "object", "embed"])) > 1
 
 
+def _figure_aspect_ratio(node: Tag) -> float | None:
+    svg = node.find("svg")
+    if isinstance(svg, Tag):
+        view_box = str(svg.get("viewbox") or svg.get("viewBox") or "").split()
+        if len(view_box) == 4:
+            try:
+                width, height = float(view_box[2]), float(view_box[3])
+                if width > 0 and height > 0:
+                    return width / height
+            except ValueError:
+                pass
+    dimensions: list[tuple[float, float]] = []
+    for media in node.find_all(["img", "object", "embed"]):
+        try:
+            width = float(str(media.get("width") or "").removesuffix("px"))
+            height = float(str(media.get("height") or "").removesuffix("px"))
+        except ValueError:
+            continue
+        if width > 0 and height > 0:
+            dimensions.append((width, height))
+    if len(dimensions) > 1:
+        return sum(width for width, _ in dimensions) / max(
+            height for _, height in dimensions
+        )
+    return None
+
+
 def _media_source(media: Tag) -> str | None:
     if media.name == "object":
         return str(media.get("data") or "") or None
@@ -402,6 +445,113 @@ def _cache_figure_fragment(
         elif media.name == "source":
             media["srcset"] = rendered_url
     return _safe_fragment(clone, base_url, inner=True), cached_urls
+
+
+def _render_pdf_figure(
+    pdf_path: Path,
+    *,
+    page_number: int,
+    caption: str,
+    aspect_ratio: float,
+    target: Path,
+) -> Path | None:
+    """Rasterize a composite Figure from the canonical PDF above its caption."""
+    if not caption or not 0.2 <= aspect_ratio <= 12:
+        return None
+    import pymupdf
+
+    try:
+        with pymupdf.open(pdf_path) as source:
+            if page_number < 1 or page_number > source.page_count:
+                return None
+            page = source[page_number - 1]
+            caption_rect = _pdf_caption_rect(page, caption)
+            if caption_rect is None or caption_rect.width < 24:
+                return None
+            visual_bounds = _pdf_figure_visual_bounds(page, caption_rect, aspect_ratio)
+            left = visual_bounds.x0 if visual_bounds is not None else caption_rect.x0
+            right = visual_bounds.x1 if visual_bounds is not None else caption_rect.x1
+            bottom = max(0.0, caption_rect.y0 - 1.5)
+            height = (right - left) / aspect_ratio
+            clip = pymupdf.Rect(
+                left,
+                max(0.0, bottom - height),
+                right,
+                bottom,
+            )
+            if clip.is_empty or clip.height < 12:
+                return None
+            target.parent.mkdir(parents=True, exist_ok=True)
+            temporary = target.with_name(f"{target.stem}.tmp.png")
+            pixmap = page.get_pixmap(matrix=pymupdf.Matrix(2.5, 2.5), clip=clip, alpha=False)
+            pixmap.save(temporary)
+            temporary.replace(target)
+            return target
+    except (OSError, RuntimeError, ValueError) as exc:
+        logger.warning("Could not rasterize composite PDF figure %s: %s", caption, exc)
+        return None
+
+
+def _pdf_caption_rect(page: Any, caption: str) -> Any | None:
+    tag_match = re.match(
+        r"\s*(?:fig(?:ure)?|table)\.?\s*[a-z]?\d+(?:\.\d+)*\s*:?",
+        caption,
+        flags=re.IGNORECASE,
+    )
+    tag = _normalize(tag_match.group(0)) if tag_match else ""
+    probe = _normalize(caption)[:100]
+    candidates: list[tuple[int, tuple[Any, ...]]] = []
+    for block in page.get_text("blocks"):
+        text = _normalize(str(block[4] or ""))
+        if not text:
+            continue
+        score = 2 if tag and text.startswith(tag) else 1 if probe and probe in text else 0
+        if score:
+            candidates.append((score, block))
+    if not candidates:
+        return None
+    _, block = max(candidates, key=lambda item: (item[0], -float(item[1][1])))
+    import pymupdf
+
+    return pymupdf.Rect(*block[:4])
+
+
+def _pdf_figure_visual_bounds(
+    page: Any, caption_rect: Any, aspect_ratio: float
+) -> Any | None:
+    """Infer the Figure width from PDF images and vector drawings above its caption."""
+    import pymupdf
+
+    search_top = max(0.0, caption_rect.y0 - page.rect.width / aspect_ratio * 1.8)
+    candidates: list[Any] = []
+    for item in page.get_image_info():
+        rect = pymupdf.Rect(item.get("bbox"))
+        if (
+            rect.width > 2
+            and rect.height > 2
+            and rect.y0 >= search_top
+            and rect.y1 <= caption_rect.y0 + 2
+        ):
+            candidates.append(rect)
+    for drawing in page.get_drawings():
+        rect = pymupdf.Rect(drawing.get("rect"))
+        if (
+            rect.width > 2
+            and rect.height > 1
+            and rect.y0 >= search_top
+            and rect.y1 <= caption_rect.y0 + 2
+        ):
+            candidates.append(rect)
+    if not candidates:
+        return None
+    nearest_bottom = max(rect.y1 for rect in candidates)
+    threshold = max(8.0, (caption_rect.y0 - search_top) * 0.22)
+    nearby = [rect for rect in candidates if rect.y1 >= nearest_bottom - threshold]
+    left = min(rect.x0 for rect in nearby)
+    right = max(rect.x1 for rect in nearby)
+    if right - left < 24:
+        return None
+    return pymupdf.Rect(left, search_top, right, caption_rect.y0)
 
 
 def _best_srcset_candidate(srcset: str) -> str | None:

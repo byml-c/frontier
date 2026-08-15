@@ -1,9 +1,9 @@
 from __future__ import annotations
 
 from datetime import date
-from typing import Any
+from typing import Any, Literal, Self
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 
 class PaperCreate(BaseModel):
@@ -104,6 +104,11 @@ class PaperMetadataUpdate(BaseModel):
 
 class IgnorePaper(BaseModel):
     reason: str = Field(min_length=1)
+    source_brief_item_id: str | None = None
+
+
+class StartReading(BaseModel):
+    source_brief_item_id: str | None = None
 
 
 class FinishReading(BaseModel):
@@ -111,21 +116,81 @@ class FinishReading(BaseModel):
 
     summary: str | None = None
     completion_summary_structured: CompletionSummaryStructured | None = None
+    suggested_interest_level: Literal["ignored", "neutral", "interested"] | None = None
     suggested_interested: bool | None = None
     suggested_quality: bool | None = None
     suggested_create_node: bool | None = None
     suggested_tags: list[str] = Field(default_factory=list)
+    suggested_nodes: list[SuggestedNode] = Field(default_factory=list)
+
+
+class SuggestedNode(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    node_id: str | None = None
+    name: str = Field(min_length=1)
+    core_question: str = Field(min_length=1)
+    reason: str = Field(min_length=1)
+    domain: str | None = None
+
+
+class ConfirmedNodeLink(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    node_id: str
+    reason: str = Field(min_length=1)
+    is_key: bool = False
+
+
+class NewConfirmedNode(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    name: str = Field(min_length=1)
+    core_question: str = Field(min_length=1)
+    summary: str | None = None
+    domain: str | None = None
+    reason: str = Field(min_length=1)
+    is_key: bool = False
 
 
 class ConfirmFeedback(BaseModel):
-    interested: bool
+    interest_level: Literal["ignored", "neutral", "interested"] | None = None
+    # Backward-compatible input for existing CLI/API clients.
+    interested: bool | None = None
     quality: bool
     create_node: bool = False
+    source_brief_item_id: str | None = None
     # Omitted means preserve current metadata tags; an explicit [] clears them.
     tag_ids: list[str] | None = None
     new_tags: list[str] = Field(default_factory=list)
+    node_links: list[ConfirmedNodeLink] = Field(default_factory=list)
+    new_nodes: list[NewConfirmedNode] = Field(default_factory=list)
     personal_comment: str | None = None
     completion_summary_structured: CompletionSummaryStructured | None = None
+
+    @model_validator(mode="after")
+    def require_consistent_interest(self) -> Self:
+        if self.interest_level is None and self.interested is None:
+            raise ValueError("interest_level is required")
+        if (
+            self.interest_level is not None
+            and self.interested is not None
+            and self.interested != (self.interest_level == "interested")
+        ):
+            raise ValueError("interested conflicts with interest_level")
+        node_ids = [item.node_id for item in self.node_links]
+        if len(node_ids) != len(set(node_ids)):
+            raise ValueError("node_links contains duplicate node_id values")
+        node_names = [item.name.strip().casefold() for item in self.new_nodes]
+        if len(node_names) != len(set(node_names)):
+            raise ValueError("new_nodes contains duplicate names")
+        return self
+
+    @property
+    def resolved_interest_level(self) -> Literal["ignored", "neutral", "interested"]:
+        if self.interest_level is not None:
+            return self.interest_level
+        return "interested" if self.interested else "neutral"
 
 
 class AnnotationCreate(BaseModel):
@@ -212,6 +277,7 @@ class BriefCreate(BaseModel):
     title: str | None = None
     introduction: str | None = None
     task_id: str | None = None
+    interest_context_digest: str | None = None
 
 
 class BriefItemCreate(BaseModel):
@@ -238,6 +304,23 @@ class MemoryUpdate(BaseModel):
     metadata_json: dict[str, Any] | None = None
 
 
+class SemanticInterestPreference(BaseModel):
+    key: str = Field(min_length=1, max_length=120)
+    statement: str = Field(min_length=1, max_length=1_000)
+    polarity: Literal["positive", "negative", "mixed"]
+    confidence: float = Field(ge=0, le=1)
+    evidence_keys: list[str] = Field(min_length=1, max_length=20)
+
+
+class InterestProfileUpdate(BaseModel):
+    feedback_digest: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
+    content: str = Field(min_length=1, max_length=12_000)
+    semantic_preferences: list[SemanticInterestPreference] = Field(
+        default_factory=list,
+        max_length=50,
+    )
+
+
 class TagCreate(BaseModel):
     name: str
     color: str | None = None
@@ -247,6 +330,11 @@ class ConversationCreate(BaseModel):
     kind: str = "global"
     reference_id: str | None = None
     title: str | None = None
+
+
+class PaperAgentContextSyncRequest(BaseModel):
+    conversation_id: str
+    query: str | None = Field(default=None, max_length=4_000)
 
 
 class MessageCreate(BaseModel):

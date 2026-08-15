@@ -22,6 +22,7 @@ from ..models import Conversation, Message, Paper, TaskRun, utcnow
 from ..schemas import ConversationCreate, MessageCreate
 from ..services.architecture_scene import release_agent_lock_for_task
 from ..services.common import model_dict
+from ..services.paper_agent_context import paper_agent_context_sync_required
 from ..services.paper_conversations import get_or_create_paper_conversation
 from ..services.task_control import active_task_for_conversation, cancelled_activities
 
@@ -280,6 +281,11 @@ def send_message(
     }
     if conversation.kind == "paper":
         task_payload["paper_id"] = conversation.reference_id
+        paper = session.get(Paper, conversation.reference_id)
+        if paper is not None:
+            task_payload["paper_context_sync_required"] = paper_agent_context_sync_required(
+                session, paper, conversation
+            )
     task_id = enqueue_task(task_kind, task_payload)
     message.context_json = {**context, "task_id": task_id}
     session.commit()
@@ -397,6 +403,11 @@ def stream_message(
         }
     if conversation.kind == "paper":
         task_payload["paper_id"] = conversation.reference_id
+        paper = session.get(Paper, conversation.reference_id)
+        if paper is not None:
+            task_payload["paper_context_sync_required"] = paper_agent_context_sync_required(
+                session, paper, conversation
+            )
     task = TaskRun(kind=task_kind, payload_json=task_payload)
     session.add(task)
     session.flush()

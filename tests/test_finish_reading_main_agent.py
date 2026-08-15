@@ -46,6 +46,7 @@ def test_finish_reading_task_creates_main_conversation_and_rejects_conflicts(
         assert task.payload_json == {
             "paper_id": paper_id,
             "conversation_id": conversation.id,
+            "paper_context_sync_required": True,
         }
 
     queued_conflict = client.post("/api/tasks", json=payload)

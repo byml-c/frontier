@@ -16,6 +16,11 @@ from ..services.completion_summary import (
     completion_summary_structured,
 )
 from ..services.document_reader import queue_document_conversions
+from ..services.interest_evidence import (
+    build_interest_context,
+    interest_context_snapshot,
+    paper_interest_level,
+)
 from ..services.manual_recommendations import (
     current_analysis_state,
     is_daily_recommendation_eligible,
@@ -103,6 +108,7 @@ def _serialize_brief(session: Session, brief: Brief, *, detail: bool = True) -> 
                 }
             ),
             "current_status": paper.status,
+            "interest_level": paper_interest_level(paper),
             "is_interested": paper.is_interested,
             "is_quality": paper.is_quality,
         }
@@ -142,12 +148,56 @@ def latest_brief(session: Annotated[Session, Depends(get_session)]) -> dict:
 def create_brief(payload: BriefCreate, session: Annotated[Session, Depends(get_session)]) -> dict:
     existing = session.scalar(select(Brief).where(Brief.brief_date == payload.brief_date))
     if existing:
+        if existing.status != "published":
+            current_digest = (existing.snapshot_json or {}).get(
+                "interest_context_digest_used"
+            )
+            if (
+                payload.interest_context_digest
+                and payload.interest_context_digest != current_digest
+                and session.scalar(
+                    select(BriefItem.id).where(
+                        BriefItem.brief_id == existing.id,
+                        BriefItem.tier != "manual",
+                    )
+                )
+                is not None
+            ):
+                raise HTTPException(
+                    status_code=409,
+                    detail=(
+                        "Draft already contains ranked daily items from another interest "
+                        "context; rebuild the draft before changing its digest"
+                    ),
+                )
+            changed = False
+            if payload.task_id and existing.task_id != payload.task_id:
+                existing.task_id = payload.task_id
+                changed = True
+            if payload.interest_context_digest:
+                snapshot = dict(existing.snapshot_json or {})
+                if (
+                    snapshot.get("interest_context_digest_used")
+                    != payload.interest_context_digest
+                ):
+                    snapshot["interest_context_digest_used"] = (
+                        payload.interest_context_digest
+                    )
+                    existing.snapshot_json = snapshot
+                    changed = True
+            if changed:
+                session.commit()
         return _serialize_brief(session, existing)
     item = Brief(
         brief_date=payload.brief_date,
         title=payload.title or f"{payload.brief_date.isoformat()} 研究简报",
         introduction=payload.introduction,
         task_id=payload.task_id,
+        snapshot_json={
+            "interest_context_digest_used": payload.interest_context_digest,
+        }
+        if payload.interest_context_digest
+        else {},
     )
     session.add(item)
     session.flush()
@@ -240,18 +290,33 @@ def publish_brief(
         .where(BriefItem.brief_id == brief_id)
         .order_by(BriefItem.rank)
     ).all()
-    excluded_rows = [row for row in rows if not is_daily_recommendation_eligible(row[1])]
-    rows = [row for row in rows if is_daily_recommendation_eligible(row[1])]
+    excluded_rows = [
+        row
+        for row in rows
+        if row[0].tier != "manual" and not is_daily_recommendation_eligible(row[1])
+    ]
+    rows = [
+        row
+        for row in rows
+        if row[0].tier == "manual" or is_daily_recommendation_eligible(row[1])
+    ]
     if not rows:
         raise HTTPException(status_code=409, detail="Cannot publish a brief without unread papers")
     for item, _paper in excluded_rows:
         session.delete(item)
     for item, paper in rows:
         item.snapshot_json = _paper_snapshot(session, paper)
+    interest_context = build_interest_context(session, recent_limit=20)
+    digest_used = (brief.snapshot_json or {}).get("interest_context_digest_used")
     brief.snapshot_json = {
+        **(brief.snapshot_json or {}),
         "title": brief.title,
         "introduction": brief.introduction,
         "paper_ids": [paper.id for _item, paper in rows],
+        "interest_context": interest_context_snapshot(interest_context),
+        "interest_context_stale_at_publish": (
+            digest_used != interest_context["source_digest"] if digest_used else None
+        ),
     }
     brief.status = "published"
     brief.published_at = datetime.now(UTC)

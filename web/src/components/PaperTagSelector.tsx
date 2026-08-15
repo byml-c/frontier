@@ -1,12 +1,19 @@
 import { Autocomplete, Chip, Stack, TextField, createFilterOptions } from "@mui/material";
 import { useState } from "react";
 import type { Tag } from "../types";
+import { canCreateExactName, normalizeExactName } from "./exactName";
 
 type TagOption = Tag & { inputValue?: string };
 const filterTagOptions = createFilterOptions<TagOption>({
   stringify: (option) => option.name,
   trim: true,
 });
+
+const normalizeTagName = normalizeExactName;
+
+function canCreateTag(input: string, tags: Tag[], newTags: string[]): boolean {
+  return canCreateExactName(input, tags.map((tag) => tag.name), newTags);
+}
 
 export function PaperTagSelector({
   tags,
@@ -62,16 +69,14 @@ export function PaperTagSelector({
         options={tags.filter(
           (tag) =>
             !selectedIds.includes(tag.id)
-            && !newTags.some((name) => name.toLowerCase() === tag.name.toLowerCase()),
+            && !newTags.some(
+              (name) => normalizeTagName(name) === normalizeTagName(tag.name),
+            ),
         )}
         filterOptions={(options, params) => {
           const filtered = filterTagOptions(options, params);
           const input = params.inputValue.trim();
-          const hasExistingMatch = tags.some((tag) =>
-            tag.name.toLowerCase().includes(input.toLowerCase()),
-          );
-          const alreadyNew = newTags.some((name) => name.toLowerCase() === input.toLowerCase());
-          if (input && !hasExistingMatch && !alreadyNew) {
+          if (canCreateTag(input, tags, newTags)) {
             filtered.push({ id: `new:${input}`, name: `新建标签“${input}”`, inputValue: input });
           }
           return filtered;

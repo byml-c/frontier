@@ -278,7 +278,7 @@ def test_paper_dedup_annotations_and_feedback(client: TestClient) -> None:
         if task["kind"] == "graph_maintenance"
         and task["payload_json"].get("context", {}).get("paper_id") == paper["id"]
     ]
-    assert graph_tasks
+    assert graph_tasks == []
     library = client.get("/api/papers", params={"library": True}).json()
     assert any(item["id"] == paper["id"] for item in library["items"])
     assert library["total"] >= 1

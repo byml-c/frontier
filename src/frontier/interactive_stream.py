@@ -642,7 +642,9 @@ def _frontier_command_actions(command: str, payload: Any = None) -> tuple[str, s
             page = _page_number(_option_value(tokens, "--page"))
             target = f"论文第 {page} 页正文" if page else "论文正文"
             return f"正在读取{target}", f"已读取{target}"
-        if action in {"context", "agent-context"}:
+        if action == "agent-context":
+            return "正在同步论文上下文", "已同步论文上下文"
+        if action == "context":
             return "正在载入论文上下文", "已载入论文上下文"
         if action == "render-page":
             page = _page_number(
@@ -689,6 +691,17 @@ def _frontier_command_actions(command: str, payload: Any = None) -> tuple[str, s
 
 def _frontier_result_detail(command: str, payload: Any) -> str | None:
     tokens = _command_tokens(command)
+    if tokens[:2] == ["paper", "agent-context"] and isinstance(payload, dict):
+        sync = payload.get("sync")
+        if isinstance(sync, dict):
+            mode = sync.get("mode")
+            changed = sync.get("changed_sections")
+            if mode == "unchanged":
+                return "无状态变化，复用已有上下文"
+            if mode == "full":
+                return "当前 Agent 线程已完成首次同步"
+            if mode == "delta" and isinstance(changed, list):
+                return f"已更新 {len(changed)} 个上下文分区"
     if tokens[:2] != ["source", "arxiv-search"] or not isinstance(payload, dict):
         return None
     items = payload.get("items")

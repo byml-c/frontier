@@ -21,6 +21,7 @@ paper_app = typer.Typer(no_args_is_help=True)
 graph_app = typer.Typer(no_args_is_help=True)
 brief_app = typer.Typer(no_args_is_help=True)
 memory_app = typer.Typer(no_args_is_help=True)
+interest_app = typer.Typer(no_args_is_help=True)
 task_app = typer.Typer(no_args_is_help=True)
 setting_app = typer.Typer(no_args_is_help=True)
 source_app = typer.Typer(no_args_is_help=True)
@@ -31,6 +32,7 @@ app.add_typer(paper_app, name="paper")
 app.add_typer(graph_app, name="graph")
 app.add_typer(brief_app, name="brief")
 app.add_typer(memory_app, name="memory")
+app.add_typer(interest_app, name="interest")
 app.add_typer(task_app, name="task")
 app.add_typer(setting_app, name="setting")
 app.add_typer(source_app, name="source")
@@ -235,16 +237,20 @@ def paper_context(paper_id: str, include_text: bool = True) -> None:
 def paper_agent_context(
     paper_id: str,
     query: str | None = typer.Option(None, "--query", "-q"),
+    conversation_id: str | None = typer.Option(None, "--conversation-id"),
 ) -> None:
-    """Read compact durable context for one paper Agent without loading the PDF."""
-    params = {"query": query} if query is not None else None
-    emit(
-        client.request(
-            "GET",
-            f"/api/papers/{paper_id}/agent-context",
-            params=params,
+    """Read compact paper context, incrementally when bound to a Conversation."""
+    if isinstance(conversation_id, str) and conversation_id:
+        emit(
+            client.request(
+                "POST",
+                f"/api/papers/{paper_id}/agent-context/sync",
+                json={"conversation_id": conversation_id, "query": query},
+            )
         )
-    )
+        return
+    params = {"query": query} if query is not None else None
+    emit(client.request("GET", f"/api/papers/{paper_id}/agent-context", params=params))
 
 
 @paper_app.command("resources")
@@ -533,6 +539,24 @@ def memory_create(data: str = typer.Option(...)) -> None:
 @memory_app.command("update")
 def memory_update(memory_id: str, data: str = typer.Option(...)) -> None:
     emit(client.request("PATCH", f"/api/memories/{memory_id}", json=parse_json(data)))
+
+
+@interest_app.command("context")
+def interest_context(recent_limit: int = typer.Option(20, min=1, max=100)) -> None:
+    """Read the compact confirmed-feedback profile and recommendation calibration."""
+    emit(
+        client.request(
+            "GET",
+            "/api/interests/context",
+            params={"recent_limit": recent_limit},
+        )
+    )
+
+
+@interest_app.command("profile-update")
+def interest_profile_update(data: str = typer.Option(..., help="JSON string or @file")) -> None:
+    """CAS-update the single evidence-backed semantic interest profile."""
+    emit(client.request("PUT", "/api/interests/profile", json=parse_json(data)))
 
 
 @task_app.command("list")

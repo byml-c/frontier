@@ -93,7 +93,7 @@ def test_architecture_command_result_becomes_safe_ui_event() -> None:
 
 def test_paper_commands_are_exposed_as_specific_activities() -> None:
     cases = [
-        ("uv run frontier paper agent-context paper-1", "已载入论文上下文"),
+        ("uv run frontier paper agent-context paper-1", "已同步论文上下文"),
         ("uv run frontier paper text paper-1", "已读取论文正文"),
         ("uv run frontier paper text paper-1 --page 7", "已读取论文第 7 页正文"),
         (

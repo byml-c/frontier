@@ -18,6 +18,7 @@ from .models import ArchitectureDocument, Brief, Conversation, Message, Paper, T
 from .services.architecture_progress import persist_architecture_progress
 from .services.architecture_scene import release_agent_lock_for_task
 from .services.common import log_operation
+from .services.interest_evidence import FEEDBACK_PROVENANCE_KEY
 from .services.manual_recommendations import set_manual_analysis_state
 from .services.outbound_network import agent_environment
 from .services.translation_provider import stream_translation_prompt
@@ -128,6 +129,33 @@ Current request:
 """
 
 
+def _paper_agent_context_command(paper_id: str, conversation_id: object) -> str:
+    command = f"frontier paper agent-context {paper_id}"
+    if isinstance(conversation_id, str) and conversation_id:
+        command += f" --conversation-id {conversation_id}"
+    return command
+
+
+def _paper_agent_context_instruction(
+    paper_id: str,
+    conversation_id: object,
+    sync_required: object,
+) -> str:
+    command = _paper_agent_context_command(paper_id, conversation_id)
+    if sync_required is False:
+        return (
+            "The Server verified that this Codex thread already has the latest paper state. "
+            f"Do not call `{command}` in this turn. If the surrounding recovery preamble says the "
+            "previous Codex thread is unavailable, ignore this skip and run that command once; the "
+            "new thread then receives a `full` initialization."
+        )
+    return (
+        f"Start with `{command}`. Its `full` response initializes this Codex thread, `delta` "
+        "contains only changed paper-state sections, and `unchanged` means the existing thread "
+        "context is current."
+    )
+
+
 def build_prompt(task: TaskRun) -> str:
     payload = task.payload_json
     ambiguous_paper_action = (
@@ -203,7 +231,22 @@ def build_prompt(task: TaskRun) -> str:
         )
         return f"""{workflow_common}
 
-Run the daily paper workflow for {run_date}. Read relevant active memories and graph nodes first.
+Run the daily paper workflow for {run_date}. Start with
+`frontier interest context --recent-limit 30`; this bounded projection is the canonical handoff from
+paper-reading Agents and user-confirmed feedback. It contains explicit interest priors, confirmed
+positive and negative interest, quality judgments, final user-selected tags, private attitude
+summaries, recommendation attribution, and historical calibration. Treat confirmed feedback as
+stronger than seed interests or Agent-authored graph structure. Keep interest and paper quality as
+independent axes. A neutral judgment is neither positive nor negative interest. An ignored
+recommendation is weak negative-interest evidence, not proof of low
+paper quality. Do not learn from Agent suggestions or from unread candidates.
+If confirmed feedback exists and `layers.semantic_profile` is missing, marked `stale`, or its
+metadata `feedback_digest` differs from the current `feedback_digest`, rebuild that single derived profile with
+`frontier interest profile-update`. Include only durable cross-paper preferences, keep positive and
+negative evidence, and cite the provided `evidence_key` values in each semantic preference. Never
+copy paper summaries into the profile or create additional feedback-profile memories. A 409 means
+evidence changed; reload `interest context` and retry once before ranking. After a successful profile
+update, reload `interest context` once and use that new `source_digest` for brief creation.
 You are the single daily-workflow root Agent responsible for candidate discovery, bibliographic
 verification, ranking, and the canonical summary and analysis fields saved for every selected paper.
 You may delegate independent full-text evidence extraction for different candidates to read-only
@@ -213,7 +256,13 @@ that long-lived main Agent is reserved for papers the user actively reads and di
 Write only pre-reading catalog fields such as `Paper.summary` and recommendation analysis. Never
 write `completion_summary` or `completion_summary_structured`; those are user-reading conclusions
 owned exclusively by the paper main Agent after the user finishes reading.
-Collect arXiv candidates using the research interests maintained in the graph. Respect the current
+Use the context's `source_digest` when creating the brief as `interest_context_digest`. Adjust
+discovery and ranking using topic affinities, recent semantic attitude evidence, hit rates, and
+Brier scores. When feedback support is small, avoid overfitting and keep modest cross-domain
+exploration. If interest hit rate is weak, tighten personal relevance; if quality hit rate or its
+calibration is weak, raise the evidence threshold independently. The graph describes research
+questions and accumulated evidence; it is not by itself proof that the user likes a topic.
+Collect arXiv candidates using the calibrated interests and relevant graph questions. Respect the current
 limits returned by `frontier setting list`: abstracts, full texts, total brief items, and featured
 items. Before ranking or adding a paper, inspect its existing record and exclude every paper whose
 status is not `candidate`; papers in `reading`, `feedback_pending`, `completed`, or `ignored` status
@@ -292,11 +341,16 @@ that the architecture is ready and mentioning any important evidence limitation.
 """
     if task.kind == "finish_reading":
         paper_id = payload["paper_id"]
+        context_instruction = _paper_agent_context_instruction(
+            paper_id,
+            payload.get("conversation_id"),
+            payload.get("paper_context_sync_required"),
+        )
         return f"""{workflow_common}
 
-Prepare the completion summary for paper {paper_id} as that paper's long-lived main Agent. Start
-with `frontier paper agent-context {paper_id}` and synthesize the accumulated Codex thread, the
-user's paper conversation, annotations, notes, and reusable `full_analysis`. Read only missing exact
+Prepare the completion summary for paper {paper_id} as that paper's long-lived main Agent.
+{context_instruction} Synthesize
+the accumulated Codex thread, annotations, notes, and reusable `full_analysis`. Read only missing exact
 PDF pages or structured resources needed to support the final summary; do not reload the complete paper
 when the accumulated evidence is sufficient. Write the complete saved summary in Simplified
 Chinese. Save `completion_summary_structured` with exactly these fields: `research_question`,
@@ -304,7 +358,12 @@ Chinese. Save `completion_summary_structured` with exactly these fields: `resear
 claim in the first four fields must cite a page as [[page:N]]. Derive `user_attitude` only from the
 user's annotations, notes, and conversation; state that evidence is insufficient instead of
 inventing an attitude. Save suggested tags and the structured summary with `frontier paper finish`.
-Do not confirm interest, quality, tags, or node creation on the user's behalf. Do not send the
+Also save `suggested_interest_level` as exactly one of `ignored`, `neutral`, or `interested`.
+Read the active research nodes and save concise `suggested_nodes` candidates. Each candidate must
+contain `name`, `core_question`, a paper-specific `reason`, optional `domain`, and `node_id` when it
+matches an existing node exactly. Propose a new node only when its core research question is genuinely
+distinct; never use a merely similar existing node to suppress a justified new candidate.
+Do not confirm interest, quality, tags, or node selection on the user's behalf. Do not send the
 legacy `summary` field when `completion_summary_structured` is available; the Server creates its
 compatibility Markdown.
 After saving, return only one concise Chinese sentence confirming completion. Do not narrate loaded
@@ -338,11 +397,16 @@ Text:
         context = json.dumps(payload.get("context", {}), ensure_ascii=False)
         if task.kind == "paper_chat":
             paper_id = payload.get("paper_id")
+            context_instruction = _paper_agent_context_instruction(
+                str(paper_id),
+                payload.get("conversation_id"),
+                payload.get("paper_context_sync_required"),
+            )
             return f"""{interactive_common}
 
-Answer the user's paper-reading question about paper {paper_id}. Start with
-`frontier paper agent-context {paper_id}` to load the compact application-owned paper state without duplicating it
-inside the Codex thread. Read only the exact PDF pages or structured resources needed for the
+Answer the user's paper-reading question about paper {paper_id}. {context_instruction}
+When syncing, merge only sections returned by `delta` and never request a stateless full reload merely
+to repeat already loaded state. Read only the exact PDF pages or structured resources needed for the
 current question with `frontier paper text --page`, `frontier paper resources`, or `frontier paper
 render-page`; do not reload the complete paper by default. Discuss through problem decomposition and mutual inquiry.
 Do not mix simple translation results into this conversation. Cite every material paper claim with
@@ -399,6 +463,23 @@ def _run_translation_task(task_id: str) -> None:
                 session.commit()
 
 
+def _graph_feedback_is_active(session: Session, task: TaskRun) -> bool:
+    context = (task.payload_json or {}).get("context") or {}
+    evidence_key = context.get("feedback_evidence_key")
+    paper_id = context.get("paper_id")
+    if not isinstance(evidence_key, str) or not isinstance(paper_id, str):
+        return True
+    paper = session.get(Paper, paper_id)
+    provenance = (paper.metadata_json or {}).get(FEEDBACK_PROVENANCE_KEY) if paper else None
+    return bool(
+        paper
+        and paper.status == "completed"
+        and isinstance(provenance, dict)
+        and provenance.get("active", True)
+        and provenance.get("evidence_key") == evidence_key
+    )
+
+
 def run_task(task_id: str) -> None:
     with SessionLocal() as session:
         task = session.get(TaskRun, task_id)
@@ -409,6 +490,25 @@ def run_task(task_id: str) -> None:
     with SessionLocal() as session:
         task = session.get(TaskRun, task_id)
         if not task or task.status != "queued":
+            return
+        if task.kind == "graph_maintenance" and not _graph_feedback_is_active(
+            session, task
+        ):
+            task.status = "cancelled"
+            task.finished_at = utcnow()
+            task.result_json = {
+                **(task.result_json or {}),
+                "stream_status": "cancelled",
+            }
+            log_operation(
+                session,
+                actor="system",
+                action="task.cancelled_stale_feedback",
+                entity_type="task",
+                entity_id=task.id,
+                task_id=task.id,
+            )
+            session.commit()
             return
         task.status = "running"
         task.started_at = utcnow()

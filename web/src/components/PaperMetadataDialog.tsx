@@ -22,6 +22,7 @@ import type { Paper, Tag } from "../types";
 import { CompletionSummaryEditor } from "./CompletionSummaryEditor";
 import { completionSummaryDraft, completionSummaryDraftIsComplete, type CompletionSummaryDraft } from "./completionSummary";
 import { Modal } from "./Modal";
+import { normalizeExactName } from "./exactName";
 import { PaperTagSelector } from "./PaperTagSelector";
 import { ErrorState, Loading } from "./States";
 
@@ -224,10 +225,12 @@ export function PaperMetadataDialog({
   const suggestedTags = paper.data?.suggested_tags ?? [];
   const summaryComplete = !summaryDraft || completionSummaryDraftIsComplete(summaryDraft);
   function acceptSuggestedTag(name: string) {
-    const existing = tags.data?.find((tag) => tag.name === name);
+    const existing = tags.data?.find(
+      (tag) => normalizeExactName(tag.name) === normalizeExactName(name),
+    );
     if (existing) {
       setSelectedTags((current) => current.includes(existing.id) ? current : [...current, existing.id]);
-    } else if (!newTags.includes(name)) {
+    } else if (!newTags.some((tag) => normalizeExactName(tag) === normalizeExactName(name))) {
       setNewTags((current) => [...current, name]);
     }
     setDirty(true);

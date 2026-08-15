@@ -44,14 +44,14 @@ COMPOSITE_FIGURE_HTML = """
   <h1 class="ltx_title_document">Composite figures</h1>
   <figure id="S1.F2" class="ltx_figure">
     <div class="ltx_flex_figure">
-      <div class="ltx_flex_cell"><img src="paper-v1/figure-2-left.png" /></div>
-      <div class="ltx_flex_cell"><img src="paper-v1/figure-2-right.png" /></div>
+      <div class="ltx_flex_cell"><img src="paper-v1/figure-2-left.png" width="300" height="136" /></div>
+      <div class="ltx_flex_cell"><img src="paper-v1/figure-2-right.png" width="200" height="136" /></div>
     </div>
     <figcaption>Fig. 2: Two coordinated panels.</figcaption>
   </figure>
   <figure id="S4.F4" class="ltx_figure">
     <div class="ltx_transformed_outer"><span class="ltx_transformed_inner">
-      <svg class="ltx_picture" viewBox="0 0 200 80">
+      <svg class="ltx_picture" viewBox="0 0 400 100">
         <g><foreignObject width="90" height="50">
           <span class="ltx_foreignobject_content">
             <img src="paper-v1/sequence-frame.jpg" /><b>SWITCH</b>
@@ -147,7 +147,20 @@ def test_arxiv_html_attaches_a_preceding_textless_image_to_its_caption(
 def test_arxiv_html_preserves_multi_panel_and_inline_svg_figures(tmp_path: Path) -> None:
     pdf = tmp_path / "paper.pdf"
     document = pymupdf.open()
-    document.new_page()
+    first_page = document.new_page()
+    first_page.draw_rect(pymupdf.Rect(50, 50, 550, 186), fill=(0.2, 0.4, 0.8))
+    first_page.insert_textbox(
+        pymupdf.Rect(50, 190, 560, 240),
+        "Fig. 2: Two coordinated panels.",
+        fontsize=8,
+    )
+    second_page = document.new_page()
+    second_page.draw_rect(pymupdf.Rect(50, 50, 550, 175), fill=(0.8, 0.3, 0.2))
+    second_page.insert_textbox(
+        pymupdf.Rect(50, 179, 560, 229),
+        "Fig. 4: An inline SVG sequence.",
+        fontsize=8,
+    )
     document.save(pdf)
     document.close()
     fetched: list[str] = []
@@ -171,12 +184,14 @@ def test_arxiv_html_preserves_multi_panel_and_inline_svg_figures(tmp_path: Path)
     figure_two, figure_four = [
         block for block in payload["blocks"] if block["kind"] == "picture"
     ]
-    assert "image_url" not in figure_two
+    assert figure_two["page_number"] == 1
+    assert figure_two["image_url"].endswith("-composite.png")
     assert len(figure_two["image_urls"]) == 2
     assert figure_two["html"].count("/api/papers/nestdex/document/assets/") == 2
     assert "figure-2-left.png" not in figure_two["html"]
     assert "figure-2-right.png" not in figure_two["html"]
-    assert "image_url" not in figure_four
+    assert figure_four["page_number"] == 2
+    assert figure_four["image_url"].endswith("-composite.png")
     assert len(figure_four["image_urls"]) == 1
     assert "<svg" in figure_four["html"]
     assert "foreignobject" in figure_four["html"].lower()
@@ -187,3 +202,9 @@ def test_arxiv_html_preserves_multi_panel_and_inline_svg_figures(tmp_path: Path)
         "https://arxiv.org/html/paper-v1/figure-2-right.png",
         "https://arxiv.org/html/paper-v1/sequence-frame.jpg",
     ]
+    for figure in (figure_two, figure_four):
+        filename = Path(figure["image_url"]).name
+        rendered = tmp_path / "reader" / "assets" / filename
+        assert rendered.exists()
+        with pymupdf.open(rendered) as image:
+            assert image[0].rect.width > image[0].rect.height * 3

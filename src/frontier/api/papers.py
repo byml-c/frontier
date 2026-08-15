@@ -18,15 +18,17 @@ from fastapi import (
     UploadFile,
 )
 from fastapi.responses import FileResponse, StreamingResponse
-from sqlalchemy import Text, and_, case, cast, func, or_, select
+from sqlalchemy import Text, and_, case, cast, func, or_, select, update
 from sqlalchemy.orm import Session
 
 from ..agent_runner import build_prompt, enqueue_task, run_task
 from ..config import settings
 from ..database import SessionLocal, get_session
-from ..interactive_stream import encode_stream_event
+from ..interactive_stream import cancel_codex_run, encode_stream_event
 from ..models import (
     Annotation,
+    Conversation,
+    NodeProgress,
     Paper,
     PaperNode,
     PaperTag,
@@ -42,10 +44,12 @@ from ..schemas import (
     ConfirmFeedback,
     FinishReading,
     IgnorePaper,
+    PaperAgentContextSyncRequest,
     PaperCreate,
     PaperMetadataUpdate,
     PaperUpdate,
     ReadingProgressUpdate,
+    StartReading,
     TagCreate,
     TranslationRequest,
 )
@@ -62,6 +66,7 @@ from ..services.completion_summary import (
     COMPLETION_SUMMARY_METADATA_KEY,
     completion_summary_structured,
     migrate_legacy_completion_summary,
+    render_completion_summary,
     save_completion_summary,
 )
 from ..services.document_reader import (
@@ -80,12 +85,25 @@ from ..services.ingest import (
     ingest_url,
     render_pdf_page,
 )
+from ..services.interest_evidence import (
+    FEEDBACK_PROVENANCE_KEY,
+    IGNORE_PROVENANCE_KEY,
+    READING_PROVENANCE_KEY,
+    feedback_payload_hash,
+    feedback_payload_hash_v2,
+    paper_interest_level,
+    validate_brief_item_source,
+)
 from ..services.manual_recommendations import (
     current_analysis_state,
     queue_paper_metadata_analysis,
     stage_manual_recommendation,
 )
-from ..services.paper_agent_context import build_paper_agent_context
+from ..services.paper_agent_context import (
+    build_paper_agent_context,
+    sync_paper_agent_context,
+)
+from ..services.task_control import ACTIVE_TASK_STATUSES
 from ..services.translation_provider import stream_translation_prompt
 
 router = APIRouter(prefix="/api/papers", tags=["papers"])
@@ -130,6 +148,7 @@ def _serialize_paper(session: Session, paper: Paper, *, detail: bool = False) ->
     payload["analysis_status"] = analysis.get("status")
     payload["analysis_error"] = analysis.get("error")
     payload["suggested_tags"] = metadata.get("suggested_tags", [])
+    payload["interest_level"] = paper_interest_level(paper)
     if not detail:
         payload.pop("full_analysis", None)
         payload.pop("metadata_json", None)
@@ -178,6 +197,194 @@ def _replace_paper_tags(
     for tag_id in selected_tag_ids:
         if session.get(Tag, tag_id):
             session.add(PaperTag(paper_id=paper_id, tag_id=tag_id))
+
+
+def _prospective_tag_names(
+    session: Session,
+    paper_id: str,
+    tag_ids: list[str] | None,
+    new_tags: list[str],
+) -> list[str]:
+    selected_ids = (
+        set(tag_ids)
+        if tag_ids is not None
+        else set(
+            session.scalars(select(PaperTag.tag_id).where(PaperTag.paper_id == paper_id)).all()
+        )
+    )
+    names = [
+        name
+        for name in session.scalars(select(Tag.name).where(Tag.id.in_(selected_ids))).all()
+    ]
+    names.extend(name.strip() for name in new_tags if name.strip())
+    return sorted(set(names), key=str.casefold)
+
+
+def _prospective_node_selections(
+    session: Session,
+    payload: ConfirmFeedback,
+) -> list[dict[str, object]]:
+    selections: dict[str, dict[str, object]] = {}
+    for link in payload.node_links:
+        node = session.get(ResearchNode, link.node_id)
+        if node is None or not node.is_active:
+            raise ValueError(f"Research node not found or inactive: {link.node_id}")
+        selections[f"existing:{node.id}"] = {
+            "kind": "existing",
+            "node_id": node.id,
+            "reason": (link.reason or "").strip() or None,
+            "is_key": link.is_key,
+        }
+    for proposed in payload.new_nodes:
+        name = proposed.name.strip()
+        core_question = proposed.core_question.strip()
+        if not name or not core_question:
+            raise ValueError("New research nodes require a name and core question")
+        selections[f"new:{name.casefold()}"] = {
+            "kind": "new",
+            "name": name,
+            "core_question": core_question,
+            "summary": (proposed.summary or "").strip() or None,
+            "domain": (proposed.domain or "").strip() or None,
+            "reason": (proposed.reason or "").strip() or None,
+            "is_key": proposed.is_key,
+        }
+    return [selections[key] for key in sorted(selections)]
+
+
+def _apply_node_selections(
+    session: Session,
+    paper: Paper,
+    selections: list[dict[str, object]],
+) -> list[str]:
+    session.query(PaperNode).filter(PaperNode.paper_id == paper.id).delete()
+    resolved: dict[str, tuple[ResearchNode, dict[str, object]]] = {}
+    for selection in selections:
+        node: ResearchNode | None = None
+        if selection["kind"] == "existing":
+            node = session.get(ResearchNode, str(selection["node_id"]))
+        else:
+            name = str(selection["name"])
+            node = session.scalar(
+                select(ResearchNode).where(func.lower(ResearchNode.name) == name.lower())
+            )
+            if node is None:
+                node = ResearchNode(
+                    name=name,
+                    core_question=str(selection["core_question"]),
+                    summary=selection.get("summary"),
+                    domain=selection.get("domain"),
+                )
+                session.add(node)
+                session.flush()
+        if node is None:
+            raise ValueError("Selected research node disappeared during confirmation")
+        resolved[node.id] = (node, selection)
+    for node, selection in resolved.values():
+        session.add(
+            PaperNode(
+                paper_id=paper.id,
+                node_id=node.id,
+                reason=selection.get("reason"),
+                is_key=bool(selection.get("is_key")),
+            )
+        )
+    session.flush()
+    return list(resolved)
+
+
+def _replace_selected_node_progress(
+    session: Session,
+    paper: Paper,
+    selected_node_ids: list[str],
+    structured: dict[str, str | None] | None,
+) -> None:
+    """Project the confirmed paper summary onto exactly the user-selected nodes."""
+    session.query(NodeProgress).filter(NodeProgress.paper_id == paper.id).delete()
+    if not selected_node_ids:
+        return
+    content = (
+        render_completion_summary(structured, include_user_attitude=False)
+        if structured
+        else None
+    ) or paper.summary or "该论文已完成精读，并由用户确认归入此研究节点。"
+    title = f"精读：{paper.title}"[:255]
+    for node_id in selected_node_ids:
+        session.add(
+            NodeProgress(
+                node_id=node_id,
+                paper_id=paper.id,
+                title=title,
+                content=content,
+                happened_at=paper.published_at,
+            )
+        )
+
+
+def _confirmed_feedback_hash(
+    session: Session,
+    paper: Paper,
+    payload: ConfirmFeedback,
+    source_brief_item_id: str | None,
+    node_selections: list[dict[str, object]],
+) -> str:
+    structured = (
+        payload.completion_summary_structured.model_dump()
+        if payload.completion_summary_structured is not None
+        else completion_summary_structured(paper, include_user_attitude=True)
+    )
+    metadata = paper.metadata_json or {}
+    personal_comment = (
+        payload.personal_comment
+        if payload.personal_comment is not None
+        else metadata.get("personal_comment")
+    )
+    return feedback_payload_hash(
+        interest_level=payload.resolved_interest_level,
+        quality=payload.quality,
+        create_node=payload.create_node,
+        tag_names=_prospective_tag_names(
+            session, paper.id, payload.tag_ids, payload.new_tags
+        ),
+        node_selections=node_selections,
+        user_attitude=(structured or {}).get("user_attitude"),
+        personal_comment=(
+            personal_comment if isinstance(personal_comment, str) else None
+        ),
+        source_brief_item_id=source_brief_item_id,
+    )
+
+
+def _confirmed_feedback_hash_v2(
+    session: Session,
+    paper: Paper,
+    payload: ConfirmFeedback,
+    source_brief_item_id: str | None,
+) -> str:
+    structured = (
+        payload.completion_summary_structured.model_dump()
+        if payload.completion_summary_structured is not None
+        else completion_summary_structured(paper, include_user_attitude=True)
+    )
+    metadata = paper.metadata_json or {}
+    personal_comment = (
+        payload.personal_comment
+        if payload.personal_comment is not None
+        else metadata.get("personal_comment")
+    )
+    return feedback_payload_hash_v2(
+        interested=payload.resolved_interest_level == "interested",
+        quality=payload.quality,
+        create_node=payload.create_node,
+        tag_names=_prospective_tag_names(
+            session, paper.id, payload.tag_ids, payload.new_tags
+        ),
+        user_attitude=(structured or {}).get("user_attitude"),
+        personal_comment=(
+            personal_comment if isinstance(personal_comment, str) else None
+        ),
+        source_brief_item_id=source_brief_item_id,
+    )
 
 
 @router.get("")
@@ -359,6 +566,31 @@ def get_paper_agent_context(
     return build_paper_agent_context(session, paper, query=query)
 
 
+@router.post("/{paper_id}/agent-context/sync")
+def sync_agent_context(
+    paper_id: str,
+    payload: PaperAgentContextSyncRequest,
+    session: Annotated[Session, Depends(get_session)],
+) -> dict:
+    paper = _paper_or_404(session, paper_id)
+    conversation = session.get(Conversation, payload.conversation_id)
+    if conversation is None:
+        raise HTTPException(status_code=404, detail="Conversation not found")
+    if conversation.kind != "paper" or conversation.reference_id != paper_id:
+        raise HTTPException(
+            status_code=409,
+            detail="Conversation does not belong to this paper",
+        )
+    result = sync_paper_agent_context(
+        session,
+        paper,
+        conversation,
+        query=payload.query,
+    )
+    session.commit()
+    return result
+
+
 @router.patch("/{paper_id}")
 def update_paper(
     paper_id: str,
@@ -384,6 +616,10 @@ def update_paper(
                     COMPLETION_SUMMARY_METADATA_KEY,
                     BIBLIOGRAPHIC_PROVENANCE_KEY,
                     MANUAL_BIBLIOGRAPHIC_FIELDS_KEY,
+                    READING_PROVENANCE_KEY,
+                    FEEDBACK_PROVENANCE_KEY,
+                    IGNORE_PROVENANCE_KEY,
+                    "personal_comment",
                 )
                 if key in current_metadata
             },
@@ -435,6 +671,10 @@ def update_paper_metadata(
                     COMPLETION_SUMMARY_METADATA_KEY,
                     BIBLIOGRAPHIC_PROVENANCE_KEY,
                     MANUAL_BIBLIOGRAPHIC_FIELDS_KEY,
+                    READING_PROVENANCE_KEY,
+                    FEEDBACK_PROVENANCE_KEY,
+                    IGNORE_PROVENANCE_KEY,
+                    "personal_comment",
                 )
                 if key in current_metadata
             },
@@ -486,6 +726,32 @@ def ignore_paper(
     session: Annotated[Session, Depends(get_session)],
 ) -> dict:
     paper = _paper_or_404(session, paper_id)
+    if paper.status in {"completed", "feedback_pending"}:
+        raise HTTPException(status_code=409, detail="Confirmed reading feedback cannot be ignored")
+    existing_ignore = (paper.metadata_json or {}).get(IGNORE_PROVENANCE_KEY)
+    if (
+        paper.status == "ignored"
+        and paper.ignored_reason == payload.reason
+        and isinstance(existing_ignore, dict)
+        and existing_ignore.get("brief_item_id") == payload.source_brief_item_id
+    ):
+        return _serialize_paper(session, paper, detail=True)
+    if payload.source_brief_item_id:
+        try:
+            validate_brief_item_source(session, paper.id, payload.source_brief_item_id)
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+    ignored_at = datetime.now(UTC).isoformat()
+    paper.metadata_json = {
+        **(paper.metadata_json or {}),
+        IGNORE_PROVENANCE_KEY: {
+            "schema_version": 1,
+            "evidence_key": f"paper:{paper.id}:ignore:{ignored_at}",
+            "brief_item_id": payload.source_brief_item_id,
+            "ignored_at": ignored_at,
+            "active": True,
+        },
+    }
     paper.status = "ignored"
     paper.ignored_reason = payload.reason
     log_operation(
@@ -494,15 +760,53 @@ def ignore_paper(
         action="paper.ignored",
         entity_type="paper",
         entity_id=paper.id,
-        detail={"reason": payload.reason},
+        detail={
+            "reason": payload.reason,
+            "source_brief_item_id": payload.source_brief_item_id,
+        },
     )
     session.commit()
     return _serialize_paper(session, paper, detail=True)
 
 
 @router.post("/{paper_id}/start-reading")
-def start_reading(paper_id: str, session: Annotated[Session, Depends(get_session)]) -> dict:
+def start_reading(
+    paper_id: str,
+    session: Annotated[Session, Depends(get_session)],
+    payload: StartReading | None = None,
+) -> dict:
     paper = _paper_or_404(session, paper_id)
+    previous_status = paper.status
+    source_brief_item_id = payload.source_brief_item_id if payload else None
+    if source_brief_item_id is None and previous_status == "ignored":
+        ignore_provenance = (paper.metadata_json or {}).get(IGNORE_PROVENANCE_KEY)
+        candidate = (
+            ignore_provenance.get("brief_item_id")
+            if isinstance(ignore_provenance, dict)
+            else None
+        )
+        if isinstance(candidate, str):
+            try:
+                validate_brief_item_source(session, paper.id, candidate)
+            except ValueError:
+                pass
+            else:
+                source_brief_item_id = candidate
+    if source_brief_item_id:
+        try:
+            validate_brief_item_source(session, paper.id, source_brief_item_id)
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        metadata = dict(paper.metadata_json or {})
+        if previous_status in {"candidate", "ignored"} or not isinstance(
+            metadata.get(READING_PROVENANCE_KEY), dict
+        ):
+            metadata[READING_PROVENANCE_KEY] = {
+                "schema_version": 1,
+                "brief_item_id": source_brief_item_id,
+                "started_at": datetime.now(UTC).isoformat(),
+            }
+            paper.metadata_json = metadata
     if paper.status not in {"completed", "feedback_pending"}:
         paper.status = "reading"
     log_operation(
@@ -511,6 +815,7 @@ def start_reading(paper_id: str, session: Annotated[Session, Depends(get_session
         action="paper.reading_started",
         entity_type="paper",
         entity_id=paper.id,
+        detail={"source_brief_item_id": source_brief_item_id},
     )
     session.commit()
     return _serialize_paper(session, paper, detail=True)
@@ -530,15 +835,60 @@ def cancel_reading(paper_id: str, session: Annotated[Session, Depends(get_sessio
     removed_links = (
         session.query(PaperNode).filter(PaperNode.paper_id == paper.id).delete()
     )
+    removed_progress = (
+        session.query(NodeProgress).filter(NodeProgress.paper_id == paper.id).delete()
+    )
+    metadata = dict(paper.metadata_json or {})
+    feedback_provenance = metadata.get(FEEDBACK_PROVENANCE_KEY)
+    cancelled_task_ids: list[str] = []
+    if isinstance(feedback_provenance, dict):
+        evidence_key = feedback_provenance.get("evidence_key")
+        graph_task_id = feedback_provenance.get("graph_task_id")
+        for task in session.scalars(
+            select(TaskRun).where(
+                TaskRun.kind == "graph_maintenance",
+                TaskRun.status.in_(ACTIVE_TASK_STATUSES),
+            )
+        ):
+            context = (task.payload_json or {}).get("context") or {}
+            matches_recorded_task = isinstance(graph_task_id, str) and task.id == graph_task_id
+            matches_evidence = (
+                context.get("paper_id") == paper.id
+                and isinstance(evidence_key, str)
+                and context.get("feedback_evidence_key") == evidence_key
+            )
+            if not (matches_recorded_task or matches_evidence):
+                continue
+            task.status = "cancelled"
+            task.error = None
+            task.finished_at = utcnow()
+            task.result_json = {
+                **(task.result_json or {}),
+                "stream_status": "cancelled",
+            }
+            cancelled_task_ids.append(task.id)
+        metadata[FEEDBACK_PROVENANCE_KEY] = {
+            **feedback_provenance,
+            "active": False,
+            "retracted_at": datetime.now(UTC).isoformat(),
+        }
+        paper.metadata_json = metadata
     log_operation(
         session,
         actor="user",
         action="paper.reading_cancelled",
         entity_type="paper",
         entity_id=paper.id,
-        detail={"previous_status": previous_status, "removed_node_links": removed_links},
+        detail={
+            "previous_status": previous_status,
+            "removed_node_links": removed_links,
+            "removed_node_progress": removed_progress,
+            "cancelled_graph_task_ids": cancelled_task_ids,
+        },
     )
     session.commit()
+    for task_id in cancelled_task_ids:
+        cancel_codex_run(task_id)
     return _serialize_paper(session, paper, detail=True)
 
 
@@ -577,12 +927,93 @@ def finish_reading(
 def confirm_feedback(
     paper_id: str,
     payload: ConfirmFeedback,
-    background_tasks: BackgroundTasks,
     session: Annotated[Session, Depends(get_session)],
 ) -> dict:
     paper = _paper_or_404(session, paper_id)
+    source_brief_item_id = payload.source_brief_item_id
+    existing_provenance = (paper.metadata_json or {}).get(FEEDBACK_PROVENANCE_KEY)
+    if (
+        source_brief_item_id is None
+        and paper.status == "completed"
+        and isinstance(existing_provenance, dict)
+    ):
+        candidate = existing_provenance.get("brief_item_id")
+        source_brief_item_id = candidate if isinstance(candidate, str) else None
+    reading_provenance = (paper.metadata_json or {}).get(READING_PROVENANCE_KEY)
+    if source_brief_item_id is None and isinstance(reading_provenance, dict):
+        candidate = reading_provenance.get("brief_item_id")
+        source_brief_item_id = candidate if isinstance(candidate, str) else None
+    if source_brief_item_id is None:
+        ignore_provenance = (paper.metadata_json or {}).get(IGNORE_PROVENANCE_KEY)
+        candidate = (
+            ignore_provenance.get("brief_item_id")
+            if isinstance(ignore_provenance, dict)
+            else None
+        )
+        source_brief_item_id = candidate if isinstance(candidate, str) else None
+    if source_brief_item_id:
+        try:
+            validate_brief_item_source(session, paper.id, source_brief_item_id)
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+    try:
+        node_selections = _prospective_node_selections(session, payload)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    attempted_hash = _confirmed_feedback_hash(
+        session, paper, payload, source_brief_item_id, node_selections
+    )
+    if paper.status == "completed":
+        hash_matches = bool(
+            isinstance(existing_provenance, dict)
+            and existing_provenance.get("payload_hash") == attempted_hash
+        )
+        if (
+            not hash_matches
+            and isinstance(existing_provenance, dict)
+            and existing_provenance.get("payload_hash_version") == 2
+            and payload.resolved_interest_level != "ignored"
+            and not payload.node_links
+            and not payload.new_nodes
+        ):
+            hash_matches = existing_provenance.get(
+                "payload_hash"
+            ) == _confirmed_feedback_hash_v2(
+                session, paper, payload, source_brief_item_id
+            )
+        if (
+            isinstance(existing_provenance, dict)
+            and existing_provenance.get("active", True)
+            and hash_matches
+        ):
+            return _serialize_paper(session, paper, detail=True)
+        raise HTTPException(status_code=409, detail="Paper feedback is already confirmed")
+    if paper.status != "feedback_pending":
+        raise HTTPException(
+            status_code=409,
+            detail="Paper must be summarized before feedback confirmation",
+        )
+    claim = session.execute(
+        update(Paper)
+        .where(Paper.id == paper.id, Paper.status == "feedback_pending")
+        .values(status="feedback_confirming")
+        .execution_options(synchronize_session=False)
+    )
+    if claim.rowcount != 1:
+        session.rollback()
+        paper = _paper_or_404(session, paper_id)
+        concurrent_provenance = (paper.metadata_json or {}).get(FEEDBACK_PROVENANCE_KEY)
+        if (
+            paper.status == "completed"
+            and isinstance(concurrent_provenance, dict)
+            and concurrent_provenance.get("active", True)
+            and concurrent_provenance.get("payload_hash") == attempted_hash
+        ):
+            return _serialize_paper(session, paper, detail=True)
+        raise HTTPException(status_code=409, detail="Paper feedback confirmation is already active")
     paper.status = "completed"
-    paper.is_interested = payload.interested
+    interest_level = payload.resolved_interest_level
+    paper.is_interested = interest_level == "interested"
     paper.is_quality = payload.quality
     paper.reading_completed_at = datetime.now(UTC)
     paper.pending_feedback = {}
@@ -590,8 +1021,11 @@ def confirm_feedback(
         save_completion_summary(
             paper, payload.completion_summary_structured.model_dump()
         )
-    if payload.personal_comment:
-        paper.metadata_json = {**paper.metadata_json, "personal_comment": payload.personal_comment}
+    if payload.personal_comment is not None:
+        paper.metadata_json = {
+            **paper.metadata_json,
+            "personal_comment": payload.personal_comment.strip() or None,
+        }
     selected_tag_ids = (
         set(payload.tag_ids)
         if payload.tag_ids is not None
@@ -613,10 +1047,59 @@ def confirm_feedback(
     for tag_id in selected_tag_ids:
         if session.get(Tag, tag_id):
             session.add(PaperTag(paper_id=paper.id, tag_id=tag_id))
+    tag_names = list(
+        session.scalars(select(Tag.name).where(Tag.id.in_(selected_tag_ids))).all()
+    )
+    try:
+        selected_node_ids = _apply_node_selections(session, paper, node_selections)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    structured = completion_summary_structured(paper, include_user_attitude=True)
+    _replace_selected_node_progress(session, paper, selected_node_ids, structured)
+    previous_revision = (
+        int(existing_provenance.get("revision") or 0)
+        if isinstance(existing_provenance, dict)
+        else 0
+    )
+    confirmed_at = datetime.now(UTC)
+    revision = previous_revision + 1
+    evidence_key = f"paper:{paper.id}:feedback:{revision}"
+    payload_hash = feedback_payload_hash(
+        interest_level=interest_level,
+        quality=payload.quality,
+        create_node=payload.create_node,
+        tag_names=tag_names,
+        node_selections=node_selections,
+        user_attitude=(structured or {}).get("user_attitude"),
+        personal_comment=(paper.metadata_json or {}).get("personal_comment"),
+        source_brief_item_id=source_brief_item_id,
+    )
     paper.metadata_json = {
         **paper.metadata_json,
-        "create_node_requested": payload.create_node,
+        "create_node_requested": bool(payload.new_nodes) or payload.create_node,
+        FEEDBACK_PROVENANCE_KEY: {
+            "schema_version": 1,
+            "payload_hash_version": 3,
+            "revision": revision,
+            "evidence_key": evidence_key,
+            "confirmed_at": confirmed_at.isoformat(),
+            "brief_item_id": source_brief_item_id,
+            "interest_level": interest_level,
+            "selected_node_ids": selected_node_ids,
+            "payload_hash": payload_hash,
+            "active": True,
+        },
     }
+    ignore_provenance = paper.metadata_json.get(IGNORE_PROVENANCE_KEY)
+    if isinstance(ignore_provenance, dict):
+        paper.metadata_json = {
+            **paper.metadata_json,
+            IGNORE_PROVENANCE_KEY: {
+                **ignore_provenance,
+                "active": False,
+                "replaced_at": confirmed_at.isoformat(),
+            },
+        }
     log_operation(
         session,
         actor="user",
@@ -624,35 +1107,18 @@ def confirm_feedback(
         entity_type="paper",
         entity_id=paper.id,
         detail={
-            "interested": payload.interested,
+            "evidence_key": evidence_key,
+            "feedback_revision": revision,
+            "source_brief_item_id": source_brief_item_id,
+            "interest_level": interest_level,
+            "interested": paper.is_interested,
             "quality": payload.quality,
             "create_node": payload.create_node,
             "tag_count": len(selected_tag_ids),
+            "node_count": len(selected_node_ids),
         },
     )
     session.commit()
-    task_id = enqueue_task(
-        "graph_maintenance",
-        {
-            "message": (
-                f"论文 {paper.id} 已完成用户确认的精读。请根据完整分析和用户反馈，将论文关联到"
-                "已有的相关研究节点，并在确有增量时更新节点进展。"
-                + (
-                    "用户明确要求评估并在必要时创建新节点。"
-                    if payload.create_node
-                    else "用户未要求创建新节点，不要创建或拆分节点。"
-                )
-            ),
-            "context": {
-                "paper_id": paper.id,
-                "create_node_requested": payload.create_node,
-                "interested": payload.interested,
-                "quality": payload.quality,
-            },
-        },
-    )
-    if settings.enable_codex_runs:
-        background_tasks.add_task(run_task, task_id)
     return _serialize_paper(session, paper, detail=True)
 
 

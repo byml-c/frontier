@@ -31,14 +31,14 @@ import { Modal } from "./Modal";
 import { MarkdownMessage } from "./MarkdownMessage";
 import { PaperMetadataDialog } from "./PaperMetadataDialog";
 
-export function PaperCard({ paper, rank, featured = false }: { paper: Paper; rank?: number; featured?: boolean }) {
+export function PaperCard({ paper, rank, featured = false, briefItemId }: { paper: Paper; rank?: number; featured?: boolean; briefItemId?: string }) {
   const navigate = useNavigate();
   const queryClient = useQueryClient();
   const [ignoreOpen, setIgnoreOpen] = useState(false);
   const [ignoreReason, setIgnoreReason] = useState("");
   const [metadataOpen, setMetadataOpen] = useState(false);
-  const ignore = useMutation({ mutationFn: () => api(`/api/papers/${paper.id}/ignore`, jsonBody({ reason: ignoreReason })), onSuccess: () => { setIgnoreOpen(false); queryClient.invalidateQueries({ queryKey: ["brief"] }); queryClient.invalidateQueries({ queryKey: ["papers"] }); } });
-  const startReading = useMutation({ mutationFn: () => api(`/api/papers/${paper.id}/start-reading`, { method: "POST" }), onSuccess: () => navigate(`/paper/${paper.id}`) });
+  const ignore = useMutation({ mutationFn: () => api(`/api/papers/${paper.id}/ignore`, jsonBody({ reason: ignoreReason, source_brief_item_id: briefItemId })), onSuccess: () => { setIgnoreOpen(false); queryClient.invalidateQueries({ queryKey: ["brief"] }); queryClient.invalidateQueries({ queryKey: ["papers"] }); } });
+  const startReading = useMutation({ mutationFn: () => api(`/api/papers/${paper.id}/start-reading`, jsonBody({ source_brief_item_id: briefItemId })), onSuccess: () => navigate(`/paper/${paper.id}`) });
   function submitIgnore(event: FormEvent) { event.preventDefault(); if (ignoreReason.trim()) ignore.mutate(); }
 
   return <Card>
