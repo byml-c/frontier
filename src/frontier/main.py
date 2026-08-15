@@ -14,6 +14,10 @@ from .api import architectures, auth, briefs, conversations, daily, graph, paper
 from .auth import request_is_internal, request_is_trusted
 from .config import settings
 from .database import SessionLocal, create_tables
+from .interactive_stream import (
+    start_codex_app_server_pool,
+    stop_codex_app_server_pool,
+)
 from .scheduler import start_scheduler, stop_scheduler
 from .services.architecture_scene import cleanup_stale_architecture_locks
 from .services.author_metadata import queue_cached_arxiv_author_metadata_backfill
@@ -34,10 +38,15 @@ async def lifespan(_app: FastAPI):
     queue_cached_arxiv_author_metadata_backfill()
     conversations.mark_orphaned_conversation_streams()
     warm_translation_provider()
+    if settings.enable_codex_runs:
+        start_codex_app_server_pool()
     start_scheduler()
-    yield
-    stop_scheduler()
-    close_translation_provider()
+    try:
+        yield
+    finally:
+        stop_scheduler()
+        stop_codex_app_server_pool()
+        close_translation_provider()
 
 
 app = FastAPI(title=settings.app_name, version="0.1.0", lifespan=lifespan)

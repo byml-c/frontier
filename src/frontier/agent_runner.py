@@ -293,8 +293,8 @@ that the architecture is ready and mentioning any important evidence limitation.
 Prepare the completion summary for paper {paper_id} as that paper's long-lived main Agent. Start
 with `frontier paper agent-context {paper_id}` and synthesize the accumulated Codex thread, the
 user's paper conversation, annotations, notes, and reusable `full_analysis`. Read only missing exact
-PDF pages or structured resources needed to support the final summary; do not reload the complete
-paper when the accumulated evidence is sufficient. Write the complete saved summary in Simplified
+PDF pages or structured resources needed to support the final summary; do not reload the complete paper
+when the accumulated evidence is sufficient. Write the complete saved summary in Simplified
 Chinese. Save `completion_summary_structured` with exactly these fields: `research_question`,
 `evidence_and_contribution`, `experiments`, `limitations`, and `user_attitude`. Every material paper
 claim in the first four fields must cite a page as [[page:N]]. Derive `user_attitude` only from the

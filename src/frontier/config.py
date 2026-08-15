@@ -28,6 +28,9 @@ class Settings(BaseSettings):
     outbound_proxy: str | None = None
     codex_sandbox: str = "workspace-write"
     codex_network_access: bool = True
+    # App-server workers are long-lived for the Frontier service lifetime. Each
+    # worker serializes turns while keeping multiple Codex threads loaded.
+    codex_app_server_max_workers: int = 2
     translation_env_file: Path = PROJECT_ROOT / "translation.env"
     enable_scheduler: bool = True
     enable_codex_runs: bool = True

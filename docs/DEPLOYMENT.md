@@ -34,6 +34,10 @@ Frontier 本机 API 会通过 `NO_PROXY` 保持直连。修改后需要重启 `f
 默认配置已经可用时应保持未设置；它不是 provider 名称，也不会自动创建
 `[model_providers.<id>]`。
 
+`FRONTIER_CODEX_APP_SERVER_MAX_WORKERS` 控制常驻 App Server 进程数上限，
+默认为 2。首个 Agent 请求会创建 worker 并持续复用，其余 worker 只在并发请求需要时创建；
+已经加载的对话 thread 会优先回到同一 worker。修改该配置后需要重启 Frontier 服务。
+
 ```dotenv
 OPENAI_API_KEY=你的翻译模型密钥
 BASE_URL=https://你的兼容接口/v1

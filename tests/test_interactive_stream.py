@@ -1,13 +1,26 @@
 from __future__ import annotations
 
+import threading
+
+import pytest
+
 from frontier import interactive_stream
 from frontier.interactive_stream import (
+    CodexAppServerPool,
     CodexStreamError,
     _architecture_ui_event,
     _codex_status_activity,
     _public_item_activity,
     _tool_activity,
 )
+
+
+class _FakeProcess:
+    def __init__(self) -> None:
+        self.alive = True
+
+    def poll(self) -> None:
+        return None if self.alive else 1
 
 
 def test_app_server_command_uses_configured_profile(monkeypatch) -> None:
@@ -615,3 +628,271 @@ def test_stream_turn_does_not_hide_other_resume_errors(monkeypatch) -> None:
         assert str(exc) == "authentication failed"
     else:
         raise AssertionError("Non-recoverable resume errors must still fail")
+
+
+def test_app_server_pool_reuses_process_and_loaded_thread(monkeypatch) -> None:
+    process = _FakeProcess()
+    starts: list[object] = []
+    stops: list[object] = []
+    writes: list[dict] = []
+    responses = iter(
+        [
+            {
+                "thread": {"id": "thread-persistent"},
+                "model": "gpt-5.4",
+                "modelProvider": "openai",
+            },
+            {"turn": {"id": "turn-1", "status": "inProgress"}},
+            {"turn": {"id": "turn-2", "status": "inProgress"}},
+        ]
+    )
+    messages = iter(
+        [
+            {"method": "turn/completed", "params": {"turn": {"status": "completed"}}},
+            {"method": "turn/completed", "params": {"turn": {"status": "completed"}}},
+        ]
+    )
+
+    def start_process():
+        starts.append(process)
+        return process
+
+    pool = CodexAppServerPool(max_workers=1)
+    monkeypatch.setattr(interactive_stream, "_APP_SERVER_POOL", pool)
+    monkeypatch.setattr(interactive_stream, "_start_process", start_process)
+    monkeypatch.setattr(interactive_stream, "_stop_process", stops.append)
+    monkeypatch.setattr(
+        interactive_stream,
+        "_write_message",
+        lambda _connection, message: writes.append(message),
+    )
+    monkeypatch.setattr(interactive_stream, "_await_response", lambda *_args: next(responses))
+    monkeypatch.setattr(interactive_stream, "_read_message", lambda *_args: next(messages))
+
+    first = list(interactive_stream.stream_codex_prompt("first"))
+    second = list(
+        interactive_stream.stream_codex_prompt(
+            "second", session_id="thread-persistent"
+        )
+    )
+
+    assert len(starts) == 1
+    assert stops == []
+    assert [message["method"] for message in writes] == [
+        "thread/start",
+        "turn/start",
+        "turn/start",
+    ]
+    assert next(event for event in first if event["type"] == "thread")["thread_id"] == (
+        "thread-persistent"
+    )
+    assert next(event for event in second if event["type"] == "runtime")["model"] == (
+        "gpt-5.4"
+    )
+
+    pool.shutdown()
+    assert stops == [process]
+
+
+def test_pooled_run_cancellation_interrupts_only_its_turn(monkeypatch) -> None:
+    process = _FakeProcess()
+    worker = interactive_stream._CodexAppServerWorker(process)  # type: ignore[arg-type]
+    handle = interactive_stream._PooledTurnHandle(worker)
+    writes: list[dict] = []
+    stops: list[object] = []
+    monkeypatch.setattr(
+        interactive_stream,
+        "_write_message",
+        lambda _connection, message: writes.append(message),
+    )
+    monkeypatch.setattr(interactive_stream, "_stop_process", stops.append)
+    handle.bind_thread("thread-1")
+    handle.bind_turn("turn-1")
+    interactive_stream.register_codex_run("pooled-run", handle)
+
+    assert interactive_stream.cancel_codex_run("pooled-run") is True
+    interactive_stream.unregister_codex_run("pooled-run", handle)
+
+    assert stops == []
+    assert writes == [
+        {
+            "id": 2,
+            "method": "turn/interrupt",
+            "params": {"threadId": "thread-1", "turnId": "turn-1"},
+        }
+    ]
+
+
+def test_abandoned_stream_discards_worker_with_unfinished_turn(monkeypatch) -> None:
+    process = _FakeProcess()
+    stops: list[object] = []
+    writes: list[dict] = []
+    responses = iter(
+        [
+            {"thread": {"id": "thread-1"}},
+            {"turn": {"id": "turn-1", "status": "inProgress"}},
+        ]
+    )
+    messages = iter(
+        [
+            {
+                "method": "item/agentMessage/delta",
+                "params": {"itemId": "answer-1", "delta": "partial"},
+            }
+        ]
+    )
+    pool = CodexAppServerPool(max_workers=1)
+    monkeypatch.setattr(interactive_stream, "_APP_SERVER_POOL", pool)
+    monkeypatch.setattr(interactive_stream, "_start_process", lambda: process)
+    monkeypatch.setattr(interactive_stream, "_stop_process", stops.append)
+    monkeypatch.setattr(
+        interactive_stream,
+        "_write_message",
+        lambda _connection, message: writes.append(message),
+    )
+    monkeypatch.setattr(interactive_stream, "_await_response", lambda *_args: next(responses))
+    monkeypatch.setattr(interactive_stream, "_read_message", lambda *_args: next(messages))
+
+    stream = interactive_stream.stream_codex_prompt("prompt", run_id="abandoned-run")
+    assert next(stream)["type"] == "thread"
+    assert next(stream) == {"type": "delta", "delta": "partial"}
+    stream.close()
+
+    assert any(message["method"] == "turn/interrupt" for message in writes)
+    assert stops == [process]
+
+
+def test_busy_affinity_does_not_block_a_different_thread_from_scaling(monkeypatch) -> None:
+    processes = iter([_FakeProcess(), _FakeProcess()])
+    starts: list[_FakeProcess] = []
+
+    def start_process() -> _FakeProcess:
+        process = next(processes)
+        starts.append(process)
+        return process
+
+    monkeypatch.setattr(interactive_stream, "_start_process", start_process)
+    monkeypatch.setattr(interactive_stream, "_stop_process", lambda _process: None)
+    pool = CodexAppServerPool(max_workers=2)
+
+    worker = pool.acquire()
+    pool.release(worker, thread_id="thread-a")
+    worker = pool.acquire()
+    pool.release(worker, thread_id="thread-b")
+    active_a = pool.acquire("thread-a")
+    active_b = pool.acquire("thread-b")
+
+    assert active_a is not active_b
+    assert len(starts) == 2
+
+    pool.release(active_a, thread_id="thread-a", previous_thread_id="thread-a")
+    pool.release(active_b, thread_id="thread-b", previous_thread_id="thread-b")
+    pool.shutdown()
+
+
+def test_worker_start_failure_releases_capacity_for_retry(monkeypatch) -> None:
+    process = _FakeProcess()
+    attempts = iter([CodexStreamError("initialize failed"), process])
+
+    def start_process():
+        result = next(attempts)
+        if isinstance(result, Exception):
+            raise result
+        return result
+
+    monkeypatch.setattr(interactive_stream, "_start_process", start_process)
+    monkeypatch.setattr(interactive_stream, "_stop_process", lambda _process: None)
+    pool = CodexAppServerPool(max_workers=1)
+
+    with pytest.raises(CodexStreamError, match="initialize failed"):
+        pool.acquire()
+    worker = pool.acquire()
+
+    assert worker.process is process
+    pool.release(worker)
+    pool.shutdown()
+
+
+def test_malformed_turn_start_response_discards_worker(monkeypatch) -> None:
+    process = _FakeProcess()
+    stops: list[object] = []
+    responses = iter([{"thread": {"id": "thread-1"}}, {}])
+    pool = CodexAppServerPool(max_workers=1)
+    monkeypatch.setattr(interactive_stream, "_APP_SERVER_POOL", pool)
+    monkeypatch.setattr(interactive_stream, "_start_process", lambda: process)
+    monkeypatch.setattr(interactive_stream, "_stop_process", stops.append)
+    monkeypatch.setattr(interactive_stream, "_write_message", lambda *_args: None)
+    monkeypatch.setattr(interactive_stream, "_await_response", lambda *_args: next(responses))
+
+    with pytest.raises(CodexStreamError, match="did not return a turn id"):
+        list(interactive_stream.stream_codex_prompt("prompt"))
+
+    assert stops == [process]
+
+
+def test_dead_worker_loses_affinity_and_is_replaced(monkeypatch) -> None:
+    first = _FakeProcess()
+    second = _FakeProcess()
+    processes = iter([first, second])
+    monkeypatch.setattr(interactive_stream, "_start_process", lambda: next(processes))
+    monkeypatch.setattr(interactive_stream, "_stop_process", lambda _process: None)
+    pool = CodexAppServerPool(max_workers=1)
+
+    worker = pool.acquire()
+    pool.release(worker, thread_id="thread-1")
+    first.alive = False
+    replacement = pool.acquire("thread-1")
+
+    assert replacement.process is second
+    pool.release(replacement, thread_id="thread-1", previous_thread_id="thread-1")
+    pool.shutdown()
+
+
+def test_cancel_before_turn_id_interrupts_after_binding(monkeypatch) -> None:
+    worker = interactive_stream._CodexAppServerWorker(_FakeProcess())  # type: ignore[arg-type]
+    handle = interactive_stream._PooledTurnHandle(worker)
+    writes: list[dict] = []
+    monkeypatch.setattr(
+        interactive_stream,
+        "_write_message",
+        lambda _connection, message: writes.append(message),
+    )
+
+    handle.bind_thread("thread-1")
+    handle.mark_turn_requested()
+    handle.cancel()
+    assert writes == []
+    handle.bind_turn("turn-1")
+
+    assert [message["method"] for message in writes] == ["turn/interrupt"]
+
+
+def test_pool_shutdown_wakes_waiting_acquire(monkeypatch) -> None:
+    process = _FakeProcess()
+    monkeypatch.setattr(interactive_stream, "_start_process", lambda: process)
+    monkeypatch.setattr(interactive_stream, "_stop_process", lambda _process: None)
+    pool = CodexAppServerPool(max_workers=1)
+    active = pool.acquire()
+    started = threading.Event()
+    finished = threading.Event()
+    errors: list[BaseException] = []
+
+    def wait_for_worker() -> None:
+        started.set()
+        try:
+            pool.acquire()
+        except BaseException as exc:  # noqa: BLE001
+            errors.append(exc)
+        finally:
+            finished.set()
+
+    waiter = threading.Thread(target=wait_for_worker)
+    waiter.start()
+    assert started.wait(timeout=1)
+    pool.shutdown()
+    assert finished.wait(timeout=1)
+    waiter.join(timeout=1)
+
+    assert len(errors) == 1
+    assert isinstance(errors[0], CodexStreamError)
+    pool.release(active)

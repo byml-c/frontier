@@ -23,7 +23,7 @@ class CodexRunCancelled(CodexStreamError):
     pass
 
 
-_ACTIVE_RUNS: dict[str, subprocess.Popen[str]] = {}
+_ACTIVE_RUNS: dict[str, Any] = {}
 _CANCELLED_RUNS: dict[str, float] = {}
 _RUNS_LOCK = threading.Lock()
 _CANCEL_MARK_TTL_SECONDS = 600
@@ -40,30 +40,30 @@ def _prune_cancelled_runs(now: float) -> None:
 
 
 def cancel_codex_run(run_id: str) -> bool:
-    """Stop a running Codex process and remember early cancellation races."""
+    """Cancel one Codex run and remember early cancellation races."""
     with _RUNS_LOCK:
         now = time.monotonic()
         _prune_cancelled_runs(now)
         _CANCELLED_RUNS[run_id] = now
-        process = _ACTIVE_RUNS.pop(run_id, None)
-    _stop_process(process)
-    return process is not None
+        target = _ACTIVE_RUNS.pop(run_id, None)
+    _cancel_run_target(target)
+    return target is not None
 
 
-def register_codex_run(run_id: str, process: subprocess.Popen[str]) -> None:
+def register_codex_run(run_id: str, target: Any) -> None:
     with _RUNS_LOCK:
         _prune_cancelled_runs(time.monotonic())
         cancelled = run_id in _CANCELLED_RUNS
         if not cancelled:
-            _ACTIVE_RUNS[run_id] = process
+            _ACTIVE_RUNS[run_id] = target
     if cancelled:
-        _stop_process(process)
+        _cancel_run_target(target)
         raise CodexRunCancelled("Agent 工作流已由用户中断")
 
 
-def unregister_codex_run(run_id: str, process: subprocess.Popen[str]) -> None:
+def unregister_codex_run(run_id: str, target: Any) -> None:
     with _RUNS_LOCK:
-        if _ACTIVE_RUNS.get(run_id) is process:
+        if _ACTIVE_RUNS.get(run_id) is target:
             _ACTIVE_RUNS.pop(run_id, None)
         _CANCELLED_RUNS.pop(run_id, None)
 
@@ -151,18 +151,340 @@ def _start_process() -> subprocess.Popen[str]:
     return process
 
 
+class _CodexAppServerWorker:
+    """One initialized app-server connection with serialized turn access."""
+
+    def __init__(self, process: subprocess.Popen[str]) -> None:
+        self.process = process
+        self.busy = False
+        self.loaded_threads: dict[str, dict[str, Any]] = {}
+        self._write_lock = threading.Lock()
+        self._request_lock = threading.Lock()
+        self._next_request_id = 2
+
+    @property
+    def alive(self) -> bool:
+        return self.process.poll() is None
+
+    def next_request_id(self) -> int:
+        with self._request_lock:
+            request_id = self._next_request_id
+            self._next_request_id += 1
+            return request_id
+
+    def write_message(self, message: dict[str, Any]) -> None:
+        with self._write_lock:
+            _write_process_message(self.process, message)
+
+    def remember_thread(self, result: dict[str, Any]) -> str:
+        thread_id = _thread_id(result)
+        # Do not retain the whole protocol result: future schemas may include
+        # turns or items. Reuse needs only identity and the public runtime data.
+        self.loaded_threads[thread_id] = {
+            "thread": {"id": thread_id},
+            **{
+                key: result[key]
+                for key in ("model", "modelProvider", "reasoningEffort")
+                if key in result
+            },
+        }
+        return thread_id
+
+    def forget_thread(self, thread_id: str | None) -> None:
+        if thread_id:
+            self.loaded_threads.pop(thread_id, None)
+
+
+class CodexAppServerPool:
+    """Fixed-size pool of persistent app-server workers with thread affinity."""
+
+    def __init__(self, max_workers: int | None = None) -> None:
+        configured = (
+            settings.codex_app_server_max_workers if max_workers is None else max_workers
+        )
+        self.max_workers = max(1, configured)
+        self._condition = threading.Condition()
+        self._workers: list[_CodexAppServerWorker] = []
+        self._thread_workers: dict[str, _CodexAppServerWorker] = {}
+        self._active_threads: set[str] = set()
+        self._starting_workers = 0
+        self._closed = False
+
+    def start(self) -> None:
+        with self._condition:
+            self._closed = False
+
+    def warm(self) -> None:
+        worker = self.acquire()
+        self.release(worker)
+
+    def acquire(self, thread_id: str | None = None) -> _CodexAppServerWorker:
+        while True:
+            should_start = False
+            with self._condition:
+                if self._closed:
+                    raise CodexStreamError("Codex app-server pool is closed")
+                self._discard_dead_workers_locked()
+
+                if thread_id and thread_id in self._active_threads:
+                    self._condition.wait()
+                    continue
+
+                affinity_worker = self._thread_workers.get(thread_id) if thread_id else None
+                if affinity_worker is not None and not affinity_worker.busy:
+                    return self._claim_worker_locked(affinity_worker, thread_id)
+
+                idle_worker = next((worker for worker in self._workers if not worker.busy), None)
+                if idle_worker is not None:
+                    return self._claim_worker_locked(idle_worker, thread_id)
+
+                if len(self._workers) + self._starting_workers < self.max_workers:
+                    self._starting_workers += 1
+                    should_start = True
+                else:
+                    self._condition.wait()
+
+            if not should_start:
+                continue
+            try:
+                worker = _CodexAppServerWorker(_start_process())
+            except BaseException:
+                with self._condition:
+                    self._starting_workers -= 1
+                    self._condition.notify_all()
+                raise
+            with self._condition:
+                self._starting_workers -= 1
+                if self._closed:
+                    self._condition.notify_all()
+                    stop_worker = True
+                else:
+                    self._workers.append(worker)
+                    self._condition.notify_all()
+                    return self._claim_worker_locked(worker, thread_id)
+            if stop_worker:
+                _stop_process(worker.process)
+                raise CodexStreamError("Codex app-server pool is closed")
+
+    def release(
+        self,
+        worker: _CodexAppServerWorker,
+        *,
+        thread_id: str | None = None,
+        previous_thread_id: str | None = None,
+        discard: bool = False,
+    ) -> None:
+        stop_worker = False
+        with self._condition:
+            if previous_thread_id:
+                self._active_threads.discard(previous_thread_id)
+            if thread_id:
+                self._active_threads.discard(thread_id)
+            if previous_thread_id and previous_thread_id != thread_id:
+                if self._thread_workers.get(previous_thread_id) is worker:
+                    self._thread_workers.pop(previous_thread_id, None)
+                worker.forget_thread(previous_thread_id)
+            if worker not in self._workers:
+                return
+            if discard or not worker.alive or self._closed:
+                self._remove_worker_locked(worker)
+                stop_worker = worker.alive
+            else:
+                if thread_id:
+                    self._thread_workers[thread_id] = worker
+                worker.busy = False
+            self._condition.notify_all()
+        if stop_worker:
+            _stop_process(worker.process)
+
+    def shutdown(self) -> None:
+        with self._condition:
+            self._closed = True
+            workers = list(self._workers)
+            self._workers.clear()
+            self._thread_workers.clear()
+            self._active_threads.clear()
+            self._condition.notify_all()
+        for worker in workers:
+            _stop_process(worker.process)
+
+    def bind_thread(self, worker: _CodexAppServerWorker, thread_id: str) -> None:
+        """Bind a newly started/resumed thread before its first event is exposed."""
+        with self._condition:
+            if worker not in self._workers or self._closed:
+                return
+            self._active_threads.add(thread_id)
+            self._thread_workers[thread_id] = worker
+
+    def _discard_dead_workers_locked(self) -> None:
+        for worker in list(self._workers):
+            if not worker.alive:
+                self._remove_worker_locked(worker)
+
+    def _claim_worker_locked(
+        self, worker: _CodexAppServerWorker, thread_id: str | None
+    ) -> _CodexAppServerWorker:
+        worker.busy = True
+        if thread_id:
+            self._active_threads.add(thread_id)
+        return worker
+
+    def _remove_worker_locked(self, worker: _CodexAppServerWorker) -> None:
+        if worker in self._workers:
+            self._workers.remove(worker)
+        stale_threads = [
+            thread_id
+            for thread_id, assigned in self._thread_workers.items()
+            if assigned is worker
+        ]
+        for thread_id in stale_threads:
+            self._thread_workers.pop(thread_id, None)
+
+
+class _PooledTurnHandle:
+    """Cancellation target for one turn without terminating its shared worker."""
+
+    def __init__(
+        self,
+        worker: _CodexAppServerWorker,
+        pool: CodexAppServerPool | None = None,
+    ) -> None:
+        self.worker = worker
+        self.pool = pool
+        self.thread_id: str | None = None
+        self.turn_id: str | None = None
+        self._cancelled = False
+        self._finished = False
+        self._terminal = False
+        self._turn_requested = False
+        self._interrupt_sent = False
+        self._lock = threading.Lock()
+
+    def bind_thread(self, thread_id: str) -> None:
+        with self._lock:
+            self.thread_id = thread_id
+        if self.pool:
+            self.pool.bind_thread(self.worker, thread_id)
+
+    def bind_turn(self, turn_id: str) -> None:
+        with self._lock:
+            self.turn_id = turn_id
+            should_interrupt = self._claim_interrupt_locked()
+        if should_interrupt:
+            self._interrupt(thread_id=self.thread_id, turn_id=turn_id)
+
+    def raise_if_cancelled(self) -> None:
+        with self._lock:
+            cancelled = self._cancelled
+        if cancelled:
+            raise CodexRunCancelled("Agent 工作流已由用户中断")
+
+    def cancel(self) -> None:
+        with self._lock:
+            self._cancelled = True
+            thread_id = self.thread_id
+            turn_id = self.turn_id
+            should_interrupt = self._claim_interrupt_locked()
+        if should_interrupt:
+            assert turn_id is not None
+            self._interrupt(thread_id=thread_id, turn_id=turn_id)
+
+    @property
+    def reusable(self) -> bool:
+        with self._lock:
+            return not self._turn_requested or self._terminal
+
+    def mark_turn_requested(self) -> None:
+        with self._lock:
+            self._turn_requested = True
+
+    def mark_terminal(self) -> None:
+        with self._lock:
+            self._terminal = True
+
+    def finish(self) -> None:
+        with self._lock:
+            self._finished = True
+
+    def _claim_interrupt_locked(self) -> bool:
+        should_interrupt = bool(
+            self._cancelled
+            and self.thread_id
+            and self.turn_id
+            and not self._finished
+            and not self._terminal
+            and not self._interrupt_sent
+        )
+        if should_interrupt:
+            self._interrupt_sent = True
+        return should_interrupt
+
+    def _interrupt(self, *, thread_id: str | None, turn_id: str) -> None:
+        if not thread_id or not self.worker.alive:
+            return
+        try:
+            _write_message(
+                self.worker,
+                {
+                    "id": self.worker.next_request_id(),
+                    "method": "turn/interrupt",
+                    "params": {"threadId": thread_id, "turnId": turn_id},
+                },
+            )
+        except (CodexStreamError, OSError):
+            # The streaming reader will observe the dead connection and evict
+            # this worker. Cancellation itself must remain idempotent.
+            return
+
+
+_APP_SERVER_POOL = CodexAppServerPool()
+
+
+def start_codex_app_server_pool() -> None:
+    """Start the pool lifecycle; its first worker is created on demand."""
+    _APP_SERVER_POOL.start()
+
+
+def stop_codex_app_server_pool() -> None:
+    _APP_SERVER_POOL.shutdown()
+
+
+def _cancel_run_target(target: Any) -> None:
+    if target is None:
+        return
+    if isinstance(target, _PooledTurnHandle):
+        target.cancel()
+    else:
+        _stop_process(target)
+
+
 def encode_stream_event(event_type: str, **payload: Any) -> str:
     return json.dumps({"type": event_type, **payload}, ensure_ascii=False) + "\n"
 
 
-def _write_message(process: subprocess.Popen[str], message: dict[str, Any]) -> None:
+def _write_process_message(
+    process: subprocess.Popen[str], message: dict[str, Any]
+) -> None:
     if process.stdin is None:
         raise CodexStreamError("Codex app-server stdin is unavailable")
     process.stdin.write(json.dumps(message, ensure_ascii=False) + "\n")
     process.stdin.flush()
 
 
-def _read_message(process: subprocess.Popen[str]) -> dict[str, Any]:
+def _write_message(
+    connection: subprocess.Popen[str] | _CodexAppServerWorker,
+    message: dict[str, Any],
+) -> None:
+    if isinstance(connection, _CodexAppServerWorker):
+        connection.write_message(message)
+    else:
+        _write_process_message(connection, message)
+
+
+def _read_message(
+    connection: subprocess.Popen[str] | _CodexAppServerWorker,
+) -> dict[str, Any]:
+    process = connection.process if isinstance(connection, _CodexAppServerWorker) else connection
     if process.stdout is None:
         raise CodexStreamError("Codex app-server stdout is unavailable")
     while True:
@@ -176,9 +498,12 @@ def _read_message(process: subprocess.Popen[str]) -> dict[str, Any]:
             continue
 
 
-def _await_response(process: subprocess.Popen[str], request_id: int) -> dict[str, Any]:
+def _await_response(
+    connection: subprocess.Popen[str] | _CodexAppServerWorker,
+    request_id: int,
+) -> dict[str, Any]:
     while True:
-        message = _read_message(process)
+        message = _read_message(connection)
         if message.get("id") != request_id:
             continue
         if "error" in message:
@@ -523,22 +848,30 @@ def _public_item_activity(item: dict[str, Any], status: str) -> dict[str, Any] |
 
 
 def _stream_turn(
-    process: subprocess.Popen[str],
+    process: subprocess.Popen[str] | _CodexAppServerWorker,
     prompt: str,
     session_id: str | None = None,
     *,
     recovery_prompt: str | None = None,
     reasoning_effort: str | None = None,
     ephemeral: bool = False,
+    run_handle: _PooledTurnHandle | None = None,
 ) -> Iterator[dict[str, Any]]:
-    thread_request_id = 2
-    turn_request_id = 3
+    worker = process if isinstance(process, _CodexAppServerWorker) else None
+
+    def next_request_id(fallback: int) -> int:
+        return worker.next_request_id() if worker else fallback
+
+    thread_request_id = next_request_id(2)
     recovered = False
-    if session_id:
+    cached_result = worker.loaded_threads.get(session_id) if worker and session_id else None
+    if cached_result is not None:
+        result = cached_result
+    elif session_id:
         _write_message(
             process,
             {
-                "id": 2,
+                "id": thread_request_id,
                 "method": "thread/resume",
                 "params": {
                     "threadId": session_id,
@@ -554,8 +887,9 @@ def _stream_turn(
             if not is_unusable_codex_thread_error(exc):
                 raise
             recovered = True
-            thread_request_id += 1
-            turn_request_id += 1
+            if worker:
+                worker.forget_thread(session_id)
+            thread_request_id = next_request_id(thread_request_id + 1)
             _write_message(
                 process,
                 {
@@ -574,7 +908,7 @@ def _stream_turn(
         _write_message(
             process,
             {
-                "id": 2,
+                "id": thread_request_id,
                 "method": "thread/start",
                 "params": {
                     "cwd": str(PROJECT_ROOT),
@@ -585,7 +919,10 @@ def _stream_turn(
             },
         )
         result = _await_response(process, thread_request_id)
-    thread_id = _thread_id(result)
+    thread_id = worker.remember_thread(result) if worker else _thread_id(result)
+    if run_handle:
+        run_handle.bind_thread(thread_id)
+        run_handle.raise_if_cancelled()
     yield {"type": "thread", "thread_id": thread_id}
     runtime_event = _runtime_event(result)
     if runtime_event:
@@ -613,11 +950,20 @@ def _stream_turn(
     }
     if reasoning_effort:
         turn_params["effort"] = reasoning_effort
+    turn_request_id = next_request_id(3 if thread_request_id == 2 else thread_request_id + 1)
+    if run_handle:
+        run_handle.mark_turn_requested()
     _write_message(
         process,
         {"id": turn_request_id, "method": "turn/start", "params": turn_params},
     )
-    _await_response(process, turn_request_id)
+    turn_result = _await_response(process, turn_request_id)
+    turn = turn_result.get("turn") if isinstance(turn_result, dict) else None
+    turn_id = turn.get("id") if isinstance(turn, dict) else None
+    if run_handle:
+        if not isinstance(turn_id, str) or not turn_id:
+            raise CodexStreamError("Codex app-server did not return a turn id")
+        run_handle.bind_turn(turn_id)
     streamed = ""
     completed_text = ""
     item_phases: dict[str, str | None] = {}
@@ -717,6 +1063,10 @@ def _stream_turn(
         elif method == "turn/completed":
             turn = params.get("turn", {})
             status = turn.get("status") if isinstance(turn, dict) else None
+            if run_handle:
+                run_handle.mark_terminal()
+            if status == "interrupted":
+                raise CodexRunCancelled("Agent 工作流已由用户中断")
             if status == "failed":
                 error = turn.get("error", {}) if isinstance(turn, dict) else {}
                 detail = error.get("message") if isinstance(error, dict) else str(error)
@@ -735,19 +1085,30 @@ def stream_codex_prompt(
     ephemeral: bool = False,
     run_id: str | None = None,
 ) -> Iterator[dict[str, Any]]:
-    process = _start_process()
+    worker = _APP_SERVER_POOL.acquire(session_id)
+    run_handle = _PooledTurnHandle(worker, _APP_SERVER_POOL)
     try:
         if run_id:
-            register_codex_run(run_id, process)
+            register_codex_run(run_id, run_handle)
         yield from _stream_turn(
-            process,
+            worker,
             prompt,
             session_id,
             recovery_prompt=recovery_prompt,
             reasoning_effort=reasoning_effort,
             ephemeral=ephemeral,
+            run_handle=run_handle,
         )
     finally:
+        reusable = run_handle.reusable
+        if not reusable:
+            run_handle.cancel()
+        run_handle.finish()
         if run_id:
-            unregister_codex_run(run_id, process)
-        _stop_process(process)
+            unregister_codex_run(run_id, run_handle)
+        _APP_SERVER_POOL.release(
+            worker,
+            thread_id=run_handle.thread_id,
+            previous_thread_id=session_id,
+            discard=not reusable,
+        )
