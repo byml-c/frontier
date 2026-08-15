@@ -62,6 +62,19 @@ type Props = {
   onSelection: (selection: TextReaderSelection) => void;
 };
 
+const arxivVisualSx = {
+  "& .ltx_flex_figure": { display: "flex", flexWrap: "wrap", justifyContent: "center", alignItems: "flex-end", gap: .5 },
+  "& .ltx_flex_cell": { flex: "1 1 220px", minWidth: 0, maxWidth: "100%" },
+  "& .ltx_flex_cell img, & img.ltx_graphics": { display: "block", width: "100%", maxWidth: "100%", height: "auto", objectFit: "contain" },
+  "& .ltx_inline-block": { display: "inline-block" },
+  "& .ltx_transformed_outer": { width: "auto !important", height: "auto !important", verticalAlign: "initial !important" },
+  "& .ltx_transformed_inner": { display: "inline-block", width: "initial !important", transform: "none !important" },
+  "& svg.ltx_picture": { display: "block", width: "100%", maxWidth: "100%", height: "auto", mx: "auto", overflow: "visible" },
+  "& svg foreignObject > .ltx_foreignobject_container": { width: "100%", height: "100%", display: "flex", alignItems: "flex-end" },
+  "& .ltx_foreignobject_content": { display: "block", fontFamily: 'Arial, "Noto Sans SC", sans-serif', lineHeight: 1 },
+  "& .ltx_font_bold": { fontWeight: 700 },
+};
+
 export function TextPaperReader({ document, annotations, mobile, toolsOpen, activeSelection, onRetry, modeControl, onUsePdf, onSelection }: Props) {
   const scrollRef = useRef<HTMLDivElement>(null);
   const longPressTimer = useRef<number | undefined>(undefined);
@@ -260,7 +273,7 @@ function DocumentBlockView({ block, blocks, scrollRoot, annotations, activeSelec
     const captionRich = block.caption_html ? renderArxivHtml(block.caption_html, captionAnnotations, search, captionId) : null;
     const captionContent = !captionRich && block.caption ? renderText(block.caption, captionAnnotations, search, captionId, (reference) => jumpReference(reference, blocks, scrollRoot.current)) : null;
     const captionProps = captionRich ? { onClick: (event: React.MouseEvent<HTMLElement>) => followRichReference(event, blocks, scrollRoot.current), dangerouslySetInnerHTML: { __html: captionRich } } : {};
-    return <Box {...anchorProps} component="figure" data-block-id={block.id} data-page-number={block.page_number} sx={{ m: 0, my: kind === "formula" ? 2 : 3 }}><Button onClick={() => onOpenAsset({ url: block.image_url, html: block.html, title: kind === "table" ? "查看表格" : kind === "formula" ? "查看公式" : "查看图片" })} sx={{ display: "block", width: "100%", p: 0, overflow: "hidden", bgcolor: kind === "formula" ? "transparent" : "#f3f5f7", border: kind === "formula" ? 0 : 1, borderColor: "divider", "&:hover": { bgcolor: kind === "formula" ? "action.hover" : "#eef2f6" } }}>{block.image_url ? <Box component="img" src={block.image_url} alt={block.caption || (kind === "table" ? "论文表格" : kind === "formula" ? "数学公式" : "论文图片")} sx={{ display: "block", width: kind === "formula" ? "auto" : "100%", maxWidth: "100%", mx: "auto", maxHeight: kind === "formula" ? 150 : 520, objectFit: "contain" }} /> : block.html ? <Box sx={{ width: "100%", overflow: "hidden", p: 1.5, color: "text.primary", textAlign: "left", fontFamily: '"Times New Roman", Times, serif', "& table": { width: "100%", borderCollapse: "collapse", fontFamily: "inherit" }, "& td, & th": { border: "1px solid", borderColor: "divider", p: .75, fontFamily: "inherit" } }} dangerouslySetInnerHTML={{ __html: renderArxivHtml(block.html) }} /> : null}</Button>{block.caption && <Typography data-text-block data-block-id={captionId} data-page-number={block.page_number} component="figcaption" variant="caption" color="text.secondary" sx={{ display: "block", mt: 1, textAlign: { xs: "left", sm: "center" }, hyphens: "auto", WebkitHyphens: "auto", fontFamily: "inherit", lineHeight: 1.55, "& .katex": { fontSize: "1em" } }} {...captionProps}>{captionRich ? undefined : captionContent}</Typography>}</Box>;
+    return <Box {...anchorProps} component="figure" data-block-id={block.id} data-page-number={block.page_number} sx={{ m: 0, my: kind === "formula" ? 2 : 3 }}><Button onClick={() => onOpenAsset({ url: block.image_url, html: block.html, title: kind === "table" ? "查看表格" : kind === "formula" ? "查看公式" : "查看图片" })} sx={{ display: "block", width: "100%", p: 0, overflow: "hidden", bgcolor: kind === "formula" ? "transparent" : "#f3f5f7", border: kind === "formula" ? 0 : 1, borderColor: "divider", "&:hover": { bgcolor: kind === "formula" ? "action.hover" : "#eef2f6" } }}>{block.image_url ? <Box component="img" src={block.image_url} alt={block.caption || (kind === "table" ? "论文表格" : kind === "formula" ? "数学公式" : "论文图片")} sx={{ display: "block", width: kind === "formula" ? "auto" : "100%", maxWidth: "100%", mx: "auto", maxHeight: kind === "formula" ? 150 : 520, objectFit: "contain" }} /> : block.html ? <Box sx={{ ...arxivVisualSx, width: "100%", overflow: "hidden", p: 1.5, color: "text.primary", textAlign: "left", fontFamily: '"Times New Roman", Times, serif', "& table": { width: "100%", borderCollapse: "collapse", fontFamily: "inherit" }, "& td, & th": { border: "1px solid", borderColor: "divider", p: .75, fontFamily: "inherit" } }} dangerouslySetInnerHTML={{ __html: renderArxivHtml(block.html) }} /> : null}</Button>{block.caption && <Typography data-text-block data-block-id={captionId} data-page-number={block.page_number} component="figcaption" variant="caption" color="text.secondary" sx={{ display: "block", mt: 1, textAlign: { xs: "left", sm: "center" }, hyphens: "auto", WebkitHyphens: "auto", fontFamily: "inherit", lineHeight: 1.55, "& .katex": { fontSize: "1em" } }} {...captionProps}>{captionRich ? undefined : captionContent}</Typography>}</Box>;
   }
   const headingLevel = kind.includes("title") ? 1 : kind.includes("section") || kind.includes("heading") ? 2 : 0;
   const content = renderText(block.text || "", blockAnnotations, search, block.id, (reference) => jumpReference(reference, blocks, scrollRoot.current));
@@ -272,7 +285,7 @@ function DocumentBlockView({ block, blocks, scrollRoot, annotations, activeSelec
 }
 
 function renderArxivHtml(html: string, annotations: Annotation[] = [], search = "", blockId = "") {
-  const clean = DOMPurify.sanitize(html, { ADD_ATTR: ["data-reader-ref", "data-reader-tex", "data-reader-display"] });
+  const clean = sanitizeArxivHtml(html, ["data-reader-ref", "data-reader-tex", "data-reader-display"]);
   const document = new DOMParser().parseFromString(`<div id="reader-fragment">${clean}</div>`, "text/html");
   const root = document.getElementById("reader-fragment");
   if (!root) return "";
@@ -311,7 +324,15 @@ function renderArxivHtml(html: string, annotations: Annotation[] = [], search = 
     }
   }
   if (marks.length) applyRichMarks(document, root, marks, blockId);
-  return DOMPurify.sanitize(root.innerHTML, { ADD_ATTR: ["data-reader-ref", "aria-hidden"] });
+  return sanitizeArxivHtml(root.innerHTML, ["data-reader-ref", "aria-hidden"]);
+}
+
+function sanitizeArxivHtml(html: string, extraAttributes: string[]) {
+  return DOMPurify.sanitize(html, {
+    USE_PROFILES: { html: true, svg: true, svgFilters: true },
+    ADD_TAGS: ["foreignObject"],
+    ADD_ATTR: extraAttributes,
+  });
 }
 
 function applyRichMarks(document: Document, root: HTMLElement, marks: Array<{ start: number; end: number; color?: string; search?: boolean }>, blockId: string) {
@@ -417,5 +438,5 @@ function jumpReference(reference: string, blocks: DocumentBlock[], root: HTMLDiv
 }
 
 function AssetViewer({ asset, onClose }: { asset: { url?: string; html?: string; title: string } | null; onClose: () => void }) {
-  return <Dialog open={Boolean(asset)} onClose={onClose} fullScreen><DialogTitle sx={{ pr: 7 }}><Stack direction="row" spacing={1.25} alignItems="baseline"><Box component="span">{asset?.title}</Box>{asset?.url && <Typography component="span" variant="caption" color="text.secondary">滚轮缩放 · 拖动查看局部</Typography>}</Stack><IconButton onClick={onClose} sx={{ position: "absolute", right: 12, top: 10 }}><CloseRounded /></IconButton></DialogTitle><DialogContent sx={{ display: "grid", placeItems: "center", bgcolor: "#e9edf2", p: 1 }}>{asset?.url ? <TransformWrapper minScale={.7} initialScale={1} maxScale={8} centerOnInit centerZoomedOut smooth wheel={{ step: .0025 }} panning={{ velocityDisabled: true }}><TransformComponent wrapperStyle={{ width: "100%", height: "calc(100dvh - 72px)" }} contentStyle={{ width: "100%", height: "100%", alignItems: "center", justifyContent: "center" }}><img src={asset.url} alt={asset.title} draggable={false} style={{ maxWidth: "100%", maxHeight: "100%", objectFit: "contain", userSelect: "none" }} /></TransformComponent></TransformWrapper> : <Box sx={{ width: "100%", height: "100%", overflow: "auto", bgcolor: "white", p: 2, fontFamily: '"Times New Roman", Times, serif', "& table": { borderCollapse: "collapse", minWidth: "100%", fontFamily: "inherit" }, "& td, & th": { border: "1px solid #ccd3db", p: 1, fontFamily: "inherit" } }} dangerouslySetInnerHTML={{ __html: renderArxivHtml(asset?.html || "") }} />}</DialogContent></Dialog>;
+  return <Dialog open={Boolean(asset)} onClose={onClose} fullScreen><DialogTitle sx={{ pr: 7 }}><Stack direction="row" spacing={1.25} alignItems="baseline"><Box component="span">{asset?.title}</Box>{asset?.url && <Typography component="span" variant="caption" color="text.secondary">滚轮缩放 · 拖动查看局部</Typography>}</Stack><IconButton onClick={onClose} sx={{ position: "absolute", right: 12, top: 10 }}><CloseRounded /></IconButton></DialogTitle><DialogContent sx={{ display: "grid", placeItems: "center", bgcolor: "#e9edf2", p: 1 }}>{asset?.url ? <TransformWrapper minScale={.7} initialScale={1} maxScale={8} centerOnInit centerZoomedOut smooth wheel={{ step: .0025 }} panning={{ velocityDisabled: true }}><TransformComponent wrapperStyle={{ width: "100%", height: "calc(100dvh - 72px)" }} contentStyle={{ width: "100%", height: "100%", alignItems: "center", justifyContent: "center" }}><img src={asset.url} alt={asset.title} draggable={false} style={{ maxWidth: "100%", maxHeight: "100%", objectFit: "contain", userSelect: "none" }} /></TransformComponent></TransformWrapper> : <Box sx={{ ...arxivVisualSx, width: "100%", height: "100%", overflow: "auto", bgcolor: "white", p: 2, fontFamily: '"Times New Roman", Times, serif', "& table": { borderCollapse: "collapse", minWidth: "100%", fontFamily: "inherit" }, "& td, & th": { border: "1px solid #ccd3db", p: 1, fontFamily: "inherit" } }} dangerouslySetInnerHTML={{ __html: renderArxivHtml(asset?.html || "") }} />}</DialogContent></Dialog>;
 }

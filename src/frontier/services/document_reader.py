@@ -20,7 +20,7 @@ _conversion_lock = threading.Lock()
 _converting: set[str] = set()
 # Increment whenever cached reader output semantics change. Old caches and old
 # worker statuses then become stale and are rebuilt lazily on the next access.
-DOCUMENT_SCHEMA_VERSION = 7
+DOCUMENT_SCHEMA_VERSION = 8
 logger = logging.getLogger(__name__)
 
 

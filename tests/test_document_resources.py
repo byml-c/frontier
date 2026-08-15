@@ -45,6 +45,15 @@ def test_structured_resources_expose_tex_assets_tables_and_links(tmp_path: Path)
                 "image_url": "/api/papers/paper-1/document/assets/table.png",
             },
             {
+                "id": "figure-2",
+                "anchor": "S1.F2",
+                "kind": "picture",
+                "page_number": 4,
+                "caption": "Figure 2",
+                "html": "<div><img src='/api/papers/paper-1/document/assets/figure.svg'></div>",
+                "image_urls": ["/api/papers/paper-1/document/assets/figure.svg"],
+            },
+            {
                 "id": "bib-1",
                 "anchor": "bib.bib1",
                 "kind": "bibliography_item",
@@ -72,6 +81,9 @@ def test_structured_resources_expose_tex_assets_tables_and_links(tmp_path: Path)
         }
     ]
     assert result["figures"][0]["asset_path"] == str(figure.resolve())
+    assert result["figures"][1]["asset_path"] is None
+    assert result["figures"][1]["asset_paths"] == [str(figure.resolve())]
+    assert result["figures"][1]["html"].startswith("<div>")
     assert result["tables"][0]["text"] == "Method | Score"
     link = result["references"]["links"][0]
     assert link["target"] == {

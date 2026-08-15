@@ -222,6 +222,7 @@ def _build_block(
     if node.name == "figure":
         caption_node = node.find("figcaption")
         caption = _plain_text(caption_node) if isinstance(caption_node, Tag) else ""
+        visual_source = _figure_visual_source(node)
         asset_url = _figure_asset_url(node, base_url)
         table = node.find("table")
         is_table = "ltx_table" in classes or caption.lower().startswith("table")
@@ -235,7 +236,19 @@ def _build_block(
         }
         if isinstance(caption_node, Tag):
             block["caption_html"] = _safe_fragment(caption_node, base_url, inner=True)
-        if asset_url and fetch_asset:
+        if visual_source is not None and _is_composite_figure(visual_source):
+            figure_html, image_urls = _cache_figure_fragment(
+                visual_source,
+                base_url=base_url,
+                paper_id=paper_id,
+                assets=assets,
+                fetch_asset=fetch_asset,
+            )
+            if figure_html:
+                block["html"] = figure_html
+            if image_urls:
+                block["image_urls"] = image_urls
+        elif asset_url and fetch_asset:
             source_url = asset_url
             suffix = Path(urlparse(source_url).path).suffix.lower()
             if suffix not in _ASSET_SUFFIXES:
@@ -290,33 +303,105 @@ def _build_block(
 
 def _figure_asset_url(node: Tag, base_url: str) -> str | None:
     """Return the primary arXiv figure asset across LaTeXML media variants."""
-    media_nodes = node.find_all(["img", "object", "embed", "source"])
-    if not media_nodes:
-        # LaTeXML sometimes emits a full-width teaser as a standalone, textless
-        # paragraph immediately before a caption-only figure (for example
-        # arXiv:2608.11739 Figure 1). Treat that pair as one semantic figure.
-        previous = node.find_previous_sibling()
-        if isinstance(previous, Tag):
-            previous_classes = set(previous.get("class") or [])
-            eligible_wrapper = (
-                (previous.name == "div" and "ltx_para" in previous_classes)
-                or (previous.name == "p" and "ltx_p" in previous_classes)
-            )
-            if eligible_wrapper and not _plain_text(previous):
-                media_nodes = previous.find_all(["img", "object", "embed", "source"])
+    visual_source = _figure_visual_source(node)
+    media_nodes = (
+        visual_source.find_all(["img", "object", "embed", "source"])
+        if visual_source is not None
+        else []
+    )
     for media in media_nodes:
-        value: str | None = None
-        if media.name == "object":
-            value = str(media.get("data") or "")
-        elif media.name in {"img", "embed"}:
-            value = str(media.get("src") or "")
-            if not value and media.name == "img":
-                value = _best_srcset_candidate(str(media.get("srcset") or ""))
-        elif media.name == "source":
-            value = _best_srcset_candidate(str(media.get("srcset") or ""))
+        value = _media_source(media)
         if value:
             return urljoin(base_url, value)
     return None
+
+
+def _figure_visual_source(node: Tag) -> Tag | None:
+    if node.find(["img", "object", "embed", "source", "svg"]):
+        return node
+    # LaTeXML sometimes emits a full-width teaser as a standalone, textless
+    # paragraph immediately before a caption-only figure (for example
+    # arXiv:2608.11739 Figure 1). Treat that pair as one semantic figure.
+    previous = node.find_previous_sibling()
+    if not isinstance(previous, Tag):
+        return None
+    previous_classes = set(previous.get("class") or [])
+    eligible_wrapper = (
+        (previous.name == "div" and "ltx_para" in previous_classes)
+        or (previous.name == "p" and "ltx_p" in previous_classes)
+    )
+    if eligible_wrapper and not _plain_text(previous) and previous.find(
+        ["img", "object", "embed", "source", "svg"]
+    ):
+        return previous
+    return None
+
+
+def _is_composite_figure(node: Tag) -> bool:
+    """A semantic Figure needs HTML when one bitmap cannot represent it."""
+    if node.find("svg") is not None:
+        return True
+    return len(node.find_all(["img", "object", "embed"])) > 1
+
+
+def _media_source(media: Tag) -> str | None:
+    if media.name == "object":
+        return str(media.get("data") or "") or None
+    if media.name in {"img", "embed"}:
+        value = str(media.get("src") or "")
+        if not value and media.name == "img":
+            value = _best_srcset_candidate(str(media.get("srcset") or "")) or ""
+        return value or None
+    if media.name == "source":
+        return _best_srcset_candidate(str(media.get("srcset") or ""))
+    return None
+
+
+def _cache_figure_fragment(
+    node: Tag,
+    *,
+    base_url: str,
+    paper_id: str,
+    assets: Path,
+    fetch_asset: Callable[[str, Path], Path] | None,
+) -> tuple[str, list[str]]:
+    clone_soup = BeautifulSoup(str(node), "lxml")
+    clone = clone_soup.find(node.name)
+    if not isinstance(clone, Tag):
+        return "", []
+    caption = clone.find("figcaption")
+    if isinstance(caption, Tag):
+        caption.decompose()
+    cached_urls: list[str] = []
+    for media in clone.find_all(["img", "object", "embed", "source"]):
+        value = _media_source(media)
+        if not value:
+            continue
+        source_url = urljoin(base_url, value)
+        rendered_url = source_url
+        if fetch_asset:
+            suffix = Path(urlparse(source_url).path).suffix.lower()
+            if suffix not in _ASSET_SUFFIXES:
+                suffix = ".img"
+            target = assets / (
+                f"{hashlib.sha1(source_url.encode(), usedforsecurity=False).hexdigest()[:20]}"
+                f"{suffix}"
+            )
+            try:
+                saved = fetch_asset(source_url, target)
+                rendered_url = f"/api/papers/{paper_id}/document/assets/{saved.name}"
+                if rendered_url not in cached_urls:
+                    cached_urls.append(rendered_url)
+            except (httpx.HTTPError, OSError, ValueError) as exc:
+                logger.warning("Could not cache arXiv figure panel %s: %s", source_url, exc)
+        if media.name == "object":
+            media["data"] = rendered_url
+        elif media.name in {"img", "embed"}:
+            media["src"] = rendered_url
+            media.attrs.pop("srcset", None)
+        elif media.name == "source":
+            media["srcset"] = rendered_url
+    return _safe_fragment(clone, base_url, inner=True), cached_urls
 
 
 def _best_srcset_candidate(srcset: str) -> str | None:

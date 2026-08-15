@@ -39,6 +39,31 @@ CAPTION_ONLY_FIGURE_HTML = """
 </article></body></html>
 """
 
+COMPOSITE_FIGURE_HTML = """
+<html><body><article class="ltx_document">
+  <h1 class="ltx_title_document">Composite figures</h1>
+  <figure id="S1.F2" class="ltx_figure">
+    <div class="ltx_flex_figure">
+      <div class="ltx_flex_cell"><img src="paper-v1/figure-2-left.png" /></div>
+      <div class="ltx_flex_cell"><img src="paper-v1/figure-2-right.png" /></div>
+    </div>
+    <figcaption>Fig. 2: Two coordinated panels.</figcaption>
+  </figure>
+  <figure id="S4.F4" class="ltx_figure">
+    <div class="ltx_transformed_outer"><span class="ltx_transformed_inner">
+      <svg class="ltx_picture" viewBox="0 0 200 80">
+        <g><foreignObject width="90" height="50">
+          <span class="ltx_foreignobject_content">
+            <img src="paper-v1/sequence-frame.jpg" /><b>SWITCH</b>
+          </span>
+        </foreignObject></g>
+      </svg>
+    </span></div>
+    <figcaption>Fig. 4: An inline SVG sequence.</figcaption>
+  </figure>
+</article></body></html>
+"""
+
 
 def test_arxiv_html_preserves_semantics_without_duplicate_captions(tmp_path: Path) -> None:
     pdf = tmp_path / "paper.pdf"
@@ -117,3 +142,48 @@ def test_arxiv_html_attaches_a_preceding_textless_image_to_its_caption(
     assert 'data-reader-tex="\\rightarrow"' in pictures[0]["caption_html"]
     assert pictures[0]["image_url"].endswith(".png")
     assert fetched == ["https://arxiv.org/html/2608.11739v1/teaser.png"]
+
+
+def test_arxiv_html_preserves_multi_panel_and_inline_svg_figures(tmp_path: Path) -> None:
+    pdf = tmp_path / "paper.pdf"
+    document = pymupdf.open()
+    document.new_page()
+    document.save(pdf)
+    document.close()
+    fetched: list[str] = []
+
+    def fetch_asset(url: str, target: Path) -> Path:
+        fetched.append(url)
+        target.write_bytes(b"figure-panel")
+        return target
+
+    payload = convert_arxiv_html_content(
+        COMPOSITE_FIGURE_HTML,
+        base_url="https://arxiv.org/html/2608.13362v1",
+        pdf_path=pdf,
+        paper_id="nestdex",
+        version="v1",
+        root=tmp_path / "reader",
+        schema_version=7,
+        fetch_asset=fetch_asset,
+    )
+
+    figure_two, figure_four = [
+        block for block in payload["blocks"] if block["kind"] == "picture"
+    ]
+    assert "image_url" not in figure_two
+    assert len(figure_two["image_urls"]) == 2
+    assert figure_two["html"].count("/api/papers/nestdex/document/assets/") == 2
+    assert "figure-2-left.png" not in figure_two["html"]
+    assert "figure-2-right.png" not in figure_two["html"]
+    assert "image_url" not in figure_four
+    assert len(figure_four["image_urls"]) == 1
+    assert "<svg" in figure_four["html"]
+    assert "foreignobject" in figure_four["html"].lower()
+    assert "SWITCH" in figure_four["html"]
+    assert "sequence-frame.jpg" not in figure_four["html"]
+    assert fetched == [
+        "https://arxiv.org/html/paper-v1/figure-2-left.png",
+        "https://arxiv.org/html/paper-v1/figure-2-right.png",
+        "https://arxiv.org/html/paper-v1/sequence-frame.jpg",
+    ]

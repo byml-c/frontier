@@ -117,18 +117,31 @@ def _visual_resource(
     block: dict[str, Any], asset_resolver: Callable[[str], Path] | None
 ) -> dict[str, Any]:
     image_url = str(block.get("image_url") or "") or None
-    asset_path: str | None = None
-    if image_url and asset_resolver:
-        filename = Path(urlparse(image_url).path).name
-        if filename:
+    image_urls = [
+        value
+        for value in dict.fromkeys(
+            [image_url, *[str(item) for item in block.get("image_urls", [])]]
+        )
+        if value
+    ]
+    resolved_paths: dict[str, str] = {}
+    if asset_resolver:
+        for value in image_urls:
+            filename = Path(urlparse(value).path).name
+            if not filename:
+                continue
             try:
-                asset_path = str(asset_resolver(filename).resolve())
+                resolved_paths[value] = str(asset_resolver(filename).resolve())
             except (FileNotFoundError, ValueError):
-                asset_path = None
+                continue
+    asset_path = resolved_paths.get(image_url) if image_url else None
     return {
         **_block_identity(block),
         "caption": str(block.get("caption") or ""),
         "text": str(block.get("text") or ""),
         "image_url": image_url,
         "asset_path": asset_path,
+        "image_urls": image_urls,
+        "asset_paths": list(resolved_paths.values()),
+        "html": str(block.get("html") or "") or None,
     }

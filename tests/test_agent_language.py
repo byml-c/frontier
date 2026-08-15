@@ -48,7 +48,7 @@ def test_architecture_generation_separates_symbol_model_and_properties() -> None
     assert "`architecture` is the concrete model family" in prompt
     assert "Never place a model architecture such as ViT" in prompt
     assert 'architecture: "DINOv2-B/14"' in prompt
-    assert "wrap mathematical expressions in `$...$`" in prompt
+    assert "use `\\(...\\)` for inline math and `\\[...\\]` for display math" in prompt
 
 
 def test_paper_chat_uses_compact_agent_context_and_bounded_delegation() -> None:
@@ -62,6 +62,7 @@ def test_paper_chat_uses_compact_agent_context_and_bounded_delegation() -> None:
 
     assert "agent-context paper-1" in prompt
     assert "do not reload the complete paper by default" in prompt
+    assert "use `\\(...\\)` for inline math and `\\[...\\]` for display math" in prompt
     assert "Use Codex subagents selectively" in prompt
     assert "only the main Agent may run canonical Frontier mutations" in prompt
     assert "can increase total token use" in prompt

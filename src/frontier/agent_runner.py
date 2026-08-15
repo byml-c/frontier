@@ -180,6 +180,9 @@ def build_prompt(task: TaskRun) -> str:
         "Write every persisted user-facing Agent-generated prose field in concise Simplified "
         "Chinese, even when the paper and source material are in English. Keep technical terms, "
         "formulas, and proper names in their original language when that improves precision. "
+        "For mathematical expressions, use `\\(...\\)` for inline math and `\\[...\\]` for "
+        "display math. Put display delimiters on their own correctly indented Markdown lines; "
+        "do not use dollar-sign math delimiters. "
         f"The task id is {task.id}. {delegation_policy}{research_capabilities}"
     )
     interactive_common = (
@@ -189,8 +192,9 @@ def build_prompt(task: TaskRun) -> str:
         "Use concise Simplified Chinese for the final answer and every public progress or reasoning "
         "summary. Keep technical terms, formulas, and proper names in their original language when "
         "that improves precision. "
-        "Format responses with concise Markdown. Use standard LaTeX delimiters for mathematical "
-        "expressions when formulas materially improve the explanation. "
+        "Format responses with concise Markdown. When formulas materially improve the explanation, "
+        "use `\\(...\\)` for inline math and `\\[...\\]` for display math. Put display delimiters "
+        "on their own correctly indented Markdown lines; do not use dollar-sign math delimiters. "
         f"The task id is {task.id}. {delegation_policy}{research_capabilities}"
     )
     if task.kind == "daily_brief":
@@ -266,8 +270,8 @@ Never place a model architecture such as ViT, DINOv2-B/14, T5, ResNet, Transform
 `keywords`, and never combine a symbol or a property such as shared weights with `architecture`.
 For example, a shared online vision encoder may use `symbol: "g_\\psi"`,
 `architecture: "DINOv2-B/14"`, and `keywords: ["shared weights", "fine-tuned"]`. Store Data and
-Tensor symbols as TeX without `$` delimiters. In descriptions, annotations, labels, and keywords,
-wrap mathematical expressions in `$...$` so the Web can render them as formulas.
+Tensor symbols as TeX without delimiters. In descriptions, annotations, labels, and keywords, use
+`\\(...\\)` for inline math and `\\[...\\]` for display math so the Web can render them as formulas.
 When a processing step and a Tensor describe the same source-to-target relation, store both on one
 Edge with `label` and `tensorId`; never split them into duplicate same-kind Edges. Use separate Edges
 only for genuinely distinct flow and conditioning semantics.

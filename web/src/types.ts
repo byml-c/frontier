@@ -192,6 +192,7 @@ export type DocumentBlock = {
   caption_html?: string;
   html?: string;
   image_url?: string;
+  image_urls?: string[];
 };
 
 export type PaperDocument = {

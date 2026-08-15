@@ -1,4 +1,7 @@
 const PROTECTED_SEGMENT = /(```[\s\S]*?```|~~~[\s\S]*?~~~|`[^`\n]*`|\$\$[\s\S]*?\$\$|\$(?!\$)[^$\n]*\$(?!\$)|\\\[[\s\S]*?\\\]|\\\([\s\S]*?\\\))/g;
+const DISPLAY_LATEX_MATH = /^([ \t]*(?:>[ \t]*)*(?:(?:[-+*]|\d+[.)])[ \t]+)?[ \t]*)\\\[[ \t]*\r?\n([\s\S]*?)^([ \t]*(?:>[ \t]*)*[ \t]*)\\\][ \t]*$/gm;
+const SINGLE_LINE_DISPLAY_LATEX_MATH = /^([ \t]*(?:>[ \t]*)*)(([-+*]|\d+[.)])([ \t]+))?([ \t]*)\\\[([^\r\n]*?)\\\][ \t]*\r?$/gm;
+const FENCE_OPENING = /^([ \t]*(?:>[ \t]*)*(?:(?:[-+*]|\d+[.)])[ \t]+)?[ \t]*)(`{3,}|~{3,})/;
 const INNER_BOUNDARY = /^[\s\u200B\u2060\uFEFF\u3000]+|[\s\u200B\u2060\uFEFF\u3000]+$/g;
 
 function isEscaped(content: string, index: number): boolean {
@@ -68,10 +71,122 @@ export function normalizeStrongMarkdown(content: string): string {
   )).join("");
 }
 
+function normalizeLatexMathSegment(segment: string): string {
+  return segment
+    .replace(
+      DISPLAY_LATEX_MATH,
+      (_match, openingPrefix: string, body: string, closingPrefix: string) => (
+        `${openingPrefix}$$\n${body}${closingPrefix}$$`
+      ),
+    )
+    .replace(
+      SINGLE_LINE_DISPLAY_LATEX_MATH,
+      (
+        _match,
+        containerPrefix: string,
+        listPrefix: string | undefined,
+        listMarker: string | undefined,
+        listSpacing: string | undefined,
+        indentation: string,
+        body: string,
+      ) => {
+        const openingPrefix = `${containerPrefix}${listPrefix ?? ""}${indentation}`;
+        const continuationPrefix = listMarker
+          ? `${containerPrefix}${" ".repeat(listMarker.length + (listSpacing?.length ?? 0))}${indentation}`
+          : `${containerPrefix}${indentation}`;
+        return `${openingPrefix}$$\n${continuationPrefix}${body}\n${continuationPrefix}$$`;
+      },
+    )
+    .replace(/(?<!\\)\\\(([^\r\n]*?)(?<!\\)\\\)/g, (_match, body: string) => `$${body}$`);
+}
+
+function fenceEnd(content: string, openingEnd: number, marker: string): number {
+  const markerCharacter = marker[0];
+  let lineStart = content.indexOf("\n", openingEnd);
+  if (lineStart < 0) return content.length;
+  lineStart += 1;
+  while (lineStart < content.length) {
+    const lineEnd = content.indexOf("\n", lineStart);
+    const end = lineEnd < 0 ? content.length : lineEnd;
+    const line = content.slice(lineStart, end);
+    const candidate = line.match(/^[ \t]*(?:>[ \t]*)*([`~]+)[ \t]*\r?$/)?.[1];
+    if (
+      candidate
+      && candidate[0] === markerCharacter
+      && candidate.length >= marker.length
+    ) {
+      return lineEnd < 0 ? content.length : lineEnd + 1;
+    }
+    if (lineEnd < 0) return content.length;
+    lineStart = lineEnd + 1;
+  }
+  return content.length;
+}
+
+function inlineCodeEnd(content: string, opening: number, markerLength: number): number {
+  const lineEnd = content.indexOf("\n", opening + markerLength);
+  const limit = lineEnd < 0 ? content.length : lineEnd;
+  let cursor = opening + markerLength;
+  while (cursor < limit) {
+    if (content[cursor] !== "`") {
+      cursor += 1;
+      continue;
+    }
+    let closingLength = 1;
+    while (content[cursor + closingLength] === "`") closingLength += 1;
+    if (closingLength === markerLength) return cursor + closingLength;
+    cursor += closingLength;
+  }
+  return limit;
+}
+
+function normalizeOutsideMarkdownCode(content: string): string {
+  const output: string[] = [];
+  let plainStart = 0;
+  let cursor = 0;
+  while (cursor < content.length) {
+    const atLineStart = cursor === 0 || content[cursor - 1] === "\n";
+    if (atLineStart) {
+      const lineEnd = content.indexOf("\n", cursor);
+      const openingLine = content.slice(cursor, lineEnd < 0 ? content.length : lineEnd);
+      const opening = openingLine.match(FENCE_OPENING);
+      if (opening) {
+        output.push(normalizeLatexMathSegment(content.slice(plainStart, cursor)));
+        const end = fenceEnd(content, cursor + opening[0].length, opening[2]);
+        output.push(content.slice(cursor, end));
+        cursor = end;
+        plainStart = end;
+        continue;
+      }
+    }
+    if (content[cursor] === "`") {
+      let markerLength = 1;
+      while (content[cursor + markerLength] === "`") markerLength += 1;
+      output.push(normalizeLatexMathSegment(content.slice(plainStart, cursor)));
+      const end = inlineCodeEnd(content, cursor, markerLength);
+      output.push(content.slice(cursor, end));
+      cursor = end;
+      plainStart = end;
+      continue;
+    }
+    cursor += 1;
+  }
+  output.push(normalizeLatexMathSegment(content.slice(plainStart)));
+  return output.join("");
+}
+
+/**
+ * Convert LaTeX's explicit math delimiters into the dollar syntax understood
+ * by remark-math. Conversion is paired, code-safe, and keeps the independent
+ * Markdown container prefix of both display delimiters. In particular, the
+ * closing marker must retain list indentation or blockquote markers.
+ */
+export function normalizeLatexMathMarkdown(content: string): string {
+  return normalizeOutsideMarkdownCode(content);
+}
+
 export function prepareMarkdown(content: string): string {
-  return normalizeStrongMarkdown(content)
-    .replace(/\\\[((?:.|\n)*?)\\\]/g, (_match, body: string) => `$$\n${body}\n$$`)
-    .replace(/\\\(((?:.|\n)*?)\\\)/g, (_match, body: string) => `$${body}$`)
+  return normalizeLatexMathMarkdown(normalizeStrongMarkdown(content))
     .replace(
       /\[\[(?:page|p)[:. ]?(\d+(?:\s*[-–—~～]\s*\d+)?(?:\s*[,，]\s*\d+(?:\s*[-–—~～]\s*\d+)?)*)(?:\|([^\]]+))?\]\]/gi,
       (_match, pageSpec: string, label?: string) => {
