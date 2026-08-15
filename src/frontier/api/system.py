@@ -8,19 +8,29 @@ from fastapi.responses import StreamingResponse
 from sqlalchemy import select, update
 from sqlalchemy.orm import Session
 
-from ..agent_runner import build_prompt, enqueue_task, run_task
+from ..agent_runner import (
+    build_conversation_recovery_prompt,
+    build_prompt,
+    enqueue_task,
+    run_task,
+)
 from ..config import settings
 from ..database import SessionLocal, get_session
 from ..interactive_stream import encode_stream_event, stream_codex_prompt
-from ..models import AppSetting, Memory, OperationLog, TaskRun, utcnow
+from ..models import AppSetting, Conversation, Memory, OperationLog, Paper, TaskRun, utcnow
 from ..schemas import MemoryCreate, MemoryUpdate, SettingUpdate, TaskCreate
 from ..services.backup import create_local_git_backup
 from ..services.bootstrap import import_bibtex
 from ..services.common import log_operation, model_dict
 from ..services.ingest import create_or_update_paper, search_arxiv
+from ..services.paper_conversations import get_or_create_paper_conversation
 from ..services.research_day import current_research_date
 from ..services.service_checks import check_service
-from ..services.task_control import ACTIVE_TASK_STATUSES, cancel_task_run
+from ..services.task_control import (
+    ACTIVE_TASK_STATUSES,
+    active_task_for_conversation,
+    cancel_task_run,
+)
 from ..services.translation_provider import stream_translation_prompt
 
 router = APIRouter(prefix="/api", tags=["system"])
@@ -275,8 +285,41 @@ def cancel_task(
     return {**model_dict(item), "process_stopped": process_stopped}
 
 
+def _task_payload_with_paper_conversation(
+    session: Session,
+    payload: TaskCreate,
+) -> dict:
+    task_payload = dict(payload.payload_json)
+    if payload.kind != "finish_reading":
+        return task_payload
+
+    paper_id = task_payload.get("paper_id")
+    if not isinstance(paper_id, str) or not paper_id.strip():
+        raise HTTPException(
+            status_code=422,
+            detail="finish_reading requires a non-empty paper_id",
+        )
+    paper_id = paper_id.strip()
+    if session.get(Paper, paper_id) is None:
+        raise HTTPException(status_code=404, detail="Paper not found")
+
+    conversation = get_or_create_paper_conversation(session, paper_id)
+    session.commit()
+    if active_task_for_conversation(session, conversation.id):
+        raise HTTPException(status_code=409, detail="该论文的 Agent 正在处理另一项任务")
+    return {
+        **task_payload,
+        "paper_id": paper_id,
+        "conversation_id": conversation.id,
+    }
+
+
 @router.post("/tasks")
-def create_task(payload: TaskCreate, background_tasks: BackgroundTasks) -> dict:
+def create_task(
+    payload: TaskCreate,
+    background_tasks: BackgroundTasks,
+    session: Annotated[Session, Depends(get_session)],
+) -> dict:
     allowed = {
         "daily_brief",
         "finish_reading",
@@ -287,14 +330,18 @@ def create_task(payload: TaskCreate, background_tasks: BackgroundTasks) -> dict:
     }
     if payload.kind not in allowed:
         raise HTTPException(status_code=400, detail=f"Unsupported task kind: {payload.kind}")
-    task_id = enqueue_task(payload.kind, payload.payload_json)
+    task_payload = _task_payload_with_paper_conversation(session, payload)
+    task_id = enqueue_task(payload.kind, task_payload)
     if payload.kind == "translate" or settings.enable_codex_runs:
         background_tasks.add_task(run_task, task_id)
     return {"id": task_id, "status": "queued"}
 
 
 @router.post("/tasks/stream")
-def stream_task(payload: TaskCreate) -> StreamingResponse:
+def stream_task(
+    payload: TaskCreate,
+    session: Annotated[Session, Depends(get_session)],
+) -> StreamingResponse:
     allowed = {
         "finish_reading",
         "graph_maintenance",
@@ -306,7 +353,11 @@ def stream_task(payload: TaskCreate) -> StreamingResponse:
         raise HTTPException(
             status_code=400, detail=f"Unsupported streaming task kind: {payload.kind}"
         )
-    task_id = enqueue_task(payload.kind, payload.payload_json)
+    task_payload = _task_payload_with_paper_conversation(session, payload)
+    task_id = enqueue_task(payload.kind, task_payload)
+    conversation_id = (
+        task_payload.get("conversation_id") if payload.kind == "finish_reading" else None
+    )
 
     def generate():  # type: ignore[no-untyped-def]
         yield encode_stream_event("meta", task_id=task_id)
@@ -319,6 +370,8 @@ def stream_task(payload: TaskCreate) -> StreamingResponse:
         )
         content = ""
         thread_id = None
+        session_id = None
+        recovery_prompt = None
         try:
             if payload.kind != "translate" and not settings.enable_codex_runs:
                 raise RuntimeError("Agent 运行已在服务器设置中停用")
@@ -332,15 +385,49 @@ def stream_task(payload: TaskCreate) -> StreamingResponse:
                 task.status = "running"
                 task.started_at = utcnow()
                 prompt = build_prompt(task)
+                if task.kind == "finish_reading":
+                    conversation = runner_session.get(Conversation, conversation_id)
+                    if conversation is None:
+                        raise RuntimeError("论文主 Conversation 不存在")
+                    session_id = conversation.codex_session_id
+                    thread_id = session_id
+                    if session_id:
+                        recovery_prompt = build_conversation_recovery_prompt(
+                            runner_session,
+                            conversation.id,
+                            prompt,
+                        )
                 runner_session.commit()
             if payload.kind == "translate":
                 for delta in stream_translation_prompt(prompt):
                     content += delta
                     yield encode_stream_event("delta", delta=delta)
             else:
-                for event in stream_codex_prompt(prompt, run_id=task_id):
+                stream_options = (
+                    {"session_id": session_id}
+                    if payload.kind == "finish_reading"
+                    else {}
+                )
+                if recovery_prompt:
+                    stream_options["recovery_prompt"] = recovery_prompt
+                for event in stream_codex_prompt(
+                    prompt,
+                    run_id=task_id,
+                    **stream_options,
+                ):
                     if event["type"] == "thread":
                         thread_id = event["thread_id"]
+                        if conversation_id:
+                            with SessionLocal() as runner_session:
+                                current_conversation = runner_session.get(
+                                    Conversation, conversation_id
+                                )
+                                running = runner_session.get(TaskRun, task_id)
+                                if running and running.status != "cancelled":
+                                    running.codex_session_id = thread_id
+                                    if current_conversation:
+                                        current_conversation.codex_session_id = thread_id
+                                    runner_session.commit()
                         yield encode_stream_event(
                             "activity",
                             activity_id="agent-startup",
@@ -377,6 +464,12 @@ def stream_task(payload: TaskCreate) -> StreamingResponse:
                             yield encode_stream_event("cancelled", task_id=task_id)
                             return
                         raise RuntimeError("Agent 任务状态已变化，未覆盖其终态")
+                    if conversation_id:
+                        current_conversation = runner_session.get(
+                            Conversation, conversation_id
+                        )
+                        if current_conversation and thread_id:
+                            current_conversation.codex_session_id = thread_id
                     runner_session.commit()
             yield encode_stream_event("done", task_id=task_id, content=content)
         except Exception as exc:  # noqa: BLE001

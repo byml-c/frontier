@@ -27,6 +27,8 @@ def test_persisted_agent_workflows_require_simplified_chinese(
 
     assert "every persisted user-facing Agent-generated prose field" in prompt
     assert "Simplified Chinese" in prompt
+    assert "store only incremental deep knowledge in `Paper.full_analysis`" in prompt
+    assert "Do not use `metadata_json` as another knowledge store" in prompt
 
 
 @pytest.mark.parametrize("kind", ["paper_chat", "global_chat"])
@@ -47,6 +49,22 @@ def test_architecture_generation_separates_symbol_model_and_properties() -> None
     assert "Never place a model architecture such as ViT" in prompt
     assert 'architecture: "DINOv2-B/14"' in prompt
     assert "wrap mathematical expressions in `$...$`" in prompt
+
+
+def test_paper_chat_uses_compact_agent_context_and_bounded_delegation() -> None:
+    prompt = build_prompt(
+        TaskRun(
+            id="paper-task",
+            kind="paper_chat",
+            payload_json={"paper_id": "paper-1", "message": "解释实验结果"},
+        )
+    )
+
+    assert "agent-context paper-1" in prompt
+    assert "do not reload the complete paper by default" in prompt
+    assert "Use Codex subagents selectively" in prompt
+    assert "only the main Agent may run canonical Frontier mutations" in prompt
+    assert "can increase total token use" in prompt
 
 
 @pytest.mark.parametrize(
@@ -160,6 +178,44 @@ def test_finish_prompt_requires_the_structured_completion_schema() -> None:
         "user_attitude",
     ):
         assert f"`{field}`" in prompt
+    assert "as that paper's long-lived main Agent" in prompt
+    assert "frontier paper agent-context paper-1" in prompt
+    assert "do not reload the complete paper" in prompt
+
+
+def test_daily_prompt_owns_candidate_metadata_and_can_delegate_reading() -> None:
+    prompt = build_prompt(
+        TaskRun(
+            id="task-daily",
+            kind="daily_brief",
+            payload_json={"date": "2026-08-15"},
+        )
+    )
+
+    assert "single daily-workflow root Agent" in prompt
+    assert "candidate discovery, bibliographic" in prompt
+    assert "canonical summary and analysis fields" in prompt
+    assert "delegate independent full-text evidence extraction" in prompt
+    assert "must not use or create a paper-reading Conversation" in prompt
+    assert "Never\nwrite `completion_summary` or `completion_summary_structured`" in prompt
+
+
+@pytest.mark.parametrize(
+    ("kind", "payload"),
+    [
+        ("manual_paper_analysis", {"paper_id": "paper-1", "date": "2026-08-15"}),
+        ("paper_metadata_analysis", {"paper_id": "paper-1"}),
+    ],
+)
+def test_catalog_analysis_does_not_use_paper_reading_agent(
+    kind: str,
+    payload: dict[str, str],
+) -> None:
+    prompt = build_prompt(TaskRun(id="catalog-task", kind=kind, payload_json=payload))
+
+    assert "stateless catalog/brief analysis run" in prompt
+    assert "create or resume a paper Conversation" in prompt
+    assert "do not infer the user's attitude" in prompt
 
 
 def test_finish_cli_rejects_english_structured_summary(

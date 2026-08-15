@@ -31,8 +31,10 @@ import { ArchitectureNodeCard } from "./ArchitectureNodeCard";
 import { ArchitectureMath, ArchitectureRichText } from "./ArchitectureText";
 import { architectureCardSize } from "./architectureCardSize";
 import { bundleArchitectureEdges, parallelArchitectureEdgeOffsets, reciprocalArchitectureEdgeAnchors } from "./architectureEdges";
+import { fitExpandedArchitectureBounds } from "./architectureExpandedBounds";
 import { architectureFocusNeighborhood } from "./architectureFocus";
 import { architectureGroupBounds } from "./architectureGroups";
+import { placeArchitectureEdgeLabels, type ArchitectureLabelCandidate } from "./architectureLabelLayout";
 import { organizeArchitectureLayout } from "./architectureLayout";
 import type {
   ArchitectureAsset,
@@ -58,7 +60,7 @@ type CanvasNodeData = {
 };
 
 type CanvasEdgeLabel = { primary: string; primaryIsMath?: boolean; secondary?: string };
-type CanvasEdgeData = { labels: CanvasEdgeLabel[]; highlighted?: boolean; dimmed?: boolean; raised?: boolean; routeOffset?: number; parallelOffset?: number; dashed?: boolean };
+type CanvasEdgeData = { labels: CanvasEdgeLabel[]; labelVisible?: boolean; labelPosition?: { x: number; y: number }; highlighted?: boolean; dimmed?: boolean; raised?: boolean; routeOffset?: number; parallelOffset?: number; dashed?: boolean };
 
 export type ArchitectureReaderHandle = {
   execute(commands: ArchitectureCommand[]): void;
@@ -115,7 +117,13 @@ function ArchitectureFlowEdge(props: EdgeProps<Edge<CanvasEdgeData>>) {
     labelY = midpointY + normalY * data.parallelOffset;
   }
   const opacity = data?.dimmed ? .1 : 1;
-  return <><BaseEdge path={path} markerEnd={props.markerEnd} style={{ stroke: data?.highlighted ? "#006FE6" : "#657184", strokeWidth: data?.highlighted ? 2.6 : 1.5, strokeDasharray: data?.dashed ? "6 5" : undefined, opacity, transition: "opacity .16s, stroke .16s, stroke-width .16s" }} />{Boolean(data?.labels.length) && <EdgeLabelRenderer><Box className="nodrag nopan" sx={{ position: "absolute", zIndex: 7, transform: `translate(-50%, -50%) translate(${labelX}px,${labelY}px)`, minWidth: "max-content", maxWidth: 240, px: .8, py: .45, bgcolor: "rgba(255,255,255,.98)", border: 1, borderColor: data?.highlighted ? "primary.light" : "divider", boxShadow: "0 2px 9px rgba(15,23,42,.1)", borderRadius: .75, pointerEvents: "none", textAlign: "center", opacity, transition: "opacity .16s" }}>{data?.labels.map((label, index) => <Box key={`${label.primary}:${label.secondary ?? ""}`} sx={{ mt: index ? .2 : 0 }}>{label.primaryIsMath ? <ArchitectureMath value={label.primary} sx={{ fontSize: ".76rem", fontWeight: 650 }} /> : <ArchitectureRichText content={label.primary} sx={{ fontSize: ".74rem", fontWeight: 650 }} />}{label.secondary && <ArchitectureMath value={label.secondary} sx={{ display: "flex", justifyContent: "center", color: "text.secondary", fontSize: ".7rem", lineHeight: 1.2, whiteSpace: "nowrap" }} />}</Box>)}</Box></EdgeLabelRenderer>}</>;
+  const renderedLabelX = data?.labelPosition?.x ?? labelX; const renderedLabelY = data?.labelPosition?.y ?? labelY;
+  return <><BaseEdge path={path} markerEnd={props.markerEnd} style={{ stroke: data?.highlighted ? "#006FE6" : "#657184", strokeWidth: data?.highlighted ? 2.6 : 1.5, strokeDasharray: data?.dashed ? "6 5" : undefined, opacity, transition: "opacity .16s, stroke .16s, stroke-width .16s" }} />{Boolean(data?.labelVisible && data.labels.length) && <EdgeLabelRenderer><Box className="nodrag nopan" sx={{ position: "absolute", zIndex: 7, transform: `translate(-50%, -50%) translate(${renderedLabelX}px,${renderedLabelY}px)`, minWidth: "max-content", maxWidth: 240, px: .8, py: .45, bgcolor: "rgba(255,255,255,.98)", border: 1, borderColor: data?.highlighted ? "primary.light" : "divider", boxShadow: "0 2px 9px rgba(15,23,42,.1)", borderRadius: .75, pointerEvents: "none", textAlign: "center", opacity, transition: "opacity .16s" }}>{data?.labels.map((label, index) => <Box key={`${label.primary}:${label.secondary ?? ""}`} sx={{ mt: index ? .2 : 0 }}>{label.primaryIsMath ? <ArchitectureMath value={label.primary} sx={{ fontSize: ".76rem", fontWeight: 650 }} /> : <ArchitectureRichText content={label.primary} sx={{ fontSize: ".74rem", fontWeight: 650 }} />}{label.secondary && <ArchitectureMath value={label.secondary} sx={{ display: "flex", justifyContent: "center", color: "text.secondary", fontSize: ".7rem", lineHeight: 1.2, whiteSpace: "nowrap" }} />}</Box>)}</Box></EdgeLabelRenderer>}</>;
+}
+
+function edgeLabelSize(labels: CanvasEdgeLabel[]) {
+  const textWidth = (value: string) => Array.from(value).reduce((width, character) => width + (/\p{Script=Han}/u.test(character) ? 13 : 7), 0);
+  return { width: Math.min(240, Math.max(56, ...labels.map((label) => Math.max(textWidth(label.primary), textWidth(label.secondary ?? "")) + 16))), height: Math.max(24, labels.reduce((height, label) => height + 18 + (label.secondary ? 14 : 0), 8)) };
 }
 
 function EdgeLegendLine({ dashed = false }: { dashed?: boolean }) {
@@ -137,12 +145,6 @@ function nearestVisible(id: string, visible: Set<string>, byId: Map<string, Arch
     current = current.parentModuleId ? byId.get(current.parentModuleId) : undefined;
   }
   return undefined;
-}
-
-function nodeSize(node: ArchitectureNode, expanded = false) {
-  const content = architectureCardSize(node);
-  if (!expanded || !node.size) return content;
-  return { width: Math.max(content.width, node.size.width), height: Math.max(content.height, node.size.height) };
 }
 
 function adaptiveEdgeAnchors(sourcePosition: { x: number; y: number }, sourceSize: { width: number; height: number }, targetPosition: { x: number; y: number }, targetSize: { width: number; height: number }) {
@@ -186,7 +188,7 @@ function ArchitectureReaderInner({ paperId, revision, scene, resolveAsset, onNod
     const tensors = new Map(scene.tensors.map((tensor) => [tensor.id, tensor]));
     const edgeLabels = Object.fromEntries(scene.edges.map((edge) => {
       const tensor = edge.tensorId ? tensors.get(edge.tensorId) : undefined;
-      return [edge.id, [tensor?.symbol || tensor?.name || edge.label, tensor?.shape].filter(Boolean).join(" ")];
+      return [edge.id, [edge.label, tensor?.symbol || tensor?.name, tensor?.shape].filter(Boolean).join(" ")];
     }));
     const layout = organizeArchitectureLayout(scene.nodes, scene.edges, expanded, edgeLabels);
     setView((current) => {
@@ -197,38 +199,35 @@ function ArchitectureReaderInner({ paperId, revision, scene, resolveAsset, onNod
 
   const derived = useMemo(() => {
     const roots = scene.nodes.filter((node) => !node.parentModuleId);
-    const rootPositions = new Map(roots.map((node) => [node.id, { ...(view.positionOverrides[node.id] ?? node.position) }]));
-    const expandedSize = (node: ArchitectureNode) => {
-      if (expanded.has(node.id) && view.sizeOverrides[node.id]) return view.sizeOverrides[node.id];
-      const base = nodeSize(node, expanded.has(node.id));
-      if (!expanded.has(node.id)) return base;
-      const descendants = children.get(node.id) ?? [];
-      return descendants.reduce((size, child) => {
-        const childDimensions = nodeSize(child);
-        return { width: Math.max(size.width, child.position.x + childDimensions.width + 24), height: Math.max(size.height, child.position.y + childDimensions.height + 24) };
-      }, { ...base });
+    const initialPositions: Record<string, { x: number; y: number }> = {};
+    const locateInitial = (node: ArchitectureNode): { x: number; y: number } => {
+      if (initialPositions[node.id]) return initialPositions[node.id];
+      const override = view.positionOverrides[node.id];
+      if (override) return initialPositions[node.id] = override;
+      if (!node.parentModuleId) return initialPositions[node.id] = node.position;
+      const parent = byId.get(node.parentModuleId); const parentPosition = parent ? locateInitial(parent) : { x: 0, y: 0 };
+      return initialPositions[node.id] = { x: parentPosition.x + node.position.x, y: parentPosition.y + node.position.y };
     };
+    scene.nodes.forEach(locateInitial);
+    const fitted = fitExpandedArchitectureBounds(scene.nodes, expanded, initialPositions);
+    const nodePositions = fitted.positions;
+    const nodeSizes = fitted.sizes;
+    const belongsToRoot = (node: ArchitectureNode, rootId: string) => { let current: ArchitectureNode | undefined = node; while (current?.parentModuleId) current = byId.get(current.parentModuleId); return current?.id === rootId; };
     for (let pass = 0; pass < roots.length * 2; pass += 1) {
       let moved = false;
       roots.forEach((first, index) => roots.slice(index + 1).forEach((second) => {
-        const firstBounds = { ...rootPositions.get(first.id)!, ...expandedSize(first) };
-        const secondPosition = rootPositions.get(second.id)!;
-        if (overlaps(firstBounds, { ...secondPosition, ...expandedSize(second) })) {
-          rootPositions.set(second.id, { x: firstBounds.x + firstBounds.width + ROOT_GAP, y: secondPosition.y });
+        const firstBounds = { ...nodePositions[first.id], ...nodeSizes[first.id] };
+        const secondBounds = { ...nodePositions[second.id], ...nodeSizes[second.id] };
+        if (overlaps(firstBounds, secondBounds)) {
+          const shiftX = firstBounds.x + firstBounds.width + ROOT_GAP - secondBounds.x;
+          scene.nodes.filter((node) => belongsToRoot(node, second.id)).forEach((node) => { nodePositions[node.id] = { x: nodePositions[node.id].x + shiftX, y: nodePositions[node.id].y }; });
           moved = true;
         }
       }));
       if (!moved) break;
     }
-    const absolute = new Map<string, { x: number; y: number }>();
-    const locate = (node: ArchitectureNode): { x: number; y: number } => {
-      const existing = absolute.get(node.id); if (existing) return existing;
-      const override = view.positionOverrides[node.id];
-      if (override) { absolute.set(node.id, override); return override; }
-      if (!node.parentModuleId) { const value = rootPositions.get(node.id) ?? node.position; absolute.set(node.id, value); return value; }
-      const parent = byId.get(node.parentModuleId); const parentPosition = parent ? locate(parent) : { x: 0, y: 0 };
-      const value = { x: parentPosition.x + node.position.x, y: parentPosition.y + node.position.y }; absolute.set(node.id, value); return value;
-    };
+    const locate = (node: ArchitectureNode) => nodePositions[node.id];
+    const expandedSize = (node: ArchitectureNode) => nodeSizes[node.id];
     const visible = new Set<string>();
     const isVisible = (node: ArchitectureNode): boolean => {
       if (!node.parentModuleId) return true;
@@ -238,8 +237,6 @@ function ArchitectureReaderInner({ paperId, revision, scene, resolveAsset, onNod
     scene.nodes.forEach((node) => { if (isVisible(node)) visible.add(node.id); });
     const focusNeighborhood = architectureFocusNeighborhood(scene.nodes, scene.edges, visible, focusedNodeId);
     const assetById = new Map(scene.assets.map((asset) => [asset.id, asset]));
-    const nodePositions = Object.fromEntries(scene.nodes.filter((node) => visible.has(node.id)).map((node) => [node.id, locate(node)]));
-    const nodeSizes = Object.fromEntries(scene.nodes.filter((node) => visible.has(node.id)).map((node) => [node.id, expandedSize(node)]));
     const flowNodes: Node<CanvasNodeData>[] = [
       ...scene.groups.map((group) => { const bounds = architectureGroupBounds(group, scene.nodes, visible, nodePositions, nodeSizes); return { id: `group:${group.id}`, type: "groupRegion", position: bounds.position, draggable: false, selectable: false, zIndex: -10, style: { width: bounds.size.width, height: bounds.size.height }, data: { title: group.title } }; }),
       ...scene.nodes.filter((node) => visible.has(node.id)).map((node) => {
@@ -263,6 +260,7 @@ function ArchitectureReaderInner({ paperId, revision, scene, resolveAsset, onNod
     });
     const visibleRelationKeys = new Set(visibleEdges.map((item) => `${item.kind}\u0000${item.source}\u0000${item.target}`));
     const parallelOffsets = parallelArchitectureEdgeOffsets(visibleEdges);
+    const labelCandidates: ArchitectureLabelCandidate[] = [];
     const flowEdges: Edge<CanvasEdgeData>[] = visibleEdges.map((bundle) => {
       const { id, kind, edges: bundledEdges, source, target } = bundle;
       const edgeHighlighted = bundledEdges.some((edge) => highlighted.has(edge.id) || Boolean(edge.tensorId && shownTensors.has(edge.tensorId))) || highlighted.has(source) && highlighted.has(target);
@@ -282,10 +280,24 @@ function ArchitectureReaderInner({ paperId, revision, scene, resolveAsset, onNod
       const appendLabel = (label: CanvasEdgeLabel) => { const key = `${label.primary}\u0000${label.secondary ?? ""}`; if (!labelKeys.has(key)) { labelKeys.add(key); labels.push(label); } };
       bundledEdges.forEach((edge) => { if (edge.label?.trim()) appendLabel({ primary: edge.label.trim() }); });
       bundledEdges.forEach((edge) => { const tensor = edge.tensorId ? tensors.get(edge.tensorId) : undefined; const primary = tensor?.symbol || tensor?.name; if (primary) appendLabel({ primary, primaryIsMath: Boolean(tensor?.symbol), secondary: tensor?.shape }); });
-      return { id: `${kind === "conditioning" ? "conditioning:" : "flow:"}${id}`, source, target, sourceHandle: `source-${anchors.source}`, targetHandle: `target-${anchors.target}`, type: "architecture", zIndex: expandedFlow ? 4 : 0, markerEnd: { type: MarkerType.ArrowClosed, width: 16, height: 16, color: edgeHighlighted ? "#006FE6" : "#657184" }, data: { labels, highlighted: edgeHighlighted, dimmed: Boolean(dimExcept && (!dimExcept.has(source) || !dimExcept.has(target)) || focusDimmed), raised: expandedFlow, routeOffset: 26 + sourceIndex % 4 * 10, parallelOffset: reciprocal ? undefined : parallelOffsets.get(id), dashed: kind === "conditioning" } };
+      const flowId = `${kind === "conditioning" ? "conditioning:" : "flow:"}${id}`;
+      const labelVisible = Boolean(edgeHighlighted || focusedNodeId && (source === focusedNodeId || target === focusedNodeId));
+      if (labelVisible && labels.length) {
+        const dimensions = edgeLabelSize(labels);
+        const sourceCenter = { x: sourcePosition.x + sourceSize.width / 2, y: sourcePosition.y + sourceSize.height / 2 };
+        const targetCenter = { x: targetPosition.x + targetSize.width / 2, y: targetPosition.y + targetSize.height / 2 };
+        const dx = targetCenter.x - sourceCenter.x; const dy = targetCenter.y - sourceCenter.y; const distance = Math.max(1, Math.hypot(dx, dy));
+        let preferredX = (sourceCenter.x + targetCenter.x) / 2; let preferredY = (sourceCenter.y + targetCenter.y) / 2;
+        if (reciprocal && Math.abs(dx) >= Math.abs(dy)) preferredY = dx >= 0 ? Math.min(sourcePosition.y, targetPosition.y) - dimensions.height / 2 - 18 : Math.max(sourcePosition.y + sourceSize.height, targetPosition.y + targetSize.height) + dimensions.height / 2 + 18;
+        else if (reciprocal) preferredX = dy >= 0 ? Math.min(sourcePosition.x, targetPosition.x) - dimensions.width / 2 - 18 : Math.max(sourcePosition.x + sourceSize.width, targetPosition.x + targetSize.width) + dimensions.width / 2 + 18;
+        else { const offset = parallelOffsets.get(id) ?? 0; preferredX += -dy / distance * offset; preferredY += dx / distance * offset; }
+        labelCandidates.push({ id: flowId, x: preferredX, y: preferredY, preferredX, preferredY, ...dimensions });
+      }
+      return { id: flowId, source, target, sourceHandle: `source-${anchors.source}`, targetHandle: `target-${anchors.target}`, type: "architecture", zIndex: expandedFlow ? 4 : 0, markerEnd: { type: MarkerType.ArrowClosed, width: 16, height: 16, color: edgeHighlighted ? "#006FE6" : "#657184" }, data: { labels, labelVisible, highlighted: edgeHighlighted, dimmed: Boolean(dimExcept && (!dimExcept.has(source) || !dimExcept.has(target)) || focusDimmed), raised: expandedFlow, routeOffset: 26 + sourceIndex % 4 * 10, parallelOffset: reciprocal ? undefined : parallelOffsets.get(id), dashed: kind === "conditioning" } };
     });
-    return { nodes: flowNodes, edges: flowEdges };
-  }, [byId, children, dimExcept, expanded, focusedNodeId, highlighted, onRequestExpand, resolveAsset, scene, shownTensors, view.positionOverrides, view.sizeOverrides]);
+    const labelPositions = placeArchitectureEdgeLabels(labelCandidates, scene.nodes.filter((node) => visible.has(node.id)).map((node) => ({ ...locate(node), ...expandedSize(node) })));
+    return { nodes: flowNodes, edges: flowEdges.map((edge) => ({ ...edge, data: { ...edge.data!, labelPosition: labelPositions[edge.id] } })) };
+  }, [byId, children, dimExcept, expanded, focusedNodeId, highlighted, onRequestExpand, resolveAsset, scene, shownTensors, view.positionOverrides]);
 
   const [nodes, setNodes] = useNodesState<Node<CanvasNodeData>>(derived.nodes);
   const [edges, setEdges, onEdgesChange] = useEdgesState<Edge<CanvasEdgeData>>(derived.edges);
@@ -304,11 +316,16 @@ function ArchitectureReaderInner({ paperId, revision, scene, resolveAsset, onNod
           height: typeof node.style?.height === "number" ? node.style.height : node.measured?.height ?? fallback.height,
         }];
       }));
+      const fitted = fitExpandedArchitectureBounds(scene.nodes, expanded, positions);
       return next.map((node) => {
-        if (!node.id.startsWith("group:")) return node;
+        if (!node.id.startsWith("group:")) {
+          const entity = node.data.entity;
+          const expandedModule = entity?.type === "module" && expanded.has(entity.id) && Boolean(children.get(entity.id)?.length);
+          return expandedModule ? { ...node, position: fitted.positions[node.id], style: { ...node.style, width: fitted.sizes[node.id].width, height: fitted.sizes[node.id].height } } : node;
+        }
         const group = scene.groups.find((candidate) => `group:${candidate.id}` === node.id);
         if (!group) return node;
-        const bounds = architectureGroupBounds(group, scene.nodes, visible, positions, sizes);
+        const bounds = architectureGroupBounds(group, scene.nodes, visible, fitted.positions, { ...sizes, ...fitted.sizes });
         return { ...node, position: bounds.position, style: { ...node.style, width: bounds.size.width, height: bounds.size.height } };
       });
     });

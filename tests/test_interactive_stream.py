@@ -1,7 +1,13 @@
 from __future__ import annotations
 
 from frontier import interactive_stream
-from frontier.interactive_stream import CodexStreamError, _architecture_ui_event, _tool_activity
+from frontier.interactive_stream import (
+    CodexStreamError,
+    _architecture_ui_event,
+    _codex_status_activity,
+    _public_item_activity,
+    _tool_activity,
+)
 
 
 def test_app_server_command_uses_configured_profile(monkeypatch) -> None:
@@ -74,6 +80,7 @@ def test_architecture_command_result_becomes_safe_ui_event() -> None:
 
 def test_paper_commands_are_exposed_as_specific_activities() -> None:
     cases = [
+        ("uv run frontier paper agent-context paper-1", "已载入论文上下文"),
         ("uv run frontier paper text paper-1", "已读取论文正文"),
         ("uv run frontier paper text paper-1 --page 7", "已读取论文第 7 页正文"),
         (
@@ -159,6 +166,183 @@ def test_added_paper_activity_uses_returned_title() -> None:
 
     assert activity is not None
     assert activity["label"] == "已添加论文：A Generalist Tactile Policy"
+
+
+def test_codex_status_activities_expose_only_safe_lifecycle_state() -> None:
+    sensitive = {
+        "prompt": "secret delegation prompt",
+        "senderThreadId": "private-parent-thread",
+        "receiverThreadIds": ["private-child-thread"],
+        "agentsStates": {
+            "private-child-thread": {
+                "status": "completed",
+                "message": "private child response",
+            }
+        },
+    }
+    cases = [
+        (
+            {"id": "compact-1", "type": "contextCompaction"},
+            "running",
+            ("正在压缩上下文", "", "running"),
+        ),
+        (
+            {"id": "compact-1", "type": "contextCompaction"},
+            "completed",
+            ("已压缩上下文", "", "completed"),
+        ),
+        (
+            {
+                "id": "collab-1",
+                "type": "collabAgentToolCall",
+                "tool": "spawnAgent",
+                "status": "inProgress",
+                **sensitive,
+            },
+            "running",
+            ("正在委派子 Agent", "", "running"),
+        ),
+        (
+            {
+                "id": "collab-1",
+                "type": "collabAgentToolCall",
+                "tool": "spawnAgent",
+                "status": "completed",
+                **sensitive,
+            },
+            "completed",
+            ("已委派子 Agent", "", "completed"),
+        ),
+        (
+            {
+                "id": "collab-failed",
+                "type": "collabAgentToolCall",
+                "tool": "spawnAgent",
+                "status": "failed",
+                **sensitive,
+            },
+            "completed",
+            ("委派子 Agent 失败", "", "failed"),
+        ),
+        (
+            {
+                "id": "subagent-1",
+                "type": "subAgentActivity",
+                "agentPath": "private/agent/path",
+                "agentThreadId": "private-child-thread",
+                "kind": "started",
+            },
+            "completed",
+            ("子 Agent 工作状态", "已开始工作", "completed"),
+        ),
+        (
+            {
+                "id": "subagent-interrupted",
+                "type": "subAgentActivity",
+                "agentPath": "private/agent/path",
+                "agentThreadId": "private-child-thread",
+                "kind": "interrupted",
+            },
+            "completed",
+            ("子 Agent 工作状态", "工作已中断", "completed"),
+        ),
+    ]
+
+    for item, phase, expected in cases:
+        activity = _codex_status_activity(item, phase)
+        assert activity is not None
+        assert (activity["label"], activity["detail"], activity["status"]) == expected
+        public_text = str(activity)
+        assert not any(
+            secret in public_text
+            for secret in [
+                "secret delegation prompt",
+                "private-parent-thread",
+                "private-child-thread",
+                "private child response",
+                "private/agent/path",
+            ]
+        )
+
+
+def test_public_item_activity_keeps_command_and_mcp_mapping() -> None:
+    command = _public_item_activity(
+        {
+            "id": "command-1",
+            "type": "commandExecution",
+            "command": "uv run frontier paper context paper-1",
+            "exitCode": 0,
+        },
+        "completed",
+    )
+    mcp = _public_item_activity(
+        {
+            "id": "mcp-1",
+            "type": "mcpToolCall",
+            "tool": "paper_lookup",
+            "success": True,
+        },
+        "completed",
+    )
+
+    assert command is not None
+    assert command["kind"] == "tool"
+    assert command["label"] == "已载入论文上下文"
+    assert mcp is not None
+    assert mcp["kind"] == "tool"
+    assert mcp["label"] == "已使用 paper_lookup"
+
+
+def test_stream_turn_emits_compaction_and_subagent_activities(monkeypatch) -> None:
+    responses = iter([{"thread": {"id": "thread-1"}}, {}])
+    items = [
+        {"id": "compact-1", "type": "contextCompaction"},
+        {
+            "id": "collab-1",
+            "type": "collabAgentToolCall",
+            "tool": "spawnAgent",
+            "status": "completed",
+            "prompt": "must remain private",
+            "senderThreadId": "parent-thread",
+            "receiverThreadIds": ["child-thread"],
+            "agentsStates": {},
+        },
+        {
+            "id": "subagent-1",
+            "type": "subAgentActivity",
+            "agentPath": "paper_searcher",
+            "agentThreadId": "child-thread",
+            "kind": "interacted",
+        },
+    ]
+    messages = iter(
+        [
+            {"method": method, "params": {"item": item}}
+            for item in items
+            for method in ("item/started", "item/completed")
+        ]
+        + [{"method": "turn/completed", "params": {"turn": {"status": "completed"}}}]
+    )
+    monkeypatch.setattr(interactive_stream, "_write_message", lambda *_args: None)
+    monkeypatch.setattr(interactive_stream, "_await_response", lambda *_args: next(responses))
+    monkeypatch.setattr(interactive_stream, "_read_message", lambda *_args: next(messages))
+
+    events = list(interactive_stream._stream_turn(object(), "test prompt"))  # type: ignore[arg-type]
+    activities = [event for event in events if event["type"] == "activity"]
+
+    assert [(event["activity_id"], event["label"], event["status"]) for event in activities] == [
+        ("compact-1", "正在压缩上下文", "running"),
+        ("compact-1", "已压缩上下文", "completed"),
+        ("collab-1", "正在委派子 Agent", "running"),
+        ("collab-1", "已委派子 Agent", "completed"),
+        ("subagent-1", "子 Agent 工作状态", "running"),
+        ("subagent-1", "子 Agent 工作状态", "completed"),
+    ]
+    assert activities[-1]["detail"] == "已更新进展"
+    assert not any(
+        private in str(activities)
+        for private in ["must remain private", "parent-thread", "child-thread", "paper_searcher"]
+    )
 
 
 def test_stream_turn_exposes_public_activity_without_mixing_commentary(

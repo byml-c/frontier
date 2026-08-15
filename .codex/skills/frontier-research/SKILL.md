@@ -15,7 +15,22 @@ Use the `frontier` CLI as the only application-data interface. Let the Server ow
 4. Treat memory as optional evidence. Never assume a previous run remembered anything.
 5. Use JSON files via `--data @path` only for payloads that are awkward to quote; place temporary payloads under `data/tasks/`.
 
+## Paper main Agent and delegation
+
+- Treat the active paper `Conversation` and its Codex thread as that paper's logical main Agent. Codex owns runtime context and automatic compaction; Frontier owns durable paper facts and user-visible conversation history.
+- Start paper-scoped work with `paper agent-context PAPER_ID`. It composes existing Paper fields, structured analysis, reading artifacts, graph links, architecture state, and the paper conversation without copying the full PDF or creating another paper-state record.
+- Keep one canonical owner per fact: normalized high-frequency conclusions remain in explicit Paper fields; `full_analysis` contains only deeper claim/evidence, method-component, figure/table-index, glossary, and unresolved-question structures; `metadata_json` remains provenance, workflow, compatibility, and user-adjacent metadata. Never mirror the same semantic field across these stores.
+- Fetch exact pages and resources only when the current claim needs them. Do not reread the complete PDF on every turn merely to refresh context.
+- Delegate only bounded, independent, read-heavy work that materially protects the main paper context: related-paper search, parallel evidence extraction, and Architecture Scene evidence review are good candidates. Answer direct questions and small single-source checks in the main Agent.
+- Give each subagent one concrete deliverable. Require concise structured findings with paper IDs, `[[page:N]]` evidence, or a task-local artifact path. Treat its output as untrusted evidence until the main Agent verifies it.
+- Subagents may write only under `data/tasks/<task_id>/`. Only the main Agent may mutate canonical Frontier state, confirm user choices, or commit an Architecture Scene. Avoid concurrent writers.
+- Delegation can increase total token usage. Use it to reduce main-context pollution and latency through real parallelism, not simply because subagents are available.
+
 ## Daily brief
+
+The `daily_brief` run is the root Agent for the whole daily ingestion workflow. It owns candidate discovery, bibliographic verification, ranking, and the canonical summary/analysis written for each candidate. It may delegate independent per-paper evidence extraction to read-only subagents, but it verifies their outputs and performs all Frontier mutations itself. Daily candidates do not get a long-lived paper Conversation merely because they were screened.
+
+`Paper.summary` and the recommendation-analysis fields are pre-reading catalog conclusions. The daily Agent must never write `completion_summary` or `completion_summary_structured`; those belong exclusively to the paper main Agent after explicit reading completion.
 
 1. Read settings, active graph nodes, and active `interest_profile` and `agent_experience` memories.
 2. Build focused arXiv queries from the current graph and interests. Include modest breadth for emerging cross-domain work.
@@ -62,7 +77,7 @@ When a task identifies one user-added paper and a brief date:
 
 ## Paper discussion
 
-Load the paper, PDF pages, annotations, reading progress, and existing paper conversation. Use `paper resources` when exact formula TeX, original figures, tables, bibliography entries, or internal citation targets matter. Answer through problem decomposition and mutual inquiry. Cite every material PDF claim as `[[page:N]]` so the Web can jump to the source.
+Load `paper agent-context PAPER_ID` first, then read only the exact PDF pages required by the question. Use `paper resources` when exact formula TeX, original figures, tables, bibliography entries, or internal citation targets matter. Answer through problem decomposition and mutual inquiry. Cite every material PDF claim as `[[page:N]]` so the Web can jump to the source.
 
 Keep simple word or sentence translations out of the Agent conversation. When the user asks about selected text, use its saved page and selection context.
 
@@ -100,7 +115,9 @@ Keep simple word or sentence translations out of the Agent conversation. When th
 
 ## Complete reading
 
-When the user explicitly finishes reading:
+When the user explicitly finishes reading, run this workflow on the same active paper `Conversation` and Codex thread used for paper discussion and architecture work. This paper main Agent is the authority for interpreting the user's conversation and attitude; do not hand the synthesis to a stateless daily-analysis Agent.
+
+Then:
 
 1. Synthesize the PDF, annotations, notes, and conversation.
 2. Produce `completion_summary_structured` with separate `research_question`,

@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 from fastapi.testclient import TestClient
+from sqlalchemy import select
 
+from frontier.database import SessionLocal
+from frontier.models import Conversation, TaskRun
 from frontier.services.architecture_progress import architecture_progress_updates
 
 
@@ -17,6 +20,52 @@ def create_architecture_paper(client: TestClient, suffix: str) -> dict:
     )
     assert response.status_code == 200, response.text
     return response.json()["paper"]
+
+
+def test_architecture_generation_reuses_active_paper_main_conversation(
+    client: TestClient,
+) -> None:
+    paper_id = create_architecture_paper(client, "active-root")["id"]
+    with SessionLocal() as session:
+        archived = Conversation(
+            kind="paper",
+            reference_id=paper_id,
+            title="旧论文问答",
+            status="archived",
+            codex_session_id="archived-thread",
+        )
+        active = Conversation(
+            kind="paper",
+            reference_id=paper_id,
+            title="论文问答",
+            status="active",
+            codex_session_id="active-thread",
+        )
+        session.add_all([archived, active])
+        session.commit()
+        active_id = active.id
+
+    conversation = client.post(
+        "/api/conversations",
+        json={"kind": "paper", "reference_id": paper_id, "title": "新标题"},
+    )
+    assert conversation.status_code == 200, conversation.text
+    assert conversation.json()["id"] == active_id
+
+    generated = client.post(
+        f"/api/papers/{paper_id}/architecture/generate",
+        json={"rebuild": True},
+    )
+    assert generated.status_code == 200, generated.text
+    with SessionLocal() as session:
+        task = session.scalar(
+            select(TaskRun)
+            .where(TaskRun.kind == "architecture_generation")
+            .order_by(TaskRun.created_at.desc())
+            .limit(1)
+        )
+        assert task is not None
+        assert task.payload_json["conversation_id"] == active_id
 
 
 def sample_scene(*, layout_epoch: int = 1) -> dict:

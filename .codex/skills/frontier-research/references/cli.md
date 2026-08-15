@@ -20,6 +20,7 @@ uv run frontier paper render-page PAPER_ID 7 --dpi 144
 uv run frontier paper resources PAPER_ID
 uv run frontier paper resources PAPER_ID --kind formula
 uv run frontier paper resources PAPER_ID --kind figure --block-id BLOCK_ID
+uv run frontier paper agent-context PAPER_ID
 uv run frontier paper context PAPER_ID
 uv run frontier paper finish PAPER_ID --data '{"completion_summary_structured":{"research_question":"... [[page:1]]","evidence_and_contribution":"... [[page:4]]","experiments":"... [[page:7]]","limitations":"... [[page:12]]","user_attitude":"..."},"suggested_interested":true,"suggested_quality":true,"suggested_create_node":false,"suggested_tags":["VLA"]}'
 ```
@@ -28,7 +29,9 @@ uv run frontier paper finish PAPER_ID --data '{"completion_summary_structured":{
 affiliation, arXiv ID, DOI, and the discovery query that originally ingested the paper. Use it
 before an external search so an existing paper and its cached full text can be reused.
 
-Use `paper context` for reading completion and paper chat. It returns metadata, annotations, progress, conversations, and page-separated PDF text. If a claim depends on a figure, table, equation layout, or visual result, use `paper render-page`; the returned absolute PNG path can be opened with the Agent's image-viewing tool.
+Use `paper agent-context` at the start of paper chat and other incremental paper work. It composes the existing Paper analysis, reading artifacts, graph links, architecture state, and paper conversation while omitting full PDF text. Follow it with targeted `paper text --page`, `paper resources`, or `paper render-page` calls for exact evidence. Use the larger `paper context` only for workflows such as reading completion that genuinely need the page-separated full text.
+
+`full_analysis` is the reusable deep-analysis slot. Keep only non-duplicated structures such as claim/evidence items, method components, figure/table indexes, glossary entries, unresolved questions, a schema version, and the source PDF version. Explicit Paper summary fields remain canonical for their respective conclusions; `metadata_json` is not a second paper-knowledge store.
 
 `paper finish` stores the five completion-summary sections structurally. The Server also renders a
 legacy Markdown `completion_summary` for older private clients. `user_attitude` is private and is

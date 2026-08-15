@@ -231,6 +231,22 @@ def paper_context(paper_id: str, include_text: bool = True) -> None:
     emit(result)
 
 
+@paper_app.command("agent-context")
+def paper_agent_context(
+    paper_id: str,
+    query: str | None = typer.Option(None, "--query", "-q"),
+) -> None:
+    """Read compact durable context for one paper Agent without loading the PDF."""
+    params = {"query": query} if query is not None else None
+    emit(
+        client.request(
+            "GET",
+            f"/api/papers/{paper_id}/agent-context",
+            params=params,
+        )
+    )
+
+
 @paper_app.command("resources")
 def paper_resources(
     paper_id: str,

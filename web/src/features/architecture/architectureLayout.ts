@@ -19,8 +19,8 @@ export type OrganizedArchitectureLayout = {
 
 type LayoutEdge = Pick<ArchitectureEdge, "id" | "source" | "target">;
 
-const GLOBAL_COLUMN_GAP = 196;
-const GLOBAL_ROW_GAP = 64;
+const GLOBAL_COLUMN_GAP = 148;
+const GLOBAL_ROW_GAP = 48;
 const GLOBAL_PADDING = 40;
 const MODULE_PADDING = 32;
 
@@ -121,6 +121,63 @@ function estimateLabelWidth(value: string | undefined): number {
   return Math.min(240, Math.max(48, Array.from(value).reduce((width, character) => width + (/\p{Script=Han}/u.test(character) ? 13 : 7), 0)));
 }
 
+function normalizedRanks(nodes: ArchitectureNode[], ranks: Map<string, number>): Map<string, number> {
+  const values = [...new Set(nodes.map((node) => ranks.get(node.id) ?? 0))].sort((first, second) => first - second);
+  const compact = new Map(values.map((value, index) => [value, index]));
+  return new Map(nodes.map((node) => [node.id, compact.get(ranks.get(node.id) ?? 0) ?? 0]));
+}
+
+function layersForRanks(nodes: ArchitectureNode[], ranks: Map<string, number>): Map<number, ArchitectureNode[]> {
+  const layers = new Map<number, ArchitectureNode[]>();
+  nodes.forEach((node) => { const rank = ranks.get(node.id) ?? 0; layers.set(rank, [...(layers.get(rank) ?? []), node]); });
+  layers.forEach((layer) => layer.sort((first, second) => first.position.y - second.position.y || first.position.x - second.position.x || first.id.localeCompare(second.id)));
+  return layers;
+}
+
+function countLayerCrossings(layers: Map<number, ArchitectureNode[]>, ranks: Map<string, number>, edges: LayoutEdge[]): number {
+  const order = new Map<string, number>();
+  layers.forEach((layer) => layer.forEach((node, index) => order.set(node.id, index)));
+  const segments = new Map<string, Array<{ source: number; target: number }>>();
+  edges.forEach((edge) => {
+    const sourceRank = ranks.get(edge.source) ?? 0; const targetRank = ranks.get(edge.target) ?? 0;
+    if (sourceRank === targetRank) return;
+    const forward = sourceRank < targetRank;
+    const lowRank = Math.min(sourceRank, targetRank); const highRank = Math.max(sourceRank, targetRank);
+    const sourceOrder = order.get(forward ? edge.source : edge.target); const targetOrder = order.get(forward ? edge.target : edge.source);
+    if (sourceOrder === undefined || targetOrder === undefined) return;
+    const key = `${lowRank}:${highRank}`;
+    segments.set(key, [...(segments.get(key) ?? []), { source: sourceOrder, target: targetOrder }]);
+  });
+  let crossings = 0;
+  segments.forEach((items) => items.forEach((first, index) => items.slice(index + 1).forEach((second) => { if ((first.source - second.source) * (first.target - second.target) < 0) crossings += 1; })));
+  return crossings;
+}
+
+function rankDimensions(nodes: ArchitectureNode[], ranks: Map<string, number>, sizes: Map<string, ArchitectureSize>, labels: Record<string, string>, edges: LayoutEdge[]) {
+  const layers = layersForRanks(nodes, ranks);
+  const maximumRank = Math.max(0, ...layers.keys());
+  const widths = Array.from({ length: maximumRank + 1 }, (_, rank) => Math.max(0, ...(layers.get(rank) ?? []).map((node) => sizes.get(node.id)?.width ?? architectureCardSize(node).width)));
+  const heights = Array.from({ length: maximumRank + 1 }, (_, rank) => (layers.get(rank) ?? []).reduce((height, node) => height + (sizes.get(node.id)?.height ?? architectureCardSize(node).height), 0) + Math.max(0, (layers.get(rank)?.length ?? 0) - 1) * GLOBAL_ROW_GAP);
+  const gaps = Array.from({ length: maximumRank }, () => GLOBAL_COLUMN_GAP);
+  let edgeSpan = 0;
+  edges.forEach((edge) => {
+    const sourceRank = ranks.get(edge.source) ?? 0; const targetRank = ranks.get(edge.target) ?? 0;
+    edgeSpan += Math.abs(targetRank - sourceRank);
+    const low = Math.min(sourceRank, targetRank); const high = Math.max(sourceRank, targetRank);
+    if (low === high) return;
+    const required = Math.min(240, estimateLabelWidth(labels[edge.id]) + 72);
+    for (let boundary = low; boundary < high; boundary += 1) gaps[boundary] = Math.max(gaps[boundary], required);
+  });
+  return { width: widths.reduce((sum, width) => sum + width, 0) + gaps.reduce((sum, gap) => sum + gap, 0), height: Math.max(0, ...heights), edgeSpan, layers };
+}
+
+export function architectureLayoutObjective({ crossings, width, height, edgeSpan = 0 }: { crossings: number; width: number; height: number; edgeSpan?: number }): number {
+  const longestSide = Math.max(width, height);
+  const areaScale = Math.sqrt(Math.max(1, width * height));
+  const aspectPenalty = Math.abs(Math.log(Math.max(1, width) / Math.max(1, height))) * 90;
+  return crossings * 100_000 + longestSide * 1.5 + areaScale + aspectPenalty + edgeSpan * 6;
+}
+
 function layeredLayout(nodes: ArchitectureNode[], edges: LayoutEdge[], sizes: Map<string, ArchitectureSize>, labels: Record<string, string>, padding: { left: number; top: number; right: number; bottom: number }) {
   if (!nodes.length) return { positions: {} as Record<string, XYPosition>, size: { width: padding.left + padding.right, height: padding.top + padding.bottom } };
   const byId = new Map(nodes.map((node) => [node.id, node]));
@@ -138,9 +195,11 @@ function layeredLayout(nodes: ArchitectureNode[], edges: LayoutEdge[], sizes: Ma
   const queue = nodes.filter((node) => indegree.get(node.id) === 0).sort(stableNodeOrder);
   const ranks = new Map(nodes.map((node) => [node.id, 0]));
   const processed = new Set<string>();
+  const topologicalOrder: ArchitectureNode[] = [];
   while (queue.length) {
     const node = queue.shift()!;
     processed.add(node.id);
+    topologicalOrder.push(node);
     (outgoing.get(node.id) ?? []).forEach((target) => {
       ranks.set(target, Math.max(ranks.get(target) ?? 0, (ranks.get(node.id) ?? 0) + 1));
       indegree.set(target, (indegree.get(target) ?? 1) - 1);
@@ -155,6 +214,37 @@ function layeredLayout(nodes: ArchitectureNode[], edges: LayoutEdge[], sizes: Ma
   if (remaining.length) {
     const fallbackColumns = columnsFromExistingPositions(remaining);
     fallbackColumns.forEach((column, index) => column.nodes.forEach((node) => ranks.set(node.id, Math.max(ranks.get(node.id) ?? 0, index))));
+  }
+
+  if (!remaining.length && nodes.length > 2) {
+    const earliest = normalizedRanks(nodes, ranks);
+    const maximumCandidateRank = Math.max(0, ...earliest.values());
+    const latest = new Map(nodes.map((node) => [node.id, maximumCandidateRank]));
+    [...topologicalOrder].reverse().forEach((node) => {
+      const successors = outgoing.get(node.id) ?? [];
+      if (!successors.length) return;
+      const latestAllowed = Math.min(...successors.map((target) => (latest.get(target) ?? maximumCandidateRank) - 1));
+      latest.set(node.id, Math.max(earliest.get(node.id) ?? 0, latestAllowed));
+    });
+    const midpoint = new Map(nodes.map((node) => [node.id, Math.round(((earliest.get(node.id) ?? 0) + (latest.get(node.id) ?? maximumCandidateRank)) / 2)]));
+    const balanced = new Map(midpoint);
+    const isolated = nodes.filter((node) => !(incoming.get(node.id)?.length) && !(outgoing.get(node.id)?.length)).sort(stableNodeOrder);
+    const layerLoads = Array.from({ length: maximumCandidateRank + 1 }, () => 0);
+    nodes.filter((node) => !isolated.includes(node)).forEach((node) => { const rank = balanced.get(node.id) ?? 0; layerLoads[rank] += sizes.get(node.id)?.height ?? architectureCardSize(node).height; });
+    isolated.forEach((node) => {
+      const candidates = Array.from({ length: maximumCandidateRank + 1 }, (_, rank) => rank);
+      const rank = candidates.reduce((best, candidate) => layerLoads[candidate] < layerLoads[best] ? candidate : best, 0);
+      balanced.set(node.id, rank);
+      layerLoads[rank] += (sizes.get(node.id)?.height ?? architectureCardSize(node).height) + GLOBAL_ROW_GAP;
+    });
+    const candidates = [earliest, normalizedRanks(nodes, latest), normalizedRanks(nodes, midpoint), normalizedRanks(nodes, balanced)];
+    const chosen = candidates.reduce((best, candidate) => {
+      const metrics = rankDimensions(nodes, candidate, sizes, labels, scopedEdges);
+      const score = architectureLayoutObjective({ crossings: countLayerCrossings(metrics.layers, candidate, scopedEdges), width: metrics.width, height: metrics.height, edgeSpan: metrics.edgeSpan });
+      if (!best || score < best.score) return { ranks: candidate, score };
+      return best;
+    }, null as { ranks: Map<string, number>; score: number } | null)!.ranks;
+    ranks.clear(); chosen.forEach((rank, id) => ranks.set(id, rank));
   }
 
   const layers = new Map<number, ArchitectureNode[]>();
@@ -185,6 +275,20 @@ function layeredLayout(nodes: ArchitectureNode[], edges: LayoutEdge[], sizes: Ma
     for (let rank = maximumRank - 1; rank >= 0; rank -= 1) sweep(rank, outgoing);
   }
 
+  if (nodes.length <= 120 && scopedEdges.length <= 300) {
+    for (let pass = 0; pass < 2; pass += 1) {
+      for (let rank = 0; rank <= maximumRank; rank += 1) {
+        const layer = layers.get(rank) ?? [];
+        for (let index = 0; index < layer.length - 1; index += 1) {
+          const before = countLayerCrossings(layers, ranks, scopedEdges);
+          [layer[index], layer[index + 1]] = [layer[index + 1], layer[index]];
+          const after = countLayerCrossings(layers, ranks, scopedEdges);
+          if (after >= before) [layer[index], layer[index + 1]] = [layer[index + 1], layer[index]];
+        }
+      }
+    }
+  }
+
   const columnWidths = Array.from({ length: maximumRank + 1 }, (_, rank) => Math.max(0, ...(layers.get(rank) ?? []).map((node) => sizes.get(node.id)?.width ?? architectureCardSize(node).width)));
   const columnGaps = Array.from({ length: maximumRank }, () => GLOBAL_COLUMN_GAP);
   scopedEdges.forEach((edge) => {
@@ -193,7 +297,7 @@ function layeredLayout(nodes: ArchitectureNode[], edges: LayoutEdge[], sizes: Ma
     const low = Math.min(sourceRank, targetRank);
     const high = Math.max(sourceRank, targetRank);
     if (low === high) return;
-    const required = Math.min(320, estimateLabelWidth(labels[edge.id]) + 92);
+    const required = Math.min(240, estimateLabelWidth(labels[edge.id]) + 72);
     for (let boundary = low; boundary < high; boundary += 1) columnGaps[boundary] = Math.max(columnGaps[boundary], required);
   });
   const columnHeights = Array.from({ length: maximumRank + 1 }, (_, rank) => {

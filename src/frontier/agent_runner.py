@@ -156,14 +156,31 @@ def build_prompt(task: TaskRun) -> str:
         "dependencies, modify application data files, or access the database directly. Report the "
         "calculation inputs, formula or metric definition, sample size, and missing-value handling."
     )
+    delegation_policy = (
+        "Use Codex subagents selectively for bounded, independent, read-heavy work that would "
+        "otherwise pollute this paper's main context, such as related-paper discovery, parallel "
+        "evidence extraction, or an Architecture Scene evidence review. Keep direct questions and "
+        "small single-source checks in the main Agent. Give each subagent a narrow deliverable and "
+        "require concise structured findings with paper identifiers, page evidence, or a task-local "
+        "artifact path. Subagents may read Frontier state and write only task-scoped artifacts under "
+        f"`data/tasks/{task.id}/`; only the main Agent may run canonical Frontier mutations or commit "
+        "an Architecture Scene. Validate every subagent result before using it. Delegation is an "
+        "optimization for main-context quality, not a default, because it can increase total token use. "
+    )
     workflow_common = (
         "Use the project-local `frontier-research` skill. "
         "Operate application data only through `uv run frontier` CLI commands. "
         "Never edit the SQLite database or application data files directly. "
+        "When this workflow reads a complete paper for reusable analysis, store only incremental "
+        "deep knowledge in `Paper.full_analysis` (for example schema version, source PDF version, "
+        "claim/evidence items, method components, figure/table index, glossary, and unresolved "
+        "questions). Never copy summary, problem, innovation, experiment, limitations, completion "
+        "summary, tags, or workflow/provenance metadata into `full_analysis`; keep those in their "
+        "existing canonical Paper fields. Do not use `metadata_json` as another knowledge store. "
         "Write every persisted user-facing Agent-generated prose field in concise Simplified "
         "Chinese, even when the paper and source material are in English. Keep technical terms, "
         "formulas, and proper names in their original language when that improves precision. "
-        f"The task id is {task.id}. {research_capabilities}"
+        f"The task id is {task.id}. {delegation_policy}{research_capabilities}"
     )
     interactive_common = (
         "You are the Frontier research assistant. Respond directly without announcing a plan, "
@@ -174,7 +191,7 @@ def build_prompt(task: TaskRun) -> str:
         "that improves precision. "
         "Format responses with concise Markdown. Use standard LaTeX delimiters for mathematical "
         "expressions when formulas materially improve the explanation. "
-        f"The task id is {task.id}. {research_capabilities}"
+        f"The task id is {task.id}. {delegation_policy}{research_capabilities}"
     )
     if task.kind == "daily_brief":
         run_date = (
@@ -183,6 +200,15 @@ def build_prompt(task: TaskRun) -> str:
         return f"""{workflow_common}
 
 Run the daily paper workflow for {run_date}. Read relevant active memories and graph nodes first.
+You are the single daily-workflow root Agent responsible for candidate discovery, bibliographic
+verification, ranking, and the canonical summary and analysis fields saved for every selected paper.
+You may delegate independent full-text evidence extraction for different candidates to read-only
+subagents, but you must verify their evidence, make the final ranking decision, and perform every
+Frontier mutation yourself. Candidate analysis must not use or create a paper-reading Conversation;
+that long-lived main Agent is reserved for papers the user actively reads and discusses.
+Write only pre-reading catalog fields such as `Paper.summary` and recommendation analysis. Never
+write `completion_summary` or `completion_summary_structured`; those are user-reading conclusions
+owned exclusively by the paper main Agent after the user finishes reading.
 Collect arXiv candidates using the research interests maintained in the graph. Respect the current
 limits returned by `frontier setting list`: abstracts, full texts, total brief items, and featured
 items. Before ranking or adding a paper, inspect its existing record and exclude every paper whose
@@ -209,6 +235,8 @@ counts.
 
 Process paper {paper_id} {destination}. Load its current metadata, download the PDF, and read the complete extracted full text before
 making a recommendation. Use rendered pages when figures, tables, or layout carry material evidence.
+This is a stateless catalog/brief analysis run, not the paper's long-lived reading Agent. Do not
+create or resume a paper Conversation and do not infer the user's attitude from unrelated history.
 Verify and update author names, first author, corresponding author, primary affiliation, source and
 publication metadata when the evidence supports them; never invent missing roles or affiliations.
 Save a concise Simplified-Chinese one-line summary, one-line Agent comment, problem, innovation,
@@ -262,8 +290,11 @@ that the architecture is ready and mentioning any important evidence limitation.
         paper_id = payload["paper_id"]
         return f"""{workflow_common}
 
-Prepare the completion summary for paper {paper_id}. Load the paper, extracted PDF pages,
-annotations, notes, and its paper conversation. Write the complete saved summary in Simplified
+Prepare the completion summary for paper {paper_id} as that paper's long-lived main Agent. Start
+with `frontier paper agent-context {paper_id}` and synthesize the accumulated Codex thread, the
+user's paper conversation, annotations, notes, and reusable `full_analysis`. Read only missing exact
+PDF pages or structured resources needed to support the final summary; do not reload the complete
+paper when the accumulated evidence is sufficient. Write the complete saved summary in Simplified
 Chinese. Save `completion_summary_structured` with exactly these fields: `research_question`,
 `evidence_and_contribution`, `experiments`, `limitations`, and `user_attitude`. Every material paper
 claim in the first four fields must cite a page as [[page:N]]. Derive `user_attitude` only from the
@@ -305,8 +336,11 @@ Text:
             paper_id = payload.get("paper_id")
             return f"""{interactive_common}
 
-Answer the user's paper-reading question about paper {paper_id}. Use `frontier paper context` to
-load PDF text and reading artifacts. Discuss through problem decomposition and mutual inquiry.
+Answer the user's paper-reading question about paper {paper_id}. Start with
+`frontier paper agent-context {paper_id}` to load the compact application-owned paper state without duplicating it
+inside the Codex thread. Read only the exact PDF pages or structured resources needed for the
+current question with `frontier paper text --page`, `frontier paper resources`, or `frontier paper
+render-page`; do not reload the complete paper by default. Discuss through problem decomposition and mutual inquiry.
 Do not mix simple translation results into this conversation. Cite every material paper claim with
 [[page:N]]. When the current UI context is the Architecture Reader, use `frontier architecture
 status` to read its revision. Use validated `frontier architecture command` calls for focus,

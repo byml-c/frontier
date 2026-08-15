@@ -317,7 +317,7 @@ def _frontier_command_actions(command: str, payload: Any = None) -> tuple[str, s
             page = _page_number(_option_value(tokens, "--page"))
             target = f"论文第 {page} 页正文" if page else "论文正文"
             return f"正在读取{target}", f"已读取{target}"
-        if action == "context":
+        if action in {"context", "agent-context"}:
             return "正在载入论文上下文", "已载入论文上下文"
         if action == "render-page":
             page = _page_number(
@@ -466,6 +466,62 @@ def _tool_activity(item: dict[str, Any], status: str) -> dict[str, Any] | None:
     }
 
 
+def _codex_status_activity(item: dict[str, Any], status: str) -> dict[str, Any] | None:
+    """Expose safe lifecycle labels for Codex runtime and sub-Agent items.
+
+    Collaboration items can contain prompts, thread identifiers, internal agent
+    messages, model settings, and tool arguments.  Deliberately map only their
+    type and finite-state enums into public activity text.
+    """
+    item_type = item.get("type")
+    activity_id = str(item.get("id") or f"status-{id(item)}")
+    detail = ""
+    public_status = status
+
+    if item_type == "contextCompaction":
+        label = "正在压缩上下文" if status == "running" else "已压缩上下文"
+    elif item_type == "collabAgentToolCall":
+        failed = status == "failed" or item.get("status") == "failed"
+        public_status = "failed" if failed else status
+        label = (
+            "正在委派子 Agent"
+            if status == "running"
+            else "委派子 Agent 失败"
+            if failed
+            else "已委派子 Agent"
+        )
+    elif item_type == "subAgentActivity":
+        activity_kind = item.get("kind")
+        if status == "running":
+            label = "子 Agent 工作状态"
+            detail = "正在更新"
+        elif activity_kind == "interrupted":
+            label = "子 Agent 工作状态"
+            detail = "工作已中断"
+        elif activity_kind == "started":
+            label = "子 Agent 工作状态"
+            detail = "已开始工作"
+        else:
+            label = "子 Agent 工作状态"
+            detail = "已更新进展"
+    else:
+        return None
+
+    return {
+        "type": "activity",
+        "activity_id": activity_id,
+        "kind": "status",
+        "label": label,
+        "detail": detail,
+        "status": public_status,
+    }
+
+
+def _public_item_activity(item: dict[str, Any], status: str) -> dict[str, Any] | None:
+    """Normalize supported app-server items into the public activity shape."""
+    return _codex_status_activity(item, status) or _tool_activity(item, status)
+
+
 def _stream_turn(
     process: subprocess.Popen[str],
     prompt: str,
@@ -591,7 +647,7 @@ def _stream_turn(
                     "status": "running",
                 }
             else:
-                activity = _tool_activity(item, "running")
+                activity = _public_item_activity(item, "running")
                 if activity:
                     yield activity
         elif method == "item/reasoning/summaryTextDelta":
@@ -652,7 +708,7 @@ def _stream_turn(
                     "status": "completed",
                 }
             else:
-                activity = _tool_activity(item, "completed")
+                activity = _public_item_activity(item, "completed")
                 if activity:
                     yield activity
                 ui_event = _architecture_ui_event(item)

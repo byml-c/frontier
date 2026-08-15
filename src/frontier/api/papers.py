@@ -85,6 +85,7 @@ from ..services.manual_recommendations import (
     queue_paper_metadata_analysis,
     stage_manual_recommendation,
 )
+from ..services.paper_agent_context import build_paper_agent_context
 from ..services.translation_provider import stream_translation_prompt
 
 router = APIRouter(prefix="/api/papers", tags=["papers"])
@@ -346,6 +347,16 @@ async def add_pdf(
 @router.get("/{paper_id}")
 def get_paper(paper_id: str, session: Annotated[Session, Depends(get_session)]) -> dict:
     return _serialize_paper(session, _paper_or_404(session, paper_id), detail=True)
+
+
+@router.get("/{paper_id}/agent-context")
+def get_paper_agent_context(
+    paper_id: str,
+    session: Annotated[Session, Depends(get_session)],
+    query: str | None = Query(None, max_length=4_000),
+) -> dict:
+    paper = _paper_or_404(session, paper_id)
+    return build_paper_agent_context(session, paper, query=query)
 
 
 @router.patch("/{paper_id}")

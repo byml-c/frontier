@@ -22,6 +22,7 @@ from ..models import Conversation, Message, Paper, TaskRun, utcnow
 from ..schemas import ConversationCreate, MessageCreate
 from ..services.architecture_scene import release_agent_lock_for_task
 from ..services.common import model_dict
+from ..services.paper_conversations import get_or_create_paper_conversation
 from ..services.task_control import active_task_for_conversation, cancelled_activities
 
 router = APIRouter(prefix="/api/conversations", tags=["conversations"])
@@ -226,17 +227,15 @@ def create_conversation(
     payload: ConversationCreate, session: Annotated[Session, Depends(get_session)]
 ) -> dict:
     if payload.kind == "paper" and payload.reference_id:
-        existing = session.scalar(
-            select(Conversation).where(
-                Conversation.kind == "paper",
-                Conversation.reference_id == payload.reference_id,
-                Conversation.status == "active",
-            )
-        )
-        if existing:
-            return _serialize(session, existing)
         if session.get(Paper, payload.reference_id) is None:
             raise HTTPException(status_code=404, detail="Paper not found")
+        item = get_or_create_paper_conversation(
+            session,
+            payload.reference_id,
+            title=payload.title,
+        )
+        session.commit()
+        return _serialize(session, item)
     item = Conversation(**payload.model_dump())
     session.add(item)
     session.commit()

@@ -3,7 +3,7 @@ import test from "node:test";
 import { readFileSync } from "node:fs";
 
 import { architectureCardSize } from "../src/features/architecture/architectureCardSize.ts";
-import { organizeArchitectureLayout, organizeModuleLayout } from "../src/features/architecture/architectureLayout.ts";
+import { architectureLayoutObjective, organizeArchitectureLayout, organizeModuleLayout } from "../src/features/architecture/architectureLayout.ts";
 import type { ArchitectureNode } from "../src/features/architecture/types.ts";
 
 function moduleNode(title: string, extra: Partial<ArchitectureNode> = {}): ArchitectureNode {
@@ -78,7 +78,8 @@ test("global architecture layout reserves horizontal space for long edge labels"
   const layout = organizeArchitectureLayout([source, target], [{ id: "flow", source: "source", target: "target" }], [], { flow: "很长的张量标签用于验证连线文字不会贴住两侧节点" });
   const freeSpace = layout.positions.target.x - layout.positions.source.x - architectureCardSize(source).width;
 
-  assert.ok(freeSpace >= 300);
+  assert.ok(freeSpace >= 200);
+  assert.ok(freeSpace <= 260);
 });
 
 test("global architecture layout sizes expanded modules from the inside out", () => {
@@ -90,4 +91,21 @@ test("global architecture layout sizes expanded modules from the inside out", ()
   assert.ok(layout.sizeOverrides.parent.width > architectureCardSize(parent).width);
   assert.ok(layout.positions.first.x > layout.positions.parent.x);
   assert.ok(layout.positions.second.x > layout.positions.first.x);
+});
+
+test("layout objective strongly prioritizes crossings, then compact bounds", () => {
+  const compact = architectureLayoutObjective({ crossings: 0, width: 900, height: 650, edgeSpan: 8 });
+  const tooWide = architectureLayoutObjective({ crossings: 0, width: 1800, height: 650, edgeSpan: 8 });
+  const crossed = architectureLayoutObjective({ crossings: 1, width: 500, height: 400, edgeSpan: 2 });
+
+  assert.ok(compact < tooWide);
+  assert.ok(tooWide < crossed);
+});
+
+test("edge labels are rendered only for focused endpoints or highlighted edges", () => {
+  const source = readFileSync(new URL("../src/features/architecture/ArchitectureReader.tsx", import.meta.url), "utf8");
+
+  assert.match(source, /const labelVisible = Boolean\(edgeHighlighted \|\| focusedNodeId/);
+  assert.match(source, /data\?\.labelVisible && data\.labels\.length/);
+  assert.match(source, /placeArchitectureEdgeLabels\(labelCandidates/);
 });
