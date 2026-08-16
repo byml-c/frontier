@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import errno
 import threading
 from pathlib import Path
 
@@ -108,6 +109,42 @@ def test_delegated_layout_writes_aggregate_and_per_run_budgets(
     assert (scope.path / "memory.oom.group").read_text(encoding="utf-8") == "1"
     wrapped = scope.wrap_command(["codex", "exec", "prompt"])
     assert wrapped[-4:] == ["--", "codex", "exec", "prompt"]
+
+
+def test_unsupported_partition_io_max_keeps_memory_cpu_and_pids_isolation(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    _reset_runtime(monkeypatch)
+    monkeypatch.setattr(agent_runtime.settings, "agent_cgroup_mode", "required")
+    monkeypatch.setattr(agent_runtime.settings, "agent_cgroup_root", tmp_path)
+    monkeypatch.setattr(agent_runtime, "_data_device_ids", lambda: ("252:3", "252:0"))
+
+    def fake_read(path: Path) -> str:
+        if path.name == "cgroup.controllers":
+            return "cpu io memory pids"
+        return path.read_text(encoding="utf-8") if path.exists() else ""
+
+    original_write = agent_runtime._write_control
+
+    def reject_io_max(path: Path, value: str) -> None:
+        if path.name == "io.max":
+            raise OSError(errno.ENODEV, "No such device")
+        original_write(path, value)
+
+    monkeypatch.setattr(agent_runtime, "_read_control", fake_read)
+    monkeypatch.setattr(agent_runtime, "_write_control", reject_io_max)
+
+    assert agent_runtime.initialize_agent_resource_manager() is True
+    scope = agent_runtime.create_agent_scope("daily-task")
+    assert scope.path is not None
+    assert (scope.path / "memory.max").read_text(encoding="utf-8") == str(
+        agent_runtime.settings.agent_memory_max_bytes
+    )
+    assert (scope.path / "cpu.max").read_text(encoding="utf-8") == "100000 100000"
+    assert (scope.path / "pids.max").read_text(encoding="utf-8") == str(
+        agent_runtime.settings.agent_tasks_max
+    )
 
 
 def test_root_agent_slot_serializes_callers() -> None:

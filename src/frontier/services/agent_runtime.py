@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import errno
 import logging
 import os
 import re
@@ -110,7 +111,7 @@ def _initialize_cgroup_layout(root: Path) -> _CgroupLayout:
 
     server = root / "frontier-server"
     agents = root / "frontier-agents"
-    io_device = _data_device_id()
+    io_devices = _data_device_ids()
     server.mkdir(exist_ok=True)
     moved = False
     controllers_enabled = False
@@ -127,7 +128,7 @@ def _initialize_cgroup_layout(root: Path) -> _CgroupLayout:
             swap_max=settings.agent_server_memory_swap_max_bytes,
             cpu_percent=settings.agent_server_cpu_quota_percent,
             io_weight=settings.agent_io_weight,
-            io_device=io_device,
+            io_devices=io_devices,
             io_read_bps=settings.agent_io_read_bps,
             io_write_bps=settings.agent_io_write_bps,
             tasks_max=settings.agent_server_tasks_max,
@@ -139,7 +140,7 @@ def _initialize_cgroup_layout(root: Path) -> _CgroupLayout:
             swap_max=settings.agent_pool_memory_swap_max_bytes,
             cpu_percent=settings.agent_pool_cpu_quota_percent,
             io_weight=settings.agent_io_weight,
-            io_device=io_device,
+            io_devices=io_devices,
             io_read_bps=settings.agent_io_read_bps,
             io_write_bps=settings.agent_io_write_bps,
             tasks_max=settings.agent_pool_tasks_max,
@@ -170,7 +171,7 @@ def _write_budget(
     swap_max: int,
     cpu_percent: int,
     io_weight: int,
-    io_device: str,
+    io_devices: Sequence[str],
     io_read_bps: int,
     io_write_bps: int,
     tasks_max: int,
@@ -182,9 +183,11 @@ def _write_budget(
     _write_control(path / "memory.swap.max", str(swap_max))
     _write_control(path / "cpu.max", _cpu_max(cpu_percent))
     _write_control(path / "io.weight", f"default {io_weight}")
-    _write_control(
-        path / "io.max",
-        f"{io_device} rbps={io_read_bps} wbps={io_write_bps}",
+    _write_io_max(
+        path,
+        io_devices=io_devices,
+        read_bps=io_read_bps,
+        write_bps=io_write_bps,
     )
     _write_control(path / "pids.max", str(tasks_max))
 
@@ -194,9 +197,54 @@ def _cpu_max(percent: int) -> str:
     return f"{quota} {_CGROUP_PERIOD_US}"
 
 
-def _data_device_id() -> str:
+def _data_device_ids() -> tuple[str, ...]:
+    """Return possible io.max device IDs for the data filesystem.
+
+    Some virtio hosts expose an ext4 filesystem on a partition but only accept
+    the containing whole-disk device in cgroup ``io.max``. Keep the filesystem
+    device first, then fall back to its parent block device when available.
+    """
     device = settings.data_dir.stat().st_dev
-    return f"{os.major(device)}:{os.minor(device)}"
+    filesystem_device = f"{os.major(device)}:{os.minor(device)}"
+    candidates = [filesystem_device]
+    sysfs_device = Path("/sys/dev/block") / filesystem_device
+    try:
+        if (sysfs_device / "partition").exists():
+            parent_dev = (sysfs_device.resolve().parent / "dev").read_text(
+                encoding="utf-8"
+            ).strip()
+            if re.fullmatch(r"\d+:\d+", parent_dev) and parent_dev not in candidates:
+                candidates.append(parent_dev)
+    except OSError:
+        # sysfs is optional in development; retain the stat-derived device.
+        pass
+    return tuple(candidates)
+
+
+def _write_io_max(
+    path: Path,
+    *,
+    io_devices: Sequence[str],
+    read_bps: int,
+    write_bps: int,
+) -> None:
+    unsupported: OSError | None = None
+    for io_device in io_devices:
+        try:
+            _write_control(
+                path / "io.max",
+                f"{io_device} rbps={read_bps} wbps={write_bps}",
+            )
+            return
+        except OSError as exc:
+            if exc.errno != errno.ENODEV:
+                raise
+            unsupported = exc
+    if unsupported is not None:
+        logger.warning(
+            "cgroup io.max is unsupported for %s; retaining io.weight only",
+            ", ".join(io_devices),
+        )
 
 
 def _read_control(path: Path) -> str:
@@ -269,7 +317,7 @@ def create_agent_scope(run_id: str) -> AgentCgroupScope:
 
     safe_id = re.sub(r"[^a-zA-Z0-9_.-]", "-", run_id)[:48].strip("-.") or "run"
     path = _LAYOUT.agents / f"run-{safe_id}-{uuid.uuid4().hex[:8]}"
-    io_device = _data_device_id()
+    io_devices = _data_device_ids()
     path.mkdir()
     try:
         _write_budget(
@@ -279,7 +327,7 @@ def create_agent_scope(run_id: str) -> AgentCgroupScope:
             swap_max=settings.agent_memory_swap_max_bytes,
             cpu_percent=settings.agent_cpu_quota_percent,
             io_weight=settings.agent_io_weight,
-            io_device=io_device,
+            io_devices=io_devices,
             io_read_bps=settings.agent_io_read_bps,
             io_write_bps=settings.agent_io_write_bps,
             tasks_max=settings.agent_tasks_max,
