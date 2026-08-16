@@ -35,7 +35,7 @@ import { MarkdownMessage } from "../components/MarkdownMessage";
 import { MobileConfirmAction } from "../components/MobileConfirmAction";
 import { PageHeader } from "../components/PageHeader";
 import { PaperMetadataDialog } from "../components/PaperMetadataDialog";
-import { PaperEvaluationSliders } from "../components/PaperEvaluationSliders";
+import { PaperEvaluationToggleButtons } from "../components/PaperEvaluationToggleButtons";
 import { PaperNotesPanel } from "../components/PaperNotesPanel";
 import { normalizeExactName } from "../components/exactName";
 import { PaperNodeSelector } from "../components/PaperNodeSelector";
@@ -592,7 +592,7 @@ function FeedbackModal({ open, paper, processing, activities, processError, onCl
               {!summaryComplete && <Alert severity="warning">请补全所有精读总结后再保存。</Alert>}
               <Box>
                 <Typography variant="h3" sx={{ mb: 1 }}>你的判断</Typography>
-                <PaperEvaluationSliders
+                <PaperEvaluationToggleButtons
                   researchScore={paper.research_score}
                   relevanceScore={paper.relevance_score}
                   qualityLevel={qualityLevel}

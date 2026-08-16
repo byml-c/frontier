@@ -10,10 +10,11 @@ import {
   Divider,
   Grid,
   Stack,
-  Switch,
   Tab,
   Tabs,
   TextField,
+  ToggleButton,
+  ToggleButtonGroup,
   Typography,
 } from "@mui/material";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
@@ -24,7 +25,7 @@ import { CompletionSummaryEditor } from "./CompletionSummaryEditor";
 import { completionSummaryDraft, completionSummaryDraftIsComplete, type CompletionSummaryDraft } from "./completionSummary";
 import { Modal } from "./Modal";
 import { normalizeExactName } from "./exactName";
-import { PaperEvaluationSliders } from "./PaperEvaluationSliders";
+import { PaperEvaluationToggleButtons } from "./PaperEvaluationToggleButtons";
 import { PaperTagSelector } from "./PaperTagSelector";
 import { ErrorState, Loading } from "./States";
 
@@ -267,33 +268,46 @@ export function PaperMetadataDialog({
   }
 
   return (
-    <Modal open={open} onClose={onClose} title="论文信息" wide fixedHeight>
+    <Modal open={open} onClose={onClose} title="论文信息" wide fixedHeight compact>
       {paper.isLoading ? <Loading label="正在读取论文信息" /> : paper.error ? <ErrorState error={paper.error} /> : (
         <Stack sx={{ width: "100%", height: "100%", minHeight: 0 }}>
-          <Tabs value={tab} onChange={(_, value) => setTab(value)} sx={{ flexShrink: 0 }}>
-            <Tab value="overview" label="概览" />
-            <Tab value="reading" label="精读" />
-            <Tab value="metadata" label="文献信息" />
-          </Tabs>
+          <Stack direction="row" alignItems="center" spacing={1} sx={{ flexShrink: 0, minWidth: 0 }}>
+            <Tabs value={tab} onChange={(_, value) => setTab(value)} variant="scrollable" scrollButtons={false} sx={{ minWidth: 0, flexShrink: 1, "& .MuiTab-root": { minWidth: { xs: 64, sm: 80 }, px: { xs: 1, sm: 2 } } }}>
+              <Tab value="overview" label="概览" />
+              <Tab value="reading" label="精读" />
+              <Tab value="metadata" label="文献信息" />
+            </Tabs>
+            <Box sx={{ flex: 1 }} />
+            {tab === "reading" && (
+              <ToggleButtonGroup
+                exclusive
+                size="small"
+                value={readingTab}
+                aria-label="切换每日分析与精读结论"
+                onChange={(_, value: "daily" | "reading" | null) => { if (value) setReadingTab(value); }}
+                sx={{ flexShrink: 0, "& .MuiToggleButton-root": { py: .375, px: { xs: 1, sm: 1.5 }, whiteSpace: "nowrap", textTransform: "none" } }}
+              >
+                <ToggleButton value="daily">每日分析</ToggleButton>
+                <ToggleButton value="reading" disabled={!summaryDraft}>精读结论</ToggleButton>
+              </ToggleButtonGroup>
+            )}
+            {tab === "overview" && (
+              <Button
+                size="small"
+                variant="outlined"
+                startIcon={generate.isPending ? <CircularProgress size={16} /> : <AutoAwesomeRounded />}
+                disabled={generate.isPending || dirty || ["queued", "processing"].includes(paper.data?.analysis_status ?? "")}
+                onClick={() => generate.mutate()}
+                sx={{ flexShrink: 0, whiteSpace: "nowrap" }}
+              >
+                {["queued", "processing"].includes(paper.data?.analysis_status ?? "") ? "Agent 处理中" : "让 Agent 生成"}
+              </Button>
+            )}
+          </Stack>
 
-          <Box sx={{ flex: 1, minHeight: 0, overflowY: "auto", py: { xs: 1, sm: 2 }, pr: { xs: 0, sm: .5 } }}>
+          <Box sx={{ flex: 1, minHeight: 0, overflowY: "auto", pt: .75, pr: { xs: 0, sm: .5 } }}>
             {tab === "overview" && (
               <Stack spacing={{ xs: 1.25, sm: 2 }}>
-                <Stack direction="row" alignItems="center" justifyContent="space-between" gap={1}>
-                  <Box sx={{ flex: 1, minWidth: 0 }}>
-                    <Typography variant="h3">概览</Typography>
-                  </Box>
-                  <Button
-                    size="small"
-                    variant="outlined"
-                    startIcon={generate.isPending ? <CircularProgress size={16} /> : <AutoAwesomeRounded />}
-                    disabled={generate.isPending || dirty || ["queued", "processing"].includes(paper.data?.analysis_status ?? "")}
-                    onClick={() => generate.mutate()}
-                    sx={{ flexShrink: 0 }}
-                  >
-                    {["queued", "processing"].includes(paper.data?.analysis_status ?? "") ? "Agent 处理中" : "让 Agent 生成"}
-                  </Button>
-                </Stack>
                 {dirty && <Alert severity="warning">请先保存当前修改，再调用 Agent，避免覆盖尚未保存的内容。</Alert>}
                 {paper.data?.analysis_status && ["queued", "processing"].includes(paper.data.analysis_status) && (
                   <Alert severity="info" icon={<CircularProgress size={18} />}>Agent 正在读取全文并补充分析，当前内容仍可编辑。</Alert>
@@ -308,7 +322,7 @@ export function PaperMetadataDialog({
                       {field("summary", "一句话简介", { multiline: true, minRows: 2 })}
                       {field("agent_comment", "Agent 评语", { multiline: true, minRows: 2 })}
                       {field("recommendation_reason", "推荐理由", { multiline: true, minRows: 3 })}
-                      <PaperEvaluationSliders
+                      <PaperEvaluationToggleButtons
                         researchScore={paper.data?.research_score}
                         relevanceScore={paper.data?.relevance_score}
                         qualityLevel={qualityLevel}
@@ -383,18 +397,8 @@ export function PaperMetadataDialog({
             {tab === "reading" && (
               <Card variant="outlined" sx={metadataCardSx}>
                 <CardContent>
-                  <Stack direction="row" justifyContent="flex-end" alignItems="center" spacing={.5} sx={{ mb: 2 }}>
-                    <Typography variant="caption" color={readingTab === "daily" ? "text.primary" : "text.secondary"}>每日分析</Typography>
-                    <Switch
-                      size="small"
-                      checked={readingTab === "reading"}
-                      disabled={!summaryDraft}
-                      inputProps={{ "aria-label": "切换每日分析与精读结论" }}
-                      onChange={(_, checked) => setReadingTab(checked ? "reading" : "daily")}
-                    />
-                    <Typography variant="caption" color={readingTab === "reading" ? "text.primary" : "text.secondary"}>精读结论</Typography>
-                  </Stack>
                   <CompletionSummaryEditor
+                    key={readingTab}
                     value={readingTab === "reading" && summaryDraft ? summaryDraft : dailyDraft}
                     onChange={readingTab === "reading"
                       ? (value) => { setSummaryDraft(value); setDirty(true); }

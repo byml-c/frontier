@@ -56,16 +56,23 @@ test("generated and metadata reading summaries use the shared editor", () => {
   assert.doesNotMatch(metadataSource + readerSource, /历史精读总结/);
 });
 
-test("paper details default to overview and switch one shared reading editor", () => {
+test("paper details default to overview and toggle one shared reading editor", () => {
   assert.match(metadataSource, /label="概览"/);
   assert.match(metadataSource, /label="精读"/);
   assert.match(metadataSource, /if \(open\) setTab\("overview"\)/);
-  assert.match(metadataSource, /<Switch/);
-  assert.match(metadataSource, /checked=\{readingTab === "reading"\}/);
+  assert.match(metadataSource, /<ToggleButtonGroup/);
+  assert.match(metadataSource, /value=\{readingTab\}/);
+  assert.match(metadataSource, /<ToggleButton value="daily">每日分析<\/ToggleButton>/);
+  assert.match(metadataSource, /<ToggleButton value="reading" disabled=\{!summaryDraft\}>精读结论<\/ToggleButton>/);
+  assert.match(metadataSource, /\{tab === "reading" && \(/);
+  assert.match(metadataSource, /\{tab === "overview" && \(/);
   assert.match(metadataSource, /value=\{readingTab === "reading" && summaryDraft \? summaryDraft : dailyDraft\}/);
   assert.match(metadataSource, /disabledFields=\{readingTab === "daily" \? \["user_attitude"\] : \[\]\}/);
+  assert.match(metadataSource, /title="论文信息" wide fixedHeight compact/);
+  assert.match(metadataSource, /key=\{readingTab\}/);
   assert.doesNotMatch(metadataSource, /<Tab value="daily"/);
-  assert.match(metadataSource, /<PaperEvaluationSliders/);
+  assert.doesNotMatch(metadataSource, /<Typography variant="h3">概览<\/Typography>/);
+  assert.match(metadataSource, /<PaperEvaluationToggleButtons/);
   assert.doesNotMatch(metadataSource, /field\("research_score"/);
   assert.doesNotMatch(metadataSource, /field\("relevance_score"/);
 });

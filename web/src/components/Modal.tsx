@@ -2,7 +2,7 @@ import CloseRounded from "@mui/icons-material/CloseRounded";
 import { Dialog, DialogContent, DialogTitle, IconButton } from "@mui/material";
 import type { ReactNode } from "react";
 
-export function Modal({ open, title, children, onClose, wide = false, fixedHeight = false }: { open: boolean; title: string; children: ReactNode; onClose: () => void; wide?: boolean; fixedHeight?: boolean }) {
+export function Modal({ open, title, children, onClose, wide = false, fixedHeight = false, compact = false }: { open: boolean; title: string; children: ReactNode; onClose: () => void; wide?: boolean; fixedHeight?: boolean; compact?: boolean }) {
   return (
     <Dialog
       open={open}
@@ -21,9 +21,9 @@ export function Modal({ open, title, children, onClose, wide = false, fixedHeigh
         } : undefined,
       }}
     >
-      <DialogTitle sx={{ px: { xs: 1.5, sm: 3 }, pr: 7, py: { xs: 1.25, sm: 2 }, fontWeight: 700 }}>{title}</DialogTitle>
+      <DialogTitle sx={{ px: { xs: 1.5, sm: compact ? 2 : 3 }, pr: 7, py: compact ? { xs: .75, sm: 1 } : { xs: 1.25, sm: 2 }, fontWeight: 700 }}>{title}</DialogTitle>
       <IconButton onClick={onClose} aria-label="关闭" sx={{ position: "absolute", right: 12, top: 10 }}><CloseRounded /></IconButton>
-      <DialogContent dividers sx={fixedHeight ? { display: "flex", flex: "1 1 0", height: 0, flexDirection: "column", minHeight: 0, overflow: "hidden", p: { xs: 1, sm: 3 } } : undefined}>{children}</DialogContent>
+      <DialogContent dividers sx={fixedHeight ? { display: "flex", flex: "1 1 0", height: 0, flexDirection: "column", minHeight: 0, overflow: "hidden", p: compact ? { xs: .75, sm: 1.5 } : { xs: 1, sm: 3 } } : undefined}>{children}</DialogContent>
     </Dialog>
   );
 }
