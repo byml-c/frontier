@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import html
 import ipaddress
+import os
 import socket
 from datetime import datetime
 from html.parser import HTMLParser
@@ -18,6 +19,7 @@ from ..config import settings
 from ..models import Paper, PaperVersion
 from ..schemas import PaperCreate
 from .common import log_operation, normalize_title, parse_arxiv_id
+from .heavy_work import paper_processing_slot
 from .outbound_network import external_httpx_kwargs
 
 USER_AGENT = "FrontierResearch/0.1 (personal research assistant)"
@@ -339,99 +341,134 @@ def ingest_url(session: Session, url: str, *, actor: str = "user") -> tuple[Pape
 def ingest_pdf_bytes(
     session: Session, content: bytes, filename: str, *, actor: str = "user"
 ) -> tuple[Paper, bool]:
-    document = pymupdf.open(stream=content, filetype="pdf")
-    metadata = document.metadata or {}
-    first_page = document[0].get_text("text") if document.page_count else ""
-    title = (metadata.get("title") or "").strip()
-    if not title:
-        first_lines = [line.strip() for line in first_page.splitlines() if line.strip()]
-        title = first_lines[0] if first_lines else Path(filename).stem
-    author_names = [
-        item.strip() for item in (metadata.get("author") or "").split(",") if item.strip()
-    ]
-    authors = [{"name": name} for name in author_names]
-    paper, created = create_or_update_paper(
-        session,
-        PaperCreate(
-            title=title,
-            authors=authors,
-            first_author=author_names[0] if author_names else None,
-            source="upload",
-            metadata_json={"original_filename": filename, "pdf_metadata": metadata},
-        ),
-        actor=actor,
-    )
-    target = settings.pdf_dir / f"{paper.id}.pdf"
-    target.write_bytes(content)
-    paper.pdf_path = str(target)
-    session.commit()
-    document.close()
-    return paper, created
+    with paper_processing_slot():
+        with pymupdf.open(stream=content, filetype="pdf") as document:
+            metadata = document.metadata or {}
+            first_page = document[0].get_text("text") if document.page_count else ""
+        title = (metadata.get("title") or "").strip()
+        if not title:
+            first_lines = [line.strip() for line in first_page.splitlines() if line.strip()]
+            title = first_lines[0] if first_lines else Path(filename).stem
+        author_names = [
+            item.strip()
+            for item in (metadata.get("author") or "").split(",")
+            if item.strip()
+        ]
+        authors = [{"name": name} for name in author_names]
+        paper, created = create_or_update_paper(
+            session,
+            PaperCreate(
+                title=title,
+                authors=authors,
+                first_author=author_names[0] if author_names else None,
+                source="upload",
+                metadata_json={"original_filename": filename, "pdf_metadata": metadata},
+            ),
+            actor=actor,
+        )
+        target = settings.pdf_dir / f"{paper.id}.pdf"
+        target.write_bytes(content)
+        paper.pdf_path = str(target)
+        session.commit()
+        return paper, created
 
 
 def download_paper_pdf(session: Session, paper: Paper) -> Path:
-    if paper.pdf_path and Path(paper.pdf_path).exists():
-        return Path(paper.pdf_path)
-    if not paper.pdf_url:
-        raise ValueError("Paper has no PDF URL")
-    safe_url = _safe_remote_url(paper.pdf_url)
-    response = httpx.get(
-        safe_url,
-        headers={"User-Agent": USER_AGENT},
-        timeout=90,
-        follow_redirects=True,
-        **external_httpx_kwargs(safe_url),
-    )
-    response.raise_for_status()
-    if not response.content.startswith(b"%PDF"):
-        raise ValueError("Downloaded file is not a PDF")
-    target = settings.pdf_dir / f"{paper.id}.pdf"
-    target.write_bytes(response.content)
-    paper.pdf_path = str(target)
-    session.commit()
-    return target
+    with paper_processing_slot():
+        if paper.pdf_path and Path(paper.pdf_path).exists():
+            return Path(paper.pdf_path)
+        if not paper.pdf_url:
+            raise ValueError("Paper has no PDF URL")
+        safe_url = _safe_remote_url(paper.pdf_url)
+        target = settings.pdf_dir / f"{paper.id}.pdf"
+        temporary = target.with_suffix(".pdf.download")
+        temporary.unlink(missing_ok=True)
+        try:
+            with httpx.stream(
+                "GET",
+                safe_url,
+                headers={"User-Agent": USER_AGENT},
+                timeout=90,
+                follow_redirects=True,
+                **external_httpx_kwargs(safe_url),
+            ) as response:
+                response.raise_for_status()
+                content_length = response.headers.get("content-length")
+                if (
+                    content_length is not None
+                    and int(content_length) > settings.paper_download_max_bytes
+                ):
+                    raise ValueError("PDF exceeds the configured download size limit")
+                received = 0
+                signature = b""
+                with temporary.open("wb") as output:
+                    for chunk in response.iter_bytes(chunk_size=64 * 1024):
+                        if not chunk:
+                            continue
+                        received += len(chunk)
+                        if received > settings.paper_download_max_bytes:
+                            raise ValueError("PDF exceeds the configured download size limit")
+                        if len(signature) < 4:
+                            signature += chunk[: 4 - len(signature)]
+                        output.write(chunk)
+                    output.flush()
+                    os.fsync(output.fileno())
+                if signature != b"%PDF":
+                    raise ValueError("Downloaded file is not a PDF")
+            temporary.replace(target)
+        finally:
+            temporary.unlink(missing_ok=True)
+        paper.pdf_path = str(target)
+        session.commit()
+        return target
 
 
 def extract_pdf_text(session: Session, paper: Paper, *, force: bool = False) -> dict:
     import json
 
-    cache = settings.text_dir / f"{paper.id}.json"
-    if cache.exists() and not force:
-        return json.loads(cache.read_text(encoding="utf-8"))
-    path = download_paper_pdf(session, paper)
-    document = pymupdf.open(path)
-    pages = []
-    for index, page in enumerate(document):
-        pages.append(
-            {
-                "page_number": index + 1,
-                "text": page.get_text("text"),
-                "width": page.rect.width,
-                "height": page.rect.height,
+    with paper_processing_slot():
+        cache = settings.text_dir / f"{paper.id}.json"
+        if cache.exists() and not force:
+            return json.loads(cache.read_text(encoding="utf-8"))
+        path = download_paper_pdf(session, paper)
+        with pymupdf.open(path) as document:
+            pages = []
+            extracted_chars = 0
+            for index, page in enumerate(document):
+                text = page.get_text("text")
+                extracted_chars += len(text)
+                if extracted_chars > settings.paper_text_max_chars:
+                    raise ValueError("Extracted PDF text exceeds the configured size limit")
+                pages.append({
+                    "page_number": index + 1,
+                    "text": text,
+                    "width": page.rect.width,
+                    "height": page.rect.height,
+                })
+            result = {
+                "paper_id": paper.id,
+                "page_count": document.page_count,
+                "pages": pages,
             }
-        )
-    result = {
-        "paper_id": paper.id,
-        "page_count": document.page_count,
-        "pages": pages,
-    }
-    document.close()
-    cache.write_text(json.dumps(result, ensure_ascii=False), encoding="utf-8")
-    return result
+        temporary = cache.with_suffix(".json.tmp")
+        temporary.write_text(json.dumps(result, ensure_ascii=False), encoding="utf-8")
+        temporary.replace(cache)
+        return result
 
 
 def render_pdf_page(session: Session, paper: Paper, page_number: int, *, dpi: int = 144) -> Path:
     """Render one PDF page for Agent-side inspection of figures and layouts."""
-    path = download_paper_pdf(session, paper)
-    document = pymupdf.open(path)
-    try:
-        if page_number < 1 or page_number > document.page_count:
-            raise ValueError(f"Page must be between 1 and {document.page_count}")
-        target = settings.text_dir / f"{paper.id}-page-{page_number}-{dpi}dpi.png"
-        if not target.exists():
-            page = document[page_number - 1]
-            pixmap = page.get_pixmap(dpi=dpi, alpha=False)
-            pixmap.save(target)
-        return target
-    finally:
-        document.close()
+    with paper_processing_slot():
+        path = download_paper_pdf(session, paper)
+        document = pymupdf.open(path)
+        try:
+            if page_number < 1 or page_number > document.page_count:
+                raise ValueError(f"Page must be between 1 and {document.page_count}")
+            target = settings.text_dir / f"{paper.id}-page-{page_number}-{dpi}dpi.png"
+            if not target.exists():
+                page = document[page_number - 1]
+                pixmap = page.get_pixmap(dpi=dpi, alpha=False)
+                pixmap.save(target)
+            return target
+        finally:
+            document.close()

@@ -16,7 +16,7 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     "daily_minute": 0,
     "abstract_limit": 50,
     "fulltext_limit": 19,
-    "brief_limit": 9,
+    "brief_limit": 5,
     "featured_limit": 4,
     "candidate_lookback_days": 14,
     "initial_interest_domains": [
@@ -96,6 +96,9 @@ def ensure_default_settings(session: Session) -> None:
     for key, value in DEFAULT_SETTINGS.items():
         if key not in existing:
             session.add(AppSetting(key=key, value_json=value))
+    brief_limit = session.get(AppSetting, "brief_limit")
+    if brief_limit and int(brief_limit.value_json) > 5:
+        brief_limit.value_json = 5
     session.commit()
 
 

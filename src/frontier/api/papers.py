@@ -91,7 +91,9 @@ from ..services.interest_evidence import (
     READING_PROVENANCE_KEY,
     feedback_payload_hash,
     feedback_payload_hash_v2,
+    feedback_payload_hash_v3,
     paper_interest_level,
+    paper_quality_level,
     validate_brief_item_source,
 )
 from ..services.manual_recommendations import (
@@ -149,6 +151,8 @@ def _serialize_paper(session: Session, paper: Paper, *, detail: bool = False) ->
     payload["analysis_error"] = analysis.get("error")
     payload["suggested_tags"] = metadata.get("suggested_tags", [])
     payload["interest_level"] = paper_interest_level(paper)
+    payload["quality_level"] = paper_quality_level(paper)
+    payload["open_questions"] = metadata.get("open_questions")
     if not detail:
         payload.pop("full_analysis", None)
         payload.pop("metadata_json", None)
@@ -341,7 +345,7 @@ def _confirmed_feedback_hash(
     )
     return feedback_payload_hash(
         interest_level=payload.resolved_interest_level,
-        quality=payload.quality,
+        quality_level=payload.resolved_quality_level,
         create_node=payload.create_node,
         tag_names=_prospective_tag_names(
             session, paper.id, payload.tag_ids, payload.new_tags
@@ -374,11 +378,45 @@ def _confirmed_feedback_hash_v2(
     )
     return feedback_payload_hash_v2(
         interested=payload.resolved_interest_level == "interested",
-        quality=payload.quality,
+        quality=payload.resolved_quality_level == "excellent",
         create_node=payload.create_node,
         tag_names=_prospective_tag_names(
             session, paper.id, payload.tag_ids, payload.new_tags
         ),
+        user_attitude=(structured or {}).get("user_attitude"),
+        personal_comment=(
+            personal_comment if isinstance(personal_comment, str) else None
+        ),
+        source_brief_item_id=source_brief_item_id,
+    )
+
+
+def _confirmed_feedback_hash_v3(
+    session: Session,
+    paper: Paper,
+    payload: ConfirmFeedback,
+    source_brief_item_id: str | None,
+    node_selections: list[dict[str, object]],
+) -> str:
+    structured = (
+        payload.completion_summary_structured.model_dump()
+        if payload.completion_summary_structured is not None
+        else completion_summary_structured(paper, include_user_attitude=True)
+    )
+    metadata = paper.metadata_json or {}
+    personal_comment = (
+        payload.personal_comment
+        if payload.personal_comment is not None
+        else metadata.get("personal_comment")
+    )
+    return feedback_payload_hash_v3(
+        interest_level=payload.resolved_interest_level,
+        quality=payload.resolved_quality_level == "excellent",
+        create_node=payload.create_node,
+        tag_names=_prospective_tag_names(
+            session, paper.id, payload.tag_ids, payload.new_tags
+        ),
+        node_selections=node_selections,
         user_attitude=(structured or {}).get("user_attitude"),
         personal_comment=(
             personal_comment if isinstance(personal_comment, str) else None
@@ -534,9 +572,9 @@ async def add_pdf(
 ) -> dict:
     if file.content_type not in {"application/pdf", "application/octet-stream"}:
         raise HTTPException(status_code=415, detail="Only PDF files are supported")
-    content = await file.read()
-    if len(content) > 100 * 1024 * 1024:
-        raise HTTPException(status_code=413, detail="PDF exceeds 100 MB")
+    content = await file.read(settings.paper_download_max_bytes + 1)
+    if len(content) > settings.paper_download_max_bytes:
+        raise HTTPException(status_code=413, detail="PDF exceeds the configured size limit")
     if not content.startswith(b"%PDF"):
         raise HTTPException(status_code=400, detail="Invalid PDF file")
     try:
@@ -600,6 +638,8 @@ def update_paper(
     paper = _paper_or_404(session, paper_id)
     changes = payload.model_dump(exclude_unset=True)
     suggested_tags = changes.pop("suggested_tags", None)
+    open_questions = changes.pop("open_questions", None)
+    update_open_questions = "open_questions" in payload.model_fields_set
     protected_fields = manual_bibliographic_fields(session, paper)
     skipped_fields = sorted(protected_fields.intersection(changes))
     for field in skipped_fields:
@@ -620,6 +660,7 @@ def update_paper(
                     FEEDBACK_PROVENANCE_KEY,
                     IGNORE_PROVENANCE_KEY,
                     "personal_comment",
+                    "open_questions",
                 )
                 if key in current_metadata
             },
@@ -628,6 +669,13 @@ def update_paper(
         changes["normalized_title"] = normalize_title(changes["title"])
     for key, value in changes.items():
         setattr(paper, key, value)
+    if update_open_questions:
+        paper.metadata_json = {
+            **(paper.metadata_json or {}),
+            "open_questions": open_questions.strip()
+            if isinstance(open_questions, str) and open_questions.strip()
+            else None,
+        }
     if suggested_tags is not None:
         paper.metadata_json = {**(paper.metadata_json or {}), "suggested_tags": suggested_tags}
     log_operation(
@@ -653,6 +701,10 @@ def update_paper_metadata(
     tag_ids = changes.pop("tag_ids", None)
     new_tags = changes.pop("new_tags", [])
     structured = changes.pop("completion_summary_structured", None)
+    open_questions = changes.pop("open_questions", None)
+    update_open_questions = "open_questions" in payload.model_fields_set
+    interest_level = changes.pop("interest_level", None)
+    quality_level = changes.pop("quality_level", None)
     original_values = {field: getattr(paper, field) for field in BIBLIOGRAPHIC_FIELDS}
     if "authors" in changes and changes["authors"] is not None:
         changes["authors"] = preserve_author_details_for_unchanged_names(
@@ -675,6 +727,7 @@ def update_paper_metadata(
                     FEEDBACK_PROVENANCE_KEY,
                     IGNORE_PROVENANCE_KEY,
                     "personal_comment",
+                    "open_questions",
                 )
                 if key in current_metadata
             },
@@ -688,8 +741,48 @@ def update_paper_metadata(
     )
     if structured is not None:
         save_completion_summary(paper, structured)
+    if update_open_questions:
+        paper.metadata_json = {
+            **(paper.metadata_json or {}),
+            "open_questions": open_questions.strip()
+            if isinstance(open_questions, str) and open_questions.strip()
+            else None,
+        }
     if tag_ids is not None:
         _replace_paper_tags(session, paper.id, tag_ids, new_tags)
+    if interest_level is not None or quality_level is not None:
+        if paper.status != "completed":
+            raise HTTPException(
+                status_code=409,
+                detail="Paper evaluation can be edited only after reading is completed",
+            )
+        resolved_interest = interest_level or paper_interest_level(paper) or "neutral"
+        resolved_quality = quality_level or paper_quality_level(paper) or "normal"
+        paper.is_interested = resolved_interest == "interested"
+        paper.is_quality = resolved_quality == "excellent"
+        current_provenance = (paper.metadata_json or {}).get(FEEDBACK_PROVENANCE_KEY)
+        provenance = (
+            dict(current_provenance) if isinstance(current_provenance, dict) else {}
+        )
+        revision = int(provenance.get("revision") or 0) + 1
+        confirmed_at = datetime.now(UTC)
+        provenance.update(
+            {
+                "schema_version": 2,
+                "revision": revision,
+                "evidence_key": f"paper:{paper.id}:feedback:{revision}",
+                "confirmed_at": confirmed_at.isoformat(),
+                "interest_level": resolved_interest,
+                "quality_level": resolved_quality,
+                "active": True,
+            }
+        )
+        provenance.pop("payload_hash", None)
+        provenance.pop("payload_hash_version", None)
+        paper.metadata_json = {
+            **(paper.metadata_json or {}),
+            FEEDBACK_PROVENANCE_KEY: provenance,
+        }
     log_operation(
         session,
         actor="user",
@@ -700,6 +793,7 @@ def update_paper_metadata(
             "fields": sorted(changes),
             "manually_changed_bibliographic_fields": sorted(manually_changed),
             "tags_updated": tag_ids is not None,
+            "evaluation_updated": interest_level is not None or quality_level is not None,
         },
     )
     session.commit()
@@ -971,8 +1065,24 @@ def confirm_feedback(
         if (
             not hash_matches
             and isinstance(existing_provenance, dict)
+            and existing_provenance.get("payload_hash_version") == 3
+            and payload.resolved_quality_level != "poor"
+        ):
+            hash_matches = existing_provenance.get(
+                "payload_hash"
+            ) == _confirmed_feedback_hash_v3(
+                session,
+                paper,
+                payload,
+                source_brief_item_id,
+                node_selections,
+            )
+        if (
+            not hash_matches
+            and isinstance(existing_provenance, dict)
             and existing_provenance.get("payload_hash_version") == 2
             and payload.resolved_interest_level != "ignored"
+            and payload.resolved_quality_level != "poor"
             and not payload.node_links
             and not payload.new_nodes
         ):
@@ -1013,8 +1123,9 @@ def confirm_feedback(
         raise HTTPException(status_code=409, detail="Paper feedback confirmation is already active")
     paper.status = "completed"
     interest_level = payload.resolved_interest_level
+    quality_level = payload.resolved_quality_level
     paper.is_interested = interest_level == "interested"
-    paper.is_quality = payload.quality
+    paper.is_quality = quality_level == "excellent"
     paper.reading_completed_at = datetime.now(UTC)
     paper.pending_feedback = {}
     if payload.completion_summary_structured is not None:
@@ -1066,7 +1177,7 @@ def confirm_feedback(
     evidence_key = f"paper:{paper.id}:feedback:{revision}"
     payload_hash = feedback_payload_hash(
         interest_level=interest_level,
-        quality=payload.quality,
+        quality_level=quality_level,
         create_node=payload.create_node,
         tag_names=tag_names,
         node_selections=node_selections,
@@ -1078,13 +1189,14 @@ def confirm_feedback(
         **paper.metadata_json,
         "create_node_requested": bool(payload.new_nodes) or payload.create_node,
         FEEDBACK_PROVENANCE_KEY: {
-            "schema_version": 1,
-            "payload_hash_version": 3,
+            "schema_version": 2,
+            "payload_hash_version": 4,
             "revision": revision,
             "evidence_key": evidence_key,
             "confirmed_at": confirmed_at.isoformat(),
             "brief_item_id": source_brief_item_id,
             "interest_level": interest_level,
+            "quality_level": quality_level,
             "selected_node_ids": selected_node_ids,
             "payload_hash": payload_hash,
             "active": True,
@@ -1112,7 +1224,7 @@ def confirm_feedback(
             "source_brief_item_id": source_brief_item_id,
             "interest_level": interest_level,
             "interested": paper.is_interested,
-            "quality": payload.quality,
+            "quality_level": quality_level,
             "create_node": payload.create_node,
             "tag_count": len(selected_tag_ids),
             "node_count": len(selected_node_ids),

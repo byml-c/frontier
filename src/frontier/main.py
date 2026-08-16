@@ -18,25 +18,30 @@ from .interactive_stream import (
     start_codex_app_server_pool,
     stop_codex_app_server_pool,
 )
+from .models import utcnow
 from .scheduler import start_scheduler, stop_scheduler
+from .services.agent_runtime import initialize_agent_resource_manager
 from .services.architecture_scene import cleanup_stale_architecture_locks
 from .services.author_metadata import queue_cached_arxiv_author_metadata_backfill
 from .services.common import ensure_default_settings
 from .services.completion_summary import migrate_legacy_completion_summaries
 from .services.daily_selections import migrate_legacy_daily_selections
+from .services.task_recovery import recover_interrupted_tasks
 from .services.translation_provider import close_translation_provider, warm_translation_provider
 
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
+    startup_cutoff = utcnow()
     create_tables()
     with SessionLocal() as session:
         ensure_default_settings(session)
         cleanup_stale_architecture_locks(session)
         migrate_legacy_completion_summaries(session)
         migrate_legacy_daily_selections(session)
+        recover_interrupted_tasks(session, started_before=startup_cutoff)
+    initialize_agent_resource_manager()
     queue_cached_arxiv_author_metadata_backfill()
-    conversations.mark_orphaned_conversation_streams()
     warm_translation_provider()
     if settings.enable_codex_runs:
         start_codex_app_server_pool()

@@ -12,6 +12,13 @@ from collections.abc import Iterator
 from typing import Any
 
 from .config import PROJECT_ROOT, settings
+from .services.agent_runtime import (
+    attach_scope_to_process,
+    close_process_scope,
+    codex_subagent_limit_args,
+    create_agent_scope,
+    root_agent_slot,
+)
 from .services.outbound_network import agent_environment
 
 
@@ -86,9 +93,10 @@ def is_unusable_codex_thread_error(error: BaseException | str) -> bool:
 
 
 def _app_server_command() -> list[str]:
-    command = [settings.codex_command]
+    command = [settings.codex_command, "--strict-config"]
     if settings.codex_profile:
         command.extend(["--profile", settings.codex_profile])
+    command.extend(codex_subagent_limit_args())
     command.append("app-server")
     if settings.codex_sandbox == "workspace-write" and settings.codex_network_access:
         command.extend(["-c", "sandbox_workspace_write.network_access=true"])
@@ -101,53 +109,90 @@ def _environment() -> dict[str, str]:
 
 
 def _stop_process(process: subprocess.Popen[str] | None) -> None:
-    if process is None or process.poll() is not None:
+    if process is None:
         return
     try:
-        if os.name == "posix":
-            os.killpg(process.pid, signal.SIGTERM)
-        else:
-            process.terminate()
-    except ProcessLookupError:
-        return
-    try:
-        process.wait(timeout=3)
-    except subprocess.TimeoutExpired:
-        if os.name == "posix":
+        if process.poll() is None:
             try:
-                os.killpg(process.pid, signal.SIGKILL)
+                if os.name == "posix":
+                    os.killpg(process.pid, signal.SIGTERM)
+                else:
+                    process.terminate()
             except ProcessLookupError:
                 return
-        else:
-            process.kill()
-        process.wait(timeout=3)
+            try:
+                process.wait(timeout=settings.agent_timeout_grace_seconds)
+            except subprocess.TimeoutExpired:
+                if os.name == "posix":
+                    try:
+                        os.killpg(process.pid, signal.SIGKILL)
+                    except ProcessLookupError:
+                        return
+                else:
+                    process.kill()
+                process.wait(timeout=3)
+    finally:
+        close_process_scope(process)
 
 
 def _start_process() -> subprocess.Popen[str]:
-    process = subprocess.Popen(
-        _app_server_command(),
-        cwd=PROJECT_ROOT,
-        env=_environment(),
-        stdin=subprocess.PIPE,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.DEVNULL,
-        text=True,
-        bufsize=1,
-        start_new_session=os.name == "posix",
+    scope = create_agent_scope("appserver")
+    try:
+        process = subprocess.Popen(
+            scope.wrap_command(_app_server_command()),
+            cwd=PROJECT_ROOT,
+            env=_environment(),
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            text=True,
+            bufsize=1,
+            start_new_session=os.name == "posix",
+        )
+    except BaseException:
+        scope.close()
+        raise
+    attach_scope_to_process(process, scope)
+    startup_timed_out = threading.Event()
+
+    def stop_after_startup_timeout() -> None:
+        if process.poll() is None:
+            startup_timed_out.set()
+            _stop_process(process)
+
+    startup_timeout = threading.Timer(
+        settings.agent_app_server_start_timeout_seconds,
+        stop_after_startup_timeout,
     )
-    _write_message(
-        process,
-        {
-            "id": 1,
-            "method": "initialize",
-            "params": {
-                "clientInfo": {"name": "frontier", "title": "Frontier", "version": "0.1.0"},
-                "capabilities": {"experimentalApi": True},
+    startup_timeout.daemon = True
+    startup_timeout.start()
+    try:
+        _write_message(
+            process,
+            {
+                "id": 1,
+                "method": "initialize",
+                "params": {
+                    "clientInfo": {
+                        "name": "frontier",
+                        "title": "Frontier",
+                        "version": "0.1.0",
+                    },
+                    "capabilities": {"experimentalApi": True},
+                },
             },
-        },
-    )
-    _await_response(process, 1)
-    _write_message(process, {"method": "initialized"})
+        )
+        _await_response(process, 1)
+        _write_message(process, {"method": "initialized"})
+    except BaseException:
+        _stop_process(process)
+        if startup_timed_out.is_set():
+            raise CodexStreamError(
+                "Codex app-server startup exceeded the configured timeout"
+            ) from None
+        raise
+    finally:
+        startup_timeout.cancel()
     return process
 
 
@@ -339,6 +384,7 @@ class CodexAppServerPool:
         ]
         for thread_id in stale_threads:
             self._thread_workers.pop(thread_id, None)
+        close_process_scope(worker.process)
 
 
 class _PooledTurnHandle:
@@ -358,6 +404,7 @@ class _PooledTurnHandle:
         self._terminal = False
         self._turn_requested = False
         self._interrupt_sent = False
+        self._cancel_watchdog: threading.Timer | None = None
         self._lock = threading.Lock()
 
     def bind_thread(self, thread_id: str) -> None:
@@ -380,14 +427,29 @@ class _PooledTurnHandle:
             raise CodexRunCancelled("Agent 工作流已由用户中断")
 
     def cancel(self) -> None:
+        watchdog: threading.Timer | None = None
         with self._lock:
             self._cancelled = True
             thread_id = self.thread_id
             turn_id = self.turn_id
             should_interrupt = self._claim_interrupt_locked()
+            if (
+                self.pool is not None
+                and not self._finished
+                and not self._terminal
+                and self._cancel_watchdog is None
+            ):
+                watchdog = threading.Timer(
+                    settings.agent_timeout_grace_seconds,
+                    self._kill_unresponsive_worker,
+                )
+                watchdog.daemon = True
+                self._cancel_watchdog = watchdog
         if should_interrupt:
             assert turn_id is not None
             self._interrupt(thread_id=thread_id, turn_id=turn_id)
+        if watchdog:
+            watchdog.start()
 
     @property
     def reusable(self) -> bool:
@@ -401,10 +463,24 @@ class _PooledTurnHandle:
     def mark_terminal(self) -> None:
         with self._lock:
             self._terminal = True
+            watchdog = self._cancel_watchdog
+            self._cancel_watchdog = None
+        if watchdog:
+            watchdog.cancel()
 
     def finish(self) -> None:
         with self._lock:
             self._finished = True
+            watchdog = self._cancel_watchdog
+            self._cancel_watchdog = None
+        if watchdog:
+            watchdog.cancel()
+
+    def _kill_unresponsive_worker(self) -> None:
+        with self._lock:
+            if self._finished or self._terminal:
+                return
+        _stop_process(self.worker.process)
 
     def _claim_interrupt_locked(self) -> bool:
         should_interrupt = bool(
@@ -1098,30 +1174,55 @@ def stream_codex_prompt(
     ephemeral: bool = False,
     run_id: str | None = None,
 ) -> Iterator[dict[str, Any]]:
-    worker = _APP_SERVER_POOL.acquire(session_id)
-    run_handle = _PooledTurnHandle(worker, _APP_SERVER_POOL)
-    try:
-        if run_id:
-            register_codex_run(run_id, run_handle)
-        yield from _stream_turn(
-            worker,
-            prompt,
-            session_id,
-            recovery_prompt=recovery_prompt,
-            reasoning_effort=reasoning_effort,
-            ephemeral=ephemeral,
-            run_handle=run_handle,
+    with root_agent_slot():
+        worker = _APP_SERVER_POOL.acquire(session_id)
+        run_handle = _PooledTurnHandle(worker, _APP_SERVER_POOL)
+        timed_out = threading.Event()
+        finished = threading.Event()
+
+        def stop_after_turn_timeout() -> None:
+            if not finished.is_set() and worker.alive:
+                timed_out.set()
+                _stop_process(worker.process)
+
+        turn_timeout = threading.Timer(
+            settings.agent_interactive_timeout_seconds,
+            stop_after_turn_timeout,
         )
-    finally:
-        reusable = run_handle.reusable
-        if not reusable:
-            run_handle.cancel()
-        run_handle.finish()
-        if run_id:
-            unregister_codex_run(run_id, run_handle)
-        _APP_SERVER_POOL.release(
-            worker,
-            thread_id=run_handle.thread_id,
-            previous_thread_id=session_id,
-            discard=not reusable,
-        )
+        turn_timeout.daemon = True
+        turn_timeout.start()
+        try:
+            if run_id:
+                register_codex_run(run_id, run_handle)
+            try:
+                yield from _stream_turn(
+                    worker,
+                    prompt,
+                    session_id,
+                    recovery_prompt=recovery_prompt,
+                    reasoning_effort=reasoning_effort,
+                    ephemeral=ephemeral,
+                    run_handle=run_handle,
+                )
+            except CodexStreamError:
+                if timed_out.is_set():
+                    raise CodexStreamError(
+                        "Agent turn exceeded the configured wall-clock timeout "
+                        f"of {settings.agent_interactive_timeout_seconds} seconds"
+                    ) from None
+                raise
+        finally:
+            finished.set()
+            turn_timeout.cancel()
+            reusable = run_handle.reusable
+            if not reusable:
+                run_handle.cancel()
+            run_handle.finish()
+            if run_id:
+                unregister_codex_run(run_id, run_handle)
+            _APP_SERVER_POOL.release(
+                worker,
+                thread_id=run_handle.thread_id,
+                previous_thread_id=session_id,
+                discard=not reusable,
+            )

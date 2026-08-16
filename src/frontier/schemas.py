@@ -45,9 +45,10 @@ class PaperUpdate(BaseModel):
     innovation: str | None = None
     experiment: str | None = None
     limitations: str | None = None
+    open_questions: str | None = None
     full_analysis: dict[str, Any] | None = None
-    research_score: float | None = None
-    relevance_score: float | None = None
+    research_score: float | None = Field(default=None, ge=0, le=1)
+    relevance_score: float | None = Field(default=None, ge=0, le=1)
     recommendation_reason: str | None = None
     completion_summary: str | None = None
     pending_feedback: dict[str, Any] | None = None
@@ -58,11 +59,33 @@ class PaperUpdate(BaseModel):
 class CompletionSummaryStructured(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    research_question: str = Field(min_length=1)
-    evidence_and_contribution: str = Field(min_length=1)
-    experiments: str = Field(min_length=1)
+    problem: str = Field(min_length=1)
+    innovation: str = Field(min_length=1)
+    experiment: str = Field(min_length=1)
     limitations: str = Field(min_length=1)
+    open_questions: str = Field(min_length=1)
     user_attitude: str = Field(min_length=1)
+
+    @model_validator(mode="before")
+    @classmethod
+    def migrate_legacy_keys(cls, value: Any) -> Any:
+        if not isinstance(value, dict):
+            return value
+        normalized = dict(value)
+        aliases = {
+            "research_question": "problem",
+            "evidence_and_contribution": "innovation",
+            "experiments": "experiment",
+        }
+        for legacy, canonical in aliases.items():
+            if legacy in normalized:
+                normalized.setdefault(canonical, normalized[legacy])
+                normalized.pop(legacy)
+        if "open_questions" not in normalized and any(
+            key in normalized for key in ("problem", "innovation", "experiment")
+        ):
+            normalized["open_questions"] = "历史记录未单独记录未解决问题。"
+        return normalized
 
     @field_validator("*")
     @classmethod
@@ -93,9 +116,10 @@ class PaperMetadataUpdate(BaseModel):
     innovation: str | None = None
     experiment: str | None = None
     limitations: str | None = None
+    open_questions: str | None = None
     recommendation_reason: str | None = None
-    research_score: float | None = Field(default=None, ge=0, le=1)
-    relevance_score: float | None = Field(default=None, ge=0, le=1)
+    interest_level: Literal["ignored", "neutral", "interested"] | None = None
+    quality_level: Literal["poor", "normal", "excellent"] | None = None
     completion_summary_structured: CompletionSummaryStructured | None = None
     metadata_json: dict[str, Any] | None = None
     tag_ids: list[str] | None = None
@@ -118,6 +142,7 @@ class FinishReading(BaseModel):
     completion_summary_structured: CompletionSummaryStructured | None = None
     suggested_interest_level: Literal["ignored", "neutral", "interested"] | None = None
     suggested_interested: bool | None = None
+    suggested_quality_level: Literal["poor", "normal", "excellent"] | None = None
     suggested_quality: bool | None = None
     suggested_create_node: bool | None = None
     suggested_tags: list[str] = Field(default_factory=list)
@@ -157,7 +182,9 @@ class ConfirmFeedback(BaseModel):
     interest_level: Literal["ignored", "neutral", "interested"] | None = None
     # Backward-compatible input for existing CLI/API clients.
     interested: bool | None = None
-    quality: bool
+    quality_level: Literal["poor", "normal", "excellent"] | None = None
+    # Backward-compatible input for existing CLI/API clients.
+    quality: bool | None = None
     create_node: bool = False
     source_brief_item_id: str | None = None
     # Omitted means preserve current metadata tags; an explicit [] clears them.
@@ -178,6 +205,14 @@ class ConfirmFeedback(BaseModel):
             and self.interested != (self.interest_level == "interested")
         ):
             raise ValueError("interested conflicts with interest_level")
+        if self.quality_level is None and self.quality is None:
+            raise ValueError("quality_level is required")
+        if (
+            self.quality_level is not None
+            and self.quality is not None
+            and self.quality != (self.quality_level == "excellent")
+        ):
+            raise ValueError("quality conflicts with quality_level")
         node_ids = [item.node_id for item in self.node_links]
         if len(node_ids) != len(set(node_ids)):
             raise ValueError("node_links contains duplicate node_id values")
@@ -191,6 +226,12 @@ class ConfirmFeedback(BaseModel):
         if self.interest_level is not None:
             return self.interest_level
         return "interested" if self.interested else "neutral"
+
+    @property
+    def resolved_quality_level(self) -> Literal["poor", "normal", "excellent"]:
+        if self.quality_level is not None:
+            return self.quality_level
+        return "excellent" if self.quality else "normal"
 
 
 class AnnotationCreate(BaseModel):

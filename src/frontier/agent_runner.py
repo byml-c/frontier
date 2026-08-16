@@ -4,6 +4,7 @@ import json
 import os
 import re
 import subprocess
+import threading
 from datetime import datetime
 from typing import Any
 from zoneinfo import ZoneInfo
@@ -13,8 +14,13 @@ from sqlalchemy.orm import Session
 
 from .config import PROJECT_ROOT, settings
 from .database import SessionLocal
-from .interactive_stream import register_codex_run, unregister_codex_run
+from .interactive_stream import _stop_process, register_codex_run, unregister_codex_run
 from .models import ArchitectureDocument, Brief, Conversation, Message, Paper, TaskRun, utcnow
+from .services.agent_runtime import (
+    codex_subagent_limit_args,
+    create_agent_scope,
+    root_agent_slot,
+)
 from .services.architecture_progress import persist_architecture_progress
 from .services.architecture_scene import release_agent_lock_for_task
 from .services.common import log_operation
@@ -194,6 +200,8 @@ def build_prompt(task: TaskRun) -> str:
         f"`data/tasks/{task.id}/`; only the main Agent may run canonical Frontier mutations or commit "
         "an Architecture Scene. Validate every subagent result before using it. Delegation is an "
         "optimization for main-context quality, not a default, because it can increase total token use. "
+        "The runtime permits at most one concurrent subagent and one delegation level; never ask a "
+        "subagent to delegate further or attempt to bypass those limits. "
     )
     workflow_common = (
         "Use the project-local `frontier-research` skill. "
@@ -253,6 +261,8 @@ You may delegate independent full-text evidence extraction for different candida
 subagents, but you must verify their evidence, make the final ranking decision, and perform every
 Frontier mutation yourself. Candidate analysis must not use or create a paper-reading Conversation;
 that long-lived main Agent is reserved for papers the user actively reads and discusses.
+Download and read candidate full texts sequentially. Do not start parallel PDF downloads, document
+conversion processes, or full-text CLI commands on this low-resource deployment.
 Write only pre-reading catalog fields such as `Paper.summary` and recommendation analysis. Never
 write `completion_summary` or `completion_summary_structured`; those are user-reading conclusions
 owned exclusively by the paper main Agent after the user finishes reading.
@@ -264,11 +274,12 @@ calibration is weak, raise the evidence threshold independently. The graph descr
 questions and accumulated evidence; it is not by itself proof that the user likes a topic.
 Collect arXiv candidates using the calibrated interests and relevant graph questions. Respect the current
 limits returned by `frontier setting list`: abstracts, full texts, total brief items, and featured
-items. Before ranking or adding a paper, inspect its existing record and exclude every paper whose
+items. Rank all viable candidates first, then generate only the top five non-manual recommendations.
+Before ranking or adding a paper, inspect its existing record and exclude every paper whose
 status is not `candidate`; papers in `reading`, `feedback_pending`, `completed`, or `ignored` status
 must never appear in the daily recommendations. Read full PDF text for final candidates and update
 their paper analyses. Paper summaries, Agent comments, recommendation reasons, problem, innovation,
-experiment, and limitation fields must be written in Simplified Chinese. Do not attach daily
+experiment, limitations, and open_questions fields must be written in Simplified Chinese. Do not attach daily
 or candidate papers to research nodes, create paper-backed node progress, or otherwise treat them
 as accumulated evidence: graph connection is allowed only after the user completes reading and
 confirms feedback, so the paper status is `completed`. You may describe probable graph relevance
@@ -293,7 +304,7 @@ create or resume a paper Conversation and do not infer the user's attitude from 
 Verify and update author names, first author, corresponding author, primary affiliation, source and
 publication metadata when the evidence supports them; never invent missing roles or affiliations.
 Save a concise Simplified-Chinese one-line summary, one-line Agent comment, problem, innovation,
-experiment evidence, limitations, research score, relevance score, recommendation reason, and
+experiment evidence, limitations, open_questions, research score, relevance score, recommendation reason, and
 `suggested_tags` with
 `frontier paper update`. Use explicit unavailable/evidence-insufficient wording for fields that cannot
 be established. Do not attach the paper to the graph or add node progress before user-confirmed
@@ -353,12 +364,13 @@ Prepare the completion summary for paper {paper_id} as that paper's long-lived m
 the accumulated Codex thread, annotations, notes, and reusable `full_analysis`. Read only missing exact
 PDF pages or structured resources needed to support the final summary; do not reload the complete paper
 when the accumulated evidence is sufficient. Write the complete saved summary in Simplified
-Chinese. Save `completion_summary_structured` with exactly these fields: `research_question`,
-`evidence_and_contribution`, `experiments`, `limitations`, and `user_attitude`. Every material paper
-claim in the first four fields must cite a page as [[page:N]]. Derive `user_attitude` only from the
+Chinese. Save `completion_summary_structured` with exactly these fields: `problem`, `innovation`,
+`experiment`, `limitations`, `open_questions`, and `user_attitude`. Every material paper
+claim in the first five fields must cite a page as [[page:N]]. Derive `user_attitude` only from the
 user's annotations, notes, and conversation; state that evidence is insufficient instead of
 inventing an attitude. Save suggested tags and the structured summary with `frontier paper finish`.
 Also save `suggested_interest_level` as exactly one of `ignored`, `neutral`, or `interested`.
+Save `suggested_quality_level` independently as exactly one of `poor`, `normal`, or `excellent`.
 Read the active research nodes and save concise `suggested_nodes` candidates. Each candidate must
 contain `name`, `core_question`, a paper-specific `reason`, optional `domain`, and `node_id` when it
 matches an existing node exactly. Propose a new node only when its core research question is genuinely
@@ -480,6 +492,39 @@ def _graph_feedback_is_active(session: Session, task: TaskRun) -> bool:
     )
 
 
+def _codex_exec_command(
+    prompt: str,
+    output_path: str,
+    *,
+    session_id: str | None = None,
+) -> list[str]:
+    command = [settings.codex_command, "--strict-config"]
+    if settings.codex_profile:
+        command.extend(["--profile", settings.codex_profile])
+    command.extend(codex_subagent_limit_args())
+    if session_id:
+        command.extend(["exec", "resume"])
+    else:
+        command.extend(
+            [
+                "exec",
+                "--json",
+                "-o",
+                output_path,
+                "-C",
+                str(PROJECT_ROOT),
+                "-s",
+                settings.codex_sandbox,
+            ]
+        )
+    if settings.codex_sandbox == "workspace-write" and settings.codex_network_access:
+        command.extend(["-c", "sandbox_workspace_write.network_access=true"])
+    if session_id:
+        command.extend(["--json", "-o", output_path, session_id])
+    command.append(prompt)
+    return command
+
+
 def run_task(task_id: str) -> None:
     with SessionLocal() as session:
         task = session.get(TaskRun, task_id)
@@ -487,6 +532,11 @@ def run_task(task_id: str) -> None:
     if is_translation:
         _run_translation_task(task_id)
         return
+    with root_agent_slot():
+        _run_codex_task(task_id)
+
+
+def _run_codex_task(task_id: str) -> None:
     with SessionLocal() as session:
         task = session.get(TaskRun, task_id)
         if not task or task.status != "queued":
@@ -523,48 +573,27 @@ def run_task(task_id: str) -> None:
         conversation_id = task.payload_json.get("conversation_id")
         if conversation_id:
             conversation = session.get(Conversation, conversation_id)
-        if conversation and conversation.codex_session_id:
-            command = [
-                settings.codex_command,
-                "exec",
-                "resume",
-            ]
-            if settings.codex_sandbox == "workspace-write" and settings.codex_network_access:
-                command.extend(["-c", "sandbox_workspace_write.network_access=true"])
-            command.extend(
-                [
-                    "--json",
-                    "-o",
-                    str(output_path),
-                    conversation.codex_session_id,
-                    prompt,
-                ]
-            )
-        else:
-            command = [
-                settings.codex_command,
-                "exec",
-                "--json",
-                "-o",
-                str(output_path),
-                "-C",
-                str(PROJECT_ROOT),
-                "-s",
-                settings.codex_sandbox,
-            ]
-            if settings.codex_profile:
-                command.extend(["--profile", settings.codex_profile])
-            if settings.codex_sandbox == "workspace-write" and settings.codex_network_access:
-                command.extend(["-c", "sandbox_workspace_write.network_access=true"])
-            command.append(prompt)
+        command = _codex_exec_command(
+            prompt,
+            str(output_path),
+            session_id=(
+                conversation.codex_session_id
+                if conversation and conversation.codex_session_id
+                else None
+            ),
+        )
 
     environment = agent_environment()
     uv_cache_dir = settings.task_dir / "uv-cache"
     uv_cache_dir.mkdir(parents=True, exist_ok=True)
     try:
-        with log_path.open("w", encoding="utf-8") as log_file:
+        timed_out = threading.Event()
+        with (
+            create_agent_scope(task_id) as scope,
+            log_path.open("w", encoding="utf-8") as log_file,
+        ):
             process = subprocess.Popen(
-                command,
+                scope.wrap_command(command),
                 cwd=PROJECT_ROOT,
                 env=environment,
                 stdout=subprocess.PIPE,
@@ -573,6 +602,18 @@ def run_task(task_id: str) -> None:
                 bufsize=1,
                 start_new_session=os.name == "posix",
             )
+
+            def stop_after_timeout() -> None:
+                if process.poll() is None:
+                    timed_out.set()
+                    _stop_process(process)
+
+            timeout = threading.Timer(
+                settings.agent_task_timeout_seconds,
+                stop_after_timeout,
+            )
+            timeout.daemon = True
+            timeout.start()
             try:
                 register_codex_run(task_id, process)
                 session_id = None
@@ -589,6 +630,7 @@ def run_task(task_id: str) -> None:
                     session_id = session_id or _find_session_id(event)
                 return_code = process.wait()
             finally:
+                timeout.cancel()
                 unregister_codex_run(task_id, process)
         response = output_path.read_text(encoding="utf-8") if output_path.exists() else ""
         with SessionLocal() as session:
@@ -617,7 +659,13 @@ def run_task(task_id: str) -> None:
             final_status = "completed"
             final_error = None
             final_result = {"response": response}
-            if return_code != 0:
+            if timed_out.is_set():
+                final_status = "failed"
+                final_error = (
+                    "Agent exceeded the configured wall-clock timeout "
+                    f"of {settings.agent_task_timeout_seconds} seconds."
+                )
+            elif return_code != 0:
                 final_status = "failed"
                 final_error = f"Codex exited with status {return_code}. See {log_path}."
             elif task.kind == "daily_brief" and daily_brief is None:

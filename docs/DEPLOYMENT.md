@@ -35,8 +35,13 @@ Frontier 本机 API 会通过 `NO_PROXY` 保持直连。修改后需要重启 `f
 `[model_providers.<id>]`。
 
 `FRONTIER_CODEX_APP_SERVER_MAX_WORKERS` 控制常驻 App Server 进程数上限，
-默认为 2。首个 Agent 请求会创建 worker 并持续复用，其余 worker 只在并发请求需要时创建；
+2C2G 部署默认为 1。首个 Agent 请求会创建 worker 并持续复用，其余 worker 只在并发请求需要时创建；
 已经加载的对话 thread 会优先回到同一 worker。修改该配置后需要重启 Frontier 服务。
+
+2C2G 部署还应保留 `.env.example` 中的 Agent 限额：根 Agent 总并发为 1，单次 Codex
+会话最多并发 1 个子代理、委派深度为 1、单个子代理最长 30 分钟，批任务总时限为 3
+小时，交互 turn 最长 1 小时。所有 Codex 命令都使用严格配置解析，旧版 CLI 不会静默
+忽略限额。日报全文下载和读取除 prompt 策略外，还由 Server 的全局闸门强制串行。
 
 ```dotenv
 OPENAI_API_KEY=你的翻译模型密钥
@@ -67,6 +72,46 @@ sudo systemctl enable --now frontier
 sudo systemctl status frontier
 ```
 
+示例 unit 面向 cgroup v2 的 2C2G 主机设置了服务总预算，并把 `cpu/io/memory/pids`
+控制器委派给 Frontier。服务启动后，Frontier 会把 Web 主进程与所有 Codex 进程分到
+`frontier-server` 和 `frontier-agents` 子树，再为每个 Codex 进程创建独立 cgroup。
+unit 必须保持 `OOMPolicy=continue`，否则单个 Agent 子组发生 OOM 时 systemd 会连同 Web
+一起停止；Web 主进程自身退出仍由 `Restart=on-failure` 拉起。
+Frontier 会从 `FRONTIER_DATA_DIR` 自动解析块设备号，并对 Web、Agent 汇总组和每个 Agent
+写入 `io.max`：默认读取 20 MiB/s、写入 10 MiB/s；`IOWeight` 仅保留为竞争优先级，
+不是硬上限。PDF 下载采用临时文件和原子替换，默认最多 64 MiB；PDF 下载、提取、渲染
+与结构化转换全局并发为 1，提取文本默认最多 2000 万字符。
+`FRONTIER_AGENT_CGROUP_MODE=required` 时，如果 unit 未启用 `Delegate` 或控制器不可用，
+Web 仍会启动，但 Agent 任务会明确失败，不会退回无隔离运行。
+
+升级已有安装时，不能只拉取代码；还要合并新版 `.env.example` 中的
+`FRONTIER_AGENT_*`、`FRONTIER_CODEX_MAX_CONCURRENT_SUBAGENTS` 与子代理超时配置，并把
+新版 unit 的资源控制项同步到 `/etc/systemd/system/frontier.service`。随后执行：
+
+```bash
+sudo systemd-analyze verify /etc/systemd/system/frontier.service
+sudo systemctl daemon-reload
+sudo systemctl restart frontier.service
+systemctl show frontier.service -p Delegate -p MemoryHigh -p MemoryMax -p CPUQuotaPerSecUSec
+```
+
+正常运行后可用以下命令确认 Web 与 Agent 分账；首个 Agent 请求前，单任务子组尚不存在
+是正常现象：
+
+```bash
+systemd-cgls /system.slice/frontier.service
+cat /sys/fs/cgroup/system.slice/frontier.service/frontier-agents/memory.max
+cat /sys/fs/cgroup/system.slice/frontier.service/frontier-agents/io.max
+```
+
+发布后应先触发一个非关键 Agent 请求，再确认它进入独立叶子且 Web 健康；只有通过这项
+服务器 smoke test，才能证明实际内核委派权限和控制器都已生效：
+
+```bash
+systemd-cgls /system.slice/frontier.service
+frontier health
+```
+
 日志通过 `journalctl -u frontier` 查看。Web 的“任务与日志”页面另行展示每次 Agent 任务的状态和失败原因。
 
 ## 3. 受信设备访问
@@ -85,6 +130,7 @@ tailscale serve status
 ## 4. 运行检查
 
 - 北京时间 05:00 启动日报 Agent，23:50 创建结构化数据本地 Git 备份；
+- 服务启动时会把旧实例遗留的排队中或运行中任务结算为失败，保留部分输出，并解除当日日报防重阻塞；
 - 修改 Web 中的调度时间后，重启 Server 以重载任务；
 - 备份仓库位于 `data/backups/git`，PDF 和 SQLite 不进入该仓库；
 - 每次升级先执行 `pnpm build`，再重启 `frontier` 服务；

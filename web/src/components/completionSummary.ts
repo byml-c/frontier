@@ -8,10 +8,11 @@ export type CompletionSummarySection = {
 };
 
 export const PUBLIC_COMPLETION_SUMMARY_FIELDS = [
-  ["research_question", "研究问题"],
-  ["evidence_and_contribution", "证据与贡献"],
-  ["experiments", "实验"],
+  ["problem", "解决的问题"],
+  ["innovation", "创新内容"],
+  ["experiment", "实验结果"],
   ["limitations", "局限"],
+  ["open_questions", "未解决问题"],
 ] as const;
 
 export const PRIVATE_COMPLETION_SUMMARY_FIELDS = [

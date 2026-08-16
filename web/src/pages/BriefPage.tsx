@@ -27,9 +27,9 @@ export function BriefPage() {
       title={data.title}
       tabs={<BriefTabs value={briefId ? "archive" : "today"} />}
     />
-    {featured.length > 0 && <Section title="重点推荐" description="优先考虑研究价值和与你当前方向的关联"><Stack spacing={1.5}>{featured.map((item) => <PaperCard key={item.id} briefItemId={item.id} paper={{ ...item.paper, status: item.current_status, interest_level: item.interest_level, is_interested: item.is_interested, is_quality: item.is_quality }} rank={item.rank} featured />)}</Stack></Section>}
-    {manual.length > 0 && <Section title="手动添加" description="已加入今日推荐，不占每日推荐篇数"><Stack spacing={1.5}>{manual.map((item) => <PaperCard key={item.id} briefItemId={item.id} paper={{ ...item.paper, status: item.current_status, interest_level: item.interest_level, is_interested: item.is_interested, is_quality: item.is_quality }} />)}</Stack></Section>}
-    {[...groups.entries()].map(([group, items]) => <Section title={group} key={group}><Stack spacing={1.5}>{items.map((item) => <PaperCard key={item.id} briefItemId={item.id} paper={{ ...item.paper, status: item.current_status, interest_level: item.interest_level, is_interested: item.is_interested, is_quality: item.is_quality }} rank={item.rank} />)}</Stack></Section>)}
+    {featured.length > 0 && <Section title="重点推荐" description="优先考虑研究价值和与你当前方向的关联"><Stack spacing={1.5}>{featured.map((item) => <PaperCard key={item.id} briefItemId={item.id} paper={{ ...item.paper, status: item.current_status, interest_level: item.interest_level, quality_level: item.quality_level, is_interested: item.is_interested, is_quality: item.is_quality }} rank={item.rank} featured />)}</Stack></Section>}
+    {manual.length > 0 && <Section title="手动添加" description="已加入今日推荐，不占每日推荐篇数"><Stack spacing={1.5}>{manual.map((item) => <PaperCard key={item.id} briefItemId={item.id} paper={{ ...item.paper, status: item.current_status, interest_level: item.interest_level, quality_level: item.quality_level, is_interested: item.is_interested, is_quality: item.is_quality }} />)}</Stack></Section>}
+    {[...groups.entries()].map(([group, items]) => <Section title={group} key={group}><Stack spacing={1.5}>{items.map((item) => <PaperCard key={item.id} briefItemId={item.id} paper={{ ...item.paper, status: item.current_status, interest_level: item.interest_level, quality_level: item.quality_level, is_interested: item.is_interested, is_quality: item.is_quality }} rank={item.rank} />)}</Stack></Section>)}
   </Container>;
 }
 

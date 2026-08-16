@@ -28,6 +28,7 @@ READING_PROVENANCE_KEY = "reading_provenance"
 FEEDBACK_PROVENANCE_KEY = "feedback_provenance"
 IGNORE_PROVENANCE_KEY = "ignore_provenance"
 INTEREST_LEVELS = {"ignored", "neutral", "interested"}
+QUALITY_LEVELS = {"poor", "normal", "excellent"}
 
 
 def paper_interest_level(paper: Paper) -> str | None:
@@ -42,6 +43,20 @@ def paper_interest_level(paper: Paper) -> str | None:
         if level in INTEREST_LEVELS:
             return str(level)
     return "interested" if paper.is_interested else "neutral"
+
+
+def paper_quality_level(paper: Paper) -> str | None:
+    """Return the canonical three-state quality judgment with legacy fallback."""
+    if paper.status != "completed":
+        return None
+    provenance = (paper.metadata_json or {}).get(FEEDBACK_PROVENANCE_KEY)
+    if isinstance(provenance, dict) and provenance.get("active", True):
+        level = provenance.get("quality_level")
+        if level in QUALITY_LEVELS:
+            return str(level)
+    # A legacy false meant only "not excellent". Map it conservatively to normal,
+    # never to poor, because the old UI could not express that distinction.
+    return "excellent" if paper.is_quality else "normal"
 
 
 def _bounded_text(value: Any, limit: int) -> str | None:
@@ -64,7 +79,7 @@ def _digest(payload: Any) -> str:
 def feedback_payload_hash(
     *,
     interest_level: str,
-    quality: bool,
+    quality_level: str,
     create_node: bool,
     tag_names: list[str],
     node_selections: list[dict[str, Any]],
@@ -73,6 +88,32 @@ def feedback_payload_hash(
     source_brief_item_id: str | None,
 ) -> str:
     """Hash the user-confirmed semantics, not request syntax or generated suggestions."""
+    return _digest(
+        {
+            "interest_level": interest_level,
+            "quality_level": quality_level,
+            "create_node": create_node,
+            "tag_names": sorted({name.strip().casefold() for name in tag_names if name.strip()}),
+            "node_selections": node_selections,
+            "user_attitude": (user_attitude or "").strip(),
+            "personal_comment": (personal_comment or "").strip(),
+            "source_brief_item_id": source_brief_item_id,
+        }
+    )
+
+
+def feedback_payload_hash_v3(
+    *,
+    interest_level: str,
+    quality: bool,
+    create_node: bool,
+    tag_names: list[str],
+    node_selections: list[dict[str, Any]],
+    user_attitude: str | None,
+    personal_comment: str | None,
+    source_brief_item_id: str | None,
+) -> str:
+    """Compatibility hash for feedback written before three-state quality."""
     return _digest(
         {
             "interest_level": interest_level,
@@ -302,6 +343,7 @@ def build_interest_context(session: Session, *, recent_limit: int = 20) -> dict[
                     "neutral_interest": 0,
                     "negative_interest": 0,
                     "positive_quality": 0,
+                    "neutral_quality": 0,
                     "negative_quality": 0,
                     "evidence_count": 0,
                 },
@@ -313,7 +355,12 @@ def build_interest_context(session: Session, *, recent_limit: int = 20) -> dict[
                 "ignored": "negative_interest",
             }[interest_level or "neutral"]
             stat[interest_bucket] += 1
-            stat["positive_quality" if paper.is_quality else "negative_quality"] += 1
+            quality_bucket = {
+                "excellent": "positive_quality",
+                "normal": "neutral_quality",
+                "poor": "negative_quality",
+            }[paper_quality_level(paper) or "normal"]
+            stat[quality_bucket] += 1
     topics = []
     for stat in topic_stats.values():
         support = stat["evidence_count"]
@@ -365,9 +412,13 @@ def build_interest_context(session: Session, *, recent_limit: int = 20) -> dict[
         paper_interest_level(paper) == "interested"
         for paper, _ in completed_recommended
     )
-    quality_hits = sum(paper.is_quality for paper, _ in completed_recommended)
+    quality_hits = sum(
+        paper_quality_level(paper) == "excellent"
+        for paper, _ in completed_recommended
+    )
     joint_hits = sum(
-        paper_interest_level(paper) == "interested" and paper.is_quality
+        paper_interest_level(paper) == "interested"
+        and paper_quality_level(paper) == "excellent"
         for paper, _ in completed_recommended
     )
 
@@ -381,7 +432,12 @@ def build_interest_context(session: Session, *, recent_limit: int = 20) -> dict[
             "interested": 1.0,
         }[paper_interest_level(paper) or "neutral"]
         relevance_error = _score(interest_target, prediction.get("relevance_score"))
-        research_error = _score(paper.is_quality, prediction.get("research_score"))
+        quality_target = {
+            "poor": 0.0,
+            "normal": 0.5,
+            "excellent": 1.0,
+        }[paper_quality_level(paper) or "normal"]
+        research_error = _score(quality_target, prediction.get("research_score"))
         if relevance_error is not None:
             relevance_errors.append(relevance_error)
         if research_error is not None:
@@ -482,7 +538,11 @@ def build_interest_context(session: Session, *, recent_limit: int = 20) -> dict[
                         else "negative_weak"
                     ),
                     "quality": (
-                        "positive" if paper.is_quality else "negative"
+                        {
+                            "excellent": "positive",
+                            "normal": "neutral",
+                            "poor": "negative",
+                        }[paper_quality_level(paper) or "normal"]
                     )
                     if is_completed
                     else "unknown",

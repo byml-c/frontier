@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Literal
 
+from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -30,7 +32,44 @@ class Settings(BaseSettings):
     codex_network_access: bool = True
     # App-server workers are long-lived for the Frontier service lifetime. Each
     # worker serializes turns while keeping multiple Codex threads loaded.
-    codex_app_server_max_workers: int = 2
+    codex_app_server_max_workers: int = Field(default=1, ge=1)
+    # The Codex limit counts spawned threads, not the root Agent. A value of 1
+    # therefore permits at most one subagent at a time on a 2-vCPU host.
+    codex_max_concurrent_subagents: int = Field(default=1, ge=0)
+    codex_subagent_max_depth: int = Field(default=1, ge=0)
+    codex_subagent_job_timeout_seconds: int = Field(default=1800, ge=1)
+    # Serialize root Agent work across background exec runs and interactive
+    # app-server turns. Child-process cgroups provide the hard resource limit.
+    agent_max_concurrent_runs: int = Field(default=1, ge=1)
+    agent_task_timeout_seconds: int = Field(default=10_800, ge=1)
+    agent_interactive_timeout_seconds: int = Field(default=3600, ge=1)
+    agent_app_server_start_timeout_seconds: int = Field(default=30, ge=1)
+    agent_timeout_grace_seconds: int = Field(default=10, ge=1)
+    # `required` is the production-safe mode: a task fails instead of running
+    # without isolation. Local development defaults to `auto` for portability.
+    agent_cgroup_mode: Literal["disabled", "auto", "required"] = "auto"
+    agent_cgroup_root: Path | None = None
+    agent_server_memory_high_bytes: int = Field(default=256 * 1024**2, ge=1)
+    agent_server_memory_max_bytes: int = Field(default=384 * 1024**2, ge=1)
+    agent_server_memory_swap_max_bytes: int = Field(default=64 * 1024**2, ge=0)
+    agent_server_cpu_quota_percent: int = Field(default=50, ge=1)
+    agent_server_tasks_max: int = Field(default=96, ge=1)
+    agent_pool_memory_high_bytes: int = Field(default=640 * 1024**2, ge=1)
+    agent_pool_memory_max_bytes: int = Field(default=768 * 1024**2, ge=1)
+    agent_pool_memory_swap_max_bytes: int = Field(default=0, ge=0)
+    agent_pool_cpu_quota_percent: int = Field(default=100, ge=1)
+    agent_pool_tasks_max: int = Field(default=128, ge=1)
+    agent_memory_high_bytes: int = Field(default=512 * 1024**2, ge=1)
+    agent_memory_max_bytes: int = Field(default=640 * 1024**2, ge=1)
+    agent_memory_swap_max_bytes: int = Field(default=0, ge=0)
+    agent_cpu_quota_percent: int = Field(default=100, ge=1)
+    agent_io_weight: int = Field(default=25, ge=1, le=10_000)
+    agent_io_read_bps: int = Field(default=20 * 1024**2, ge=1)
+    agent_io_write_bps: int = Field(default=10 * 1024**2, ge=1)
+    agent_tasks_max: int = Field(default=96, ge=1)
+    paper_processing_max_concurrency: int = Field(default=1, ge=1)
+    paper_download_max_bytes: int = Field(default=64 * 1024**2, ge=1)
+    paper_text_max_chars: int = Field(default=20_000_000, ge=1)
     translation_env_file: Path = PROJECT_ROOT / "translation.env"
     enable_scheduler: bool = True
     enable_codex_runs: bool = True

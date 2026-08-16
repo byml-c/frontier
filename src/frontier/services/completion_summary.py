@@ -11,28 +11,38 @@ from ..models import Paper
 
 COMPLETION_SUMMARY_METADATA_KEY = "completion_summary_structured"
 COMPLETION_SUMMARY_FIELDS = (
-    "research_question",
-    "evidence_and_contribution",
-    "experiments",
+    "problem",
+    "innovation",
+    "experiment",
     "limitations",
+    "open_questions",
     "user_attitude",
 )
 PUBLIC_COMPLETION_SUMMARY_FIELDS = COMPLETION_SUMMARY_FIELDS[:-1]
 
 _SECTION_TITLES = {
-    "research_question": "研究问题",
-    "evidence_and_contribution": "证据与贡献",
-    "experiments": "实验",
+    "problem": "解决的问题",
+    "innovation": "创新内容",
+    "experiment": "实验结果",
     "limitations": "局限",
+    "open_questions": "未解决问题",
     "user_attitude": "用户态度",
 }
 
 _LEGACY_SECTION_ALIASES = {
-    "research_question": ("研究问题", "解决的问题", "问题定义"),
-    "evidence_and_contribution": ("证据与贡献", "核心贡献", "贡献与证据", "创新内容", "贡献", "创新"),
-    "experiments": ("实验结果", "实验效果", "实验"),
-    "limitations": ("局限与遗留问题", "遗留问题", "局限", "限制"),
+    "problem": ("研究问题", "解决的问题", "问题定义"),
+    "innovation": ("证据与贡献", "核心贡献", "贡献与证据", "创新内容", "贡献", "创新"),
+    "experiment": ("实验结果", "实验效果", "实验"),
+    "limitations": ("局限", "限制"),
+    "open_questions": ("未解决问题", "遗留问题", "开放问题", "后续问题"),
     "user_attitude": ("用户态度", "用户评价", "用户判断", "个人态度"),
+}
+_OLD_STRUCTURED_FIELDS = {
+    "research_question": "problem",
+    "evidence_and_contribution": "innovation",
+    "experiments": "experiment",
+    "limitations": "limitations",
+    "user_attitude": "user_attitude",
 }
 _MARKDOWN_HEADING = re.compile(r"^\s{0,3}#{1,6}\s+(.+?)\s*$")
 
@@ -51,6 +61,10 @@ def completion_summary_structured(
     metadata = paper.metadata_json or {}
     stored = metadata.get(COMPLETION_SUMMARY_METADATA_KEY)
     if isinstance(stored, Mapping):
+        normalized = {
+            _OLD_STRUCTURED_FIELDS.get(str(key), str(key)): value
+            for key, value in stored.items()
+        }
         fields = (
             COMPLETION_SUMMARY_FIELDS
             if include_user_attitude
@@ -59,15 +73,16 @@ def completion_summary_structured(
         return {
             field: value if isinstance(value, str) and value.strip() else None
             for field in fields
-            if (value := stored.get(field)) is None or isinstance(value, str)
+            if (value := normalized.get(field)) is None or isinstance(value, str)
         }
     if include_user_attitude:
         return None
     public_fallback = {
-        "research_question": paper.problem,
-        "evidence_and_contribution": paper.innovation,
-        "experiments": paper.experiment,
+        "problem": paper.problem,
+        "innovation": paper.innovation,
+        "experiment": paper.experiment,
         "limitations": paper.limitations,
+        "open_questions": metadata.get("open_questions"),
     }
     if any(public_fallback.values()):
         return public_fallback
@@ -95,8 +110,13 @@ def render_completion_summary(
 
 def save_completion_summary(paper: Paper, summary: Mapping[str, str]) -> None:
     """Persist one canonical structured summary and keep legacy readers in sync."""
+    normalized = {
+        _OLD_STRUCTURED_FIELDS.get(str(key), str(key)): value
+        for key, value in summary.items()
+    }
+    normalized.setdefault("open_questions", "历史记录未单独记录未解决问题。")
     canonical = {
-        field: summary[field].strip()
+        field: normalized[field].strip()
         for field in COMPLETION_SUMMARY_FIELDS
     }
     paper.metadata_json = {
@@ -137,30 +157,51 @@ def _legacy_sections(content: str) -> dict[str, str]:
 def migrate_legacy_completion_summary(paper: Paper) -> bool:
     """Convert one legacy summary to the canonical editable structure, idempotently."""
     metadata = paper.metadata_json or {}
-    if isinstance(metadata.get(COMPLETION_SUMMARY_METADATA_KEY), Mapping):
-        return False
+    stored = metadata.get(COMPLETION_SUMMARY_METADATA_KEY)
+    if isinstance(stored, Mapping):
+        if all(field in stored for field in COMPLETION_SUMMARY_FIELDS):
+            return False
+        normalized = {
+            _OLD_STRUCTURED_FIELDS.get(str(key), str(key)): value
+            for key, value in stored.items()
+        }
+        canonical = {
+            "problem": normalized.get("problem") or "历史记录未单独记录解决的问题。",
+            "innovation": normalized.get("innovation") or "历史记录未单独记录创新内容。",
+            "experiment": normalized.get("experiment") or "历史记录未单独记录实验结果。",
+            "limitations": normalized.get("limitations") or "历史记录未单独记录局限。",
+            "open_questions": normalized.get("open_questions") or "历史记录未单独记录未解决问题。",
+            "user_attitude": normalized.get("user_attitude") or "历史记录中没有可确认的用户态度。",
+        }
+        paper.metadata_json = {**metadata, COMPLETION_SUMMARY_METADATA_KEY: canonical}
+        paper.completion_summary = render_completion_summary(
+            canonical, include_user_attitude=True
+        )
+        return True
     legacy = (paper.completion_summary or "").strip()
     if not legacy:
         return False
 
     parsed = _legacy_sections(legacy)
-    evidence = (
-        parsed.get("evidence_and_contribution")
+    innovation = (
+        parsed.get("innovation")
         or paper.innovation
         or (legacy if not parsed else None)
     )
     canonical = {
-        "research_question": parsed.get("research_question")
+        "problem": parsed.get("problem")
         or paper.problem
-        or "历史记录未单独记录研究问题。",
-        "evidence_and_contribution": evidence
-        or "历史记录未单独记录证据与贡献。",
-        "experiments": parsed.get("experiments")
+        or "历史记录未单独记录解决的问题。",
+        "innovation": innovation
+        or "历史记录未单独记录创新内容。",
+        "experiment": parsed.get("experiment")
         or paper.experiment
-        or "历史记录未单独记录实验结论。",
+        or "历史记录未单独记录实验结果。",
         "limitations": parsed.get("limitations")
         or paper.limitations
         or "历史记录未单独记录局限。",
+        "open_questions": parsed.get("open_questions")
+        or "历史记录未单独记录未解决问题。",
         "user_attitude": parsed.get("user_attitude")
         or "历史记录中没有可确认的用户态度。",
     }

@@ -30,10 +30,17 @@ def test_app_server_command_uses_configured_profile(monkeypatch) -> None:
 
     assert command[:4] == [
         interactive_stream.settings.codex_command,
+        "--strict-config",
         "--profile",
         "openai",
-        "app-server",
     ]
+    assert "agents.max_concurrent_threads_per_session=1" in command
+    assert "agents.max_depth=1" in command
+    assert "agents.job_max_runtime_seconds=1800" in command
+    assert command.index("app-server") > command.index(
+        "agents.job_max_runtime_seconds=1800"
+    )
+    assert command[-1] == "--stdio"
 
 
 def test_failed_command_is_exposed_as_failed_activity() -> None:
@@ -721,6 +728,70 @@ def test_pooled_run_cancellation_interrupts_only_its_turn(monkeypatch) -> None:
             "params": {"threadId": "thread-1", "turnId": "turn-1"},
         }
     ]
+
+
+def test_cancel_watchdog_kills_worker_when_turn_never_binds(monkeypatch) -> None:
+    class ImmediateTimer:
+        def __init__(self, _seconds, callback) -> None:
+            self.callback = callback
+            self.daemon = False
+
+        def start(self) -> None:
+            self.callback()
+
+        def cancel(self) -> None:
+            return None
+
+    process = _FakeProcess()
+    worker = interactive_stream._CodexAppServerWorker(process)  # type: ignore[arg-type]
+    pool = CodexAppServerPool(max_workers=1)
+    handle = interactive_stream._PooledTurnHandle(worker, pool)
+    stopped: list[object] = []
+    monkeypatch.setattr(interactive_stream.threading, "Timer", ImmediateTimer)
+    monkeypatch.setattr(interactive_stream, "_stop_process", stopped.append)
+    handle.bind_thread("thread-1")
+    handle.mark_turn_requested()
+
+    handle.cancel()
+
+    assert stopped == [process]
+
+
+def test_turn_watchdog_discards_unresponsive_worker(monkeypatch) -> None:
+    class ImmediateTimer:
+        def __init__(self, _seconds, callback) -> None:
+            self.callback = callback
+            self.daemon = False
+
+        def start(self) -> None:
+            self.callback()
+
+        def cancel(self) -> None:
+            return None
+
+    process = _FakeProcess()
+    pool = CodexAppServerPool(max_workers=1)
+    stopped: list[object] = []
+
+    def stop(target) -> None:
+        stopped.append(target)
+        target.alive = False
+
+    def unresponsive_turn(*_args, run_handle, **_kwargs):
+        run_handle.mark_turn_requested()
+        raise CodexStreamError("worker stopped")
+        yield  # pragma: no cover
+
+    monkeypatch.setattr(interactive_stream, "_APP_SERVER_POOL", pool)
+    monkeypatch.setattr(interactive_stream, "_start_process", lambda: process)
+    monkeypatch.setattr(interactive_stream, "_stop_process", stop)
+    monkeypatch.setattr(interactive_stream, "_stream_turn", unresponsive_turn)
+    monkeypatch.setattr(interactive_stream.threading, "Timer", ImmediateTimer)
+
+    with pytest.raises(CodexStreamError, match="wall-clock timeout"):
+        list(interactive_stream.stream_codex_prompt("prompt"))
+
+    assert stopped and pool._workers == []
 
 
 def test_abandoned_stream_discards_worker_with_unfinished_turn(monkeypatch) -> None:

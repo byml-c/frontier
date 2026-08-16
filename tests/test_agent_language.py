@@ -211,10 +211,11 @@ def test_finish_prompt_requires_the_structured_completion_schema() -> None:
 
     assert "completion_summary_structured" in prompt
     for field in (
-        "research_question",
-        "evidence_and_contribution",
-        "experiments",
+        "problem",
+        "innovation",
+        "experiment",
         "limitations",
+        "open_questions",
         "user_attitude",
     ):
         assert f"`{field}`" in prompt
@@ -276,10 +277,11 @@ def test_finish_cli_rejects_english_structured_summary(
             json.dumps(
                 {
                     "completion_summary_structured": {
-                        "research_question": "English-only question",
-                        "evidence_and_contribution": "中文证据。",
-                        "experiments": "中文实验。",
+                        "problem": "English-only question",
+                        "innovation": "中文创新。",
+                        "experiment": "中文实验。",
                         "limitations": "中文局限。",
+                        "open_questions": "中文未解决问题。",
                         "user_attitude": "用户未明确表达。",
                     }
                 }

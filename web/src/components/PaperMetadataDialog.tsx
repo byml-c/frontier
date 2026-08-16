@@ -10,6 +10,7 @@ import {
   Divider,
   Grid,
   Stack,
+  Switch,
   Tab,
   Tabs,
   TextField,
@@ -18,11 +19,12 @@ import {
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useEffect, useState } from "react";
 import { api } from "../api";
-import type { Paper, Tag } from "../types";
+import type { InterestLevel, Paper, QualityLevel, Tag } from "../types";
 import { CompletionSummaryEditor } from "./CompletionSummaryEditor";
 import { completionSummaryDraft, completionSummaryDraftIsComplete, type CompletionSummaryDraft } from "./completionSummary";
 import { Modal } from "./Modal";
 import { normalizeExactName } from "./exactName";
+import { PaperEvaluationSliders } from "./PaperEvaluationSliders";
 import { PaperTagSelector } from "./PaperTagSelector";
 import { ErrorState, Loading } from "./States";
 
@@ -44,9 +46,8 @@ type MetadataForm = {
   innovation: string;
   experiment: string;
   limitations: string;
+  open_questions: string;
   recommendation_reason: string;
-  research_score: string;
-  relevance_score: string;
   metadata_json: string;
 };
 
@@ -68,9 +69,8 @@ const emptyForm: MetadataForm = {
   innovation: "",
   experiment: "",
   limitations: "",
+  open_questions: "",
   recommendation_reason: "",
-  research_score: "",
-  relevance_score: "",
   metadata_json: "{}",
 };
 const metadataCardSx = { p: { xs: .75, sm: 0 }, border: 0, borderRadius: 0, bgcolor: "transparent" };
@@ -94,9 +94,8 @@ function paperToForm(paper: Paper): MetadataForm {
     innovation: paper.innovation || "",
     experiment: paper.experiment || "",
     limitations: paper.limitations || "",
+    open_questions: paper.open_questions || "",
     recommendation_reason: paper.recommendation_reason || "",
-    research_score: paper.research_score == null ? "" : String(paper.research_score),
-    relevance_score: paper.relevance_score == null ? "" : String(paper.relevance_score),
     metadata_json: JSON.stringify(paper.metadata_json ?? {}, null, 2),
   };
 }
@@ -111,11 +110,14 @@ export function PaperMetadataDialog({
   onClose: () => void;
 }) {
   const queryClient = useQueryClient();
-  const [tab, setTab] = useState("summary");
+  const [tab, setTab] = useState("overview");
+  const [readingTab, setReadingTab] = useState("daily");
   const [form, setForm] = useState<MetadataForm>(emptyForm);
   const [selectedTags, setSelectedTags] = useState<string[]>([]);
   const [newTags, setNewTags] = useState<string[]>([]);
   const [summaryDraft, setSummaryDraft] = useState<CompletionSummaryDraft | null>(null);
+  const [interestLevel, setInterestLevel] = useState<InterestLevel>("neutral");
+  const [qualityLevel, setQualityLevel] = useState<QualityLevel>("normal");
   const [dirty, setDirty] = useState(false);
   const [formError, setFormError] = useState("");
   const paper = useQuery({
@@ -140,12 +142,15 @@ export function PaperMetadataDialog({
     setSelectedTags(paper.data.tags.map((tag) => tag.id));
     setNewTags([]);
     setSummaryDraft(completionSummaryDraft(paper.data.completion_summary_structured));
+    setInterestLevel(paper.data.interest_level ?? (paper.data.is_interested ? "interested" : "neutral"));
+    setQualityLevel(paper.data.quality_level ?? (paper.data.is_quality ? "excellent" : "normal"));
+    setReadingTab(paper.data.completion_summary_structured ? "reading" : "daily");
     setFormError("");
     setDirty(false);
   }, [open, paper.data, dirty]);
 
   useEffect(() => {
-    if (open) setTab("summary");
+    if (open) setTab("overview");
   }, [open, paperId]);
 
   const save = useMutation({
@@ -176,9 +181,15 @@ export function PaperMetadataDialog({
           innovation: form.innovation.trim() || null,
           experiment: form.experiment.trim() || null,
           limitations: form.limitations.trim() || null,
+          open_questions: form.open_questions.trim() || null,
           recommendation_reason: form.recommendation_reason.trim() || null,
-          research_score: form.research_score === "" ? null : Number(form.research_score),
-          relevance_score: form.relevance_score === "" ? null : Number(form.relevance_score),
+          ...(paper.data?.status === "completed" && (
+            interestLevel !== (paper.data.interest_level ?? (paper.data.is_interested ? "interested" : "neutral"))
+            || qualityLevel !== (paper.data.quality_level ?? (paper.data.is_quality ? "excellent" : "normal"))
+          ) ? {
+            interest_level: interestLevel,
+            quality_level: qualityLevel,
+          } : {}),
           metadata_json: metadata,
           completion_summary_structured: summaryDraft && completionSummaryDraftIsComplete(summaryDraft) ? summaryDraft : undefined,
           tag_ids: selectedTags,
@@ -224,6 +235,25 @@ export function PaperMetadataDialog({
 
   const suggestedTags = paper.data?.suggested_tags ?? [];
   const summaryComplete = !summaryDraft || completionSummaryDraftIsComplete(summaryDraft);
+  const dailyDraft: CompletionSummaryDraft = {
+    problem: form.problem,
+    innovation: form.innovation,
+    experiment: form.experiment,
+    limitations: form.limitations,
+    open_questions: form.open_questions,
+    user_attitude: "每日分析不推断用户态度；完成精读后由精读 Agent 根据你的笔记与对话整理。",
+  };
+  function updateDailyDraft(value: CompletionSummaryDraft) {
+    setDirty(true);
+    setForm((current) => ({
+      ...current,
+      problem: value.problem,
+      innovation: value.innovation,
+      experiment: value.experiment,
+      limitations: value.limitations,
+      open_questions: value.open_questions,
+    }));
+  }
   function acceptSuggestedTag(name: string) {
     const existing = tags.data?.find(
       (tag) => normalizeExactName(tag.name) === normalizeExactName(name),
@@ -241,17 +271,17 @@ export function PaperMetadataDialog({
       {paper.isLoading ? <Loading label="正在读取论文信息" /> : paper.error ? <ErrorState error={paper.error} /> : (
         <Stack sx={{ width: "100%", height: "100%", minHeight: 0 }}>
           <Tabs value={tab} onChange={(_, value) => setTab(value)} sx={{ flexShrink: 0 }}>
-            <Tab value="summary" label="Agent 总结" />
-            {paper.data?.completion_summary_structured && <Tab value="reading" label="精读结论" />}
+            <Tab value="overview" label="概览" />
+            <Tab value="reading" label="精读" />
             <Tab value="metadata" label="文献信息" />
           </Tabs>
 
           <Box sx={{ flex: 1, minHeight: 0, overflowY: "auto", py: { xs: 1, sm: 2 }, pr: { xs: 0, sm: .5 } }}>
-            {tab === "summary" && (
+            {tab === "overview" && (
               <Stack spacing={{ xs: 1.25, sm: 2 }}>
                 <Stack direction="row" alignItems="center" justifyContent="space-between" gap={1}>
                   <Box sx={{ flex: 1, minWidth: 0 }}>
-                    <Typography variant="h3">Agent 总结</Typography>
+                    <Typography variant="h3">概览</Typography>
                   </Box>
                   <Button
                     size="small"
@@ -278,22 +308,16 @@ export function PaperMetadataDialog({
                       {field("summary", "一句话简介", { multiline: true, minRows: 2 })}
                       {field("agent_comment", "Agent 评语", { multiline: true, minRows: 2 })}
                       {field("recommendation_reason", "推荐理由", { multiline: true, minRows: 3 })}
-                      <Grid container spacing={2}>
-                        <Grid size={{ xs: 12, sm: 6 }}>{field("research_score", "研究价值（0–1）", { type: "number" })}</Grid>
-                        <Grid size={{ xs: 12, sm: 6 }}>{field("relevance_score", "个人相关性（0–1）", { type: "number" })}</Grid>
-                      </Grid>
-                    </Stack>
-                  </CardContent>
-                </Card>
-
-                <Card variant="outlined" sx={metadataCardSx}>
-                  <CardContent>
-                    <Stack spacing={2}>
-                      <Typography variant="h3">研究内容</Typography>
-                      {field("problem", "解决的问题", { multiline: true, minRows: 3 })}
-                      {field("innovation", "创新内容", { multiline: true, minRows: 3 })}
-                      {field("experiment", "实验结果", { multiline: true, minRows: 3 })}
-                      {field("limitations", "局限与遗留问题", { multiline: true, minRows: 3 })}
+                      <PaperEvaluationSliders
+                        researchScore={paper.data?.research_score}
+                        relevanceScore={paper.data?.relevance_score}
+                        qualityLevel={qualityLevel}
+                        interestLevel={interestLevel}
+                        disabled={paper.data?.status !== "completed"}
+                        onQualityChange={(value) => { setQualityLevel(value); setDirty(true); }}
+                        onInterestChange={(value) => { setInterestLevel(value); setDirty(true); }}
+                      />
+                      {paper.data?.status !== "completed" && <Typography variant="caption" color="text.secondary">完成精读并确认结论后，可以编辑“我的评价”。</Typography>}
                     </Stack>
                   </CardContent>
                 </Card>
@@ -310,6 +334,15 @@ export function PaperMetadataDialog({
                       onNewTagsChange={setNewTags}
                       onEdit={() => setDirty(true)}
                     />
+                  </CardContent>
+                </Card>
+
+                <Card variant="outlined" sx={metadataCardSx}>
+                  <CardContent>
+                    <Typography variant="h3">所属节点</Typography>
+                    {paper.data?.nodes.length ? <Stack direction="row" flexWrap="wrap" gap={1} sx={{ mt: 1 }}>
+                      {paper.data.nodes.map((node) => <Chip key={node.id} label={node.name} color="primary" variant="outlined" />)}
+                    </Stack> : <Typography color="text.secondary" sx={{ mt: 1 }}>尚未归入研究节点。</Typography>}
                   </CardContent>
                 </Card>
               </Stack>
@@ -347,12 +380,27 @@ export function PaperMetadataDialog({
               </Card>
             )}
 
-            {tab === "reading" && paper.data?.completion_summary_structured && summaryDraft && (
+            {tab === "reading" && (
               <Card variant="outlined" sx={metadataCardSx}>
                 <CardContent>
+                  <Stack direction="row" justifyContent="flex-end" alignItems="center" spacing={.5} sx={{ mb: 2 }}>
+                    <Typography variant="caption" color={readingTab === "daily" ? "text.primary" : "text.secondary"}>每日分析</Typography>
+                    <Switch
+                      size="small"
+                      checked={readingTab === "reading"}
+                      disabled={!summaryDraft}
+                      inputProps={{ "aria-label": "切换每日分析与精读结论" }}
+                      onChange={(_, checked) => setReadingTab(checked ? "reading" : "daily")}
+                    />
+                    <Typography variant="caption" color={readingTab === "reading" ? "text.primary" : "text.secondary"}>精读结论</Typography>
+                  </Stack>
                   <CompletionSummaryEditor
-                    value={summaryDraft}
-                    onChange={(value) => { setSummaryDraft(value); setDirty(true); }}
+                    value={readingTab === "reading" && summaryDraft ? summaryDraft : dailyDraft}
+                    onChange={readingTab === "reading"
+                      ? (value) => { setSummaryDraft(value); setDirty(true); }
+                      : updateDailyDraft}
+                    disabledFields={readingTab === "daily" ? ["user_attitude"] : []}
+                    required={readingTab === "reading"}
                   />
                 </CardContent>
               </Card>
@@ -362,7 +410,7 @@ export function PaperMetadataDialog({
           {(formError || save.error) && <Alert severity="error" sx={{ mt: 1, flexShrink: 0 }}>{formError || save.error?.message}</Alert>}
           <Stack direction="row" justifyContent="flex-end" spacing={1} sx={{ flexShrink: 0, pt: 2, borderTop: 1, borderColor: "divider" }}>
             <Button onClick={onClose}>取消</Button>
-            <Button variant="contained" disabled={save.isPending || !form.title.trim()} onClick={() => { if (!summaryComplete) { setTab("reading"); setFormError("请补全所有精读总结后再保存。"); return; } setFormError(""); save.mutate(); }}>{save.isPending ? "正在保存…" : "保存"}</Button>
+            <Button variant="contained" disabled={save.isPending || !form.title.trim()} onClick={() => { if (!summaryComplete) { setTab("reading"); setReadingTab("reading"); setFormError("请补全所有精读总结后再保存。"); return; } setFormError(""); save.mutate(); }}>{save.isPending ? "正在保存…" : "保存"}</Button>
           </Stack>
         </Stack>
       )}

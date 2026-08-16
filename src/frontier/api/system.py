@@ -42,7 +42,7 @@ NUMERIC_SETTING_RANGES = {
     "daily_minute": (0, 59),
     "abstract_limit": (1, 50),
     "fulltext_limit": (1, 19),
-    "brief_limit": (1, 9),
+    "brief_limit": (1, 5),
     "featured_limit": (1, 4),
     "candidate_lookback_days": (1, 90),
 }
@@ -63,7 +63,7 @@ def _validate_setting_value(key: str, value: object) -> None:
 
 
 def _validate_setting_relationships(values: dict[str, object]) -> None:
-    if int(values.get("featured_limit", 4)) >= int(values.get("brief_limit", 9)):
+    if int(values.get("featured_limit", 4)) >= int(values.get("brief_limit", 5)):
         raise HTTPException(status_code=422, detail="featured_limit must be below brief_limit")
 
 

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from itertools import pairwise
 from zoneinfo import ZoneInfo
 
@@ -187,12 +187,12 @@ def test_health_and_defaults(client: TestClient) -> None:
     settings = {item["key"]: item["value_json"] for item in client.get("/api/settings").json()}
     assert settings["abstract_limit"] == 50
     assert settings["fulltext_limit"] == 19
-    assert settings["brief_limit"] == 9
+    assert settings["brief_limit"] == 5
     assert settings["featured_limit"] == 4
     assert (
         client.put(
             "/api/settings",
-            json={"brief_limit": 7, "featured_limit": 3},
+            json={"brief_limit": 5, "featured_limit": 4},
         ).status_code
         == 200
     )
@@ -325,10 +325,11 @@ def test_finish_reading_stores_and_serializes_structured_summary(
     )
     assert client.post(f"/api/briefs/{brief['id']}/publish").status_code == 200
     structured = {
-        "research_question": "研究如何提升操作泛化能力 [[page:1]]。",
-        "evidence_and_contribution": "提出统一策略并给出消融证据 [[page:4]]。",
-        "experiments": "在三个基准上进行了实验 [[page:7]]。",
+        "problem": "研究如何提升操作泛化能力 [[page:1]]。",
+        "innovation": "提出统一策略并给出消融证据 [[page:4]]。",
+        "experiment": "在三个基准上进行了实验 [[page:7]]。",
         "limitations": "真实场景覆盖仍然有限 [[page:12]]。",
+        "open_questions": "跨平台迁移仍待验证 [[page:12]]。",
         "user_attitude": "用户对跨平台迁移最感兴趣。",
     }
 
@@ -345,7 +346,7 @@ def test_finish_reading_stores_and_serializes_structured_summary(
     body = response.json()
     assert body["completion_summary_structured"] == structured
     assert body["metadata_json"]["completion_summary_structured"] == structured
-    assert "### 研究问题" in body["completion_summary"]
+    assert "### 解决的问题" in body["completion_summary"]
     assert "### 用户态度" in body["completion_summary"]
     assert "completion_summary_structured" not in body["pending_feedback"]
     assert body["pending_feedback"]["suggested_interested"] is True
@@ -371,10 +372,11 @@ def test_metadata_update_saves_edited_structured_summary_and_preserves_metadata(
     )
     assert seeded.status_code == 200, seeded.text
     edited = {
-        "research_question": "  手动修改后的研究问题。  ",
-        "evidence_and_contribution": "手动修改后的证据与贡献。",
-        "experiments": "手动修改后的实验。",
+        "problem": "  手动修改后的解决问题。  ",
+        "innovation": "手动修改后的创新内容。",
+        "experiment": "手动修改后的实验。",
         "limitations": "手动修改后的局限。",
+        "open_questions": "手动修改后的未解决问题。",
         "user_attitude": "手动修改后的用户态度。",
     }
 
@@ -385,11 +387,11 @@ def test_metadata_update_saves_edited_structured_summary_and_preserves_metadata(
 
     assert response.status_code == 200, response.text
     body = response.json()
-    expected = {**edited, "research_question": edited["research_question"].strip()}
+    expected = {**edited, "problem": edited["problem"].strip()}
     assert body["completion_summary_structured"] == expected
     assert body["metadata_json"]["completion_summary_structured"] == expected
     assert body["metadata_json"]["custom_metadata"] == {"must": "remain"}
-    assert "手动修改后的研究问题" in body["completion_summary"]
+    assert "手动修改后的解决问题" in body["completion_summary"]
     assert "手动修改后的用户态度" in body["completion_summary"]
     assert body["is_interested"] is False
     assert body["is_quality"] is False
@@ -401,10 +403,11 @@ def test_confirm_feedback_saves_user_edited_structured_summary(
     paper = create_paper(client, "Edit completion summary while confirming")
     assert client.post(f"/api/papers/{paper['id']}/finish", json={}).status_code == 200
     edited = {
-        "research_question": "确认时修改的研究问题。",
-        "evidence_and_contribution": "确认时修改的证据与贡献。",
-        "experiments": "确认时修改的实验。",
+        "problem": "确认时修改的解决问题。",
+        "innovation": "确认时修改的创新内容。",
+        "experiment": "确认时修改的实验。",
         "limitations": "确认时修改的局限。",
+        "open_questions": "确认时修改的未解决问题。",
         "user_attitude": "确认时修改的用户态度。",
     }
 
@@ -424,8 +427,39 @@ def test_confirm_feedback_saves_user_edited_structured_summary(
     assert body["is_quality"] is False
     assert body["completion_summary_structured"] == edited
     assert body["metadata_json"]["completion_summary_structured"] == edited
-    assert "确认时修改的研究问题" in body["completion_summary"]
+    assert "确认时修改的解决问题" in body["completion_summary"]
     assert "确认时修改的用户态度" in body["completion_summary"]
+
+
+def test_quality_level_is_three_state_and_can_be_revised_with_interest(
+    client: TestClient,
+) -> None:
+    paper = create_paper(client, "Three-state user evaluation")
+    assert client.post(f"/api/papers/{paper['id']}/finish", json={}).status_code == 200
+
+    confirmed = client.post(
+        f"/api/papers/{paper['id']}/confirm-feedback",
+        json={"interest_level": "neutral", "quality_level": "poor"},
+    )
+    assert confirmed.status_code == 200, confirmed.text
+    assert confirmed.json()["interest_level"] == "neutral"
+    assert confirmed.json()["quality_level"] == "poor"
+    assert confirmed.json()["is_quality"] is False
+
+    revised = client.patch(
+        f"/api/papers/{paper['id']}/metadata",
+        json={"interest_level": "interested", "quality_level": "excellent"},
+    )
+    assert revised.status_code == 200, revised.text
+    body = revised.json()
+    assert body["interest_level"] == "interested"
+    assert body["quality_level"] == "excellent"
+    assert body["is_interested"] is True
+    assert body["is_quality"] is True
+    provenance = body["metadata_json"]["feedback_provenance"]
+    assert provenance["revision"] == 2
+    assert provenance["quality_level"] == "excellent"
+    assert provenance["evidence_key"] == f"paper:{paper['id']}:feedback:2"
 
 
 def test_structured_completion_summary_requires_every_non_blank_section(
@@ -437,10 +471,11 @@ def test_structured_completion_summary_requires_every_non_blank_section(
         f"/api/papers/{paper['id']}/finish",
         json={
             "completion_summary_structured": {
-                "research_question": "研究问题。",
-                "evidence_and_contribution": "证据与贡献。",
-                "experiments": "实验。",
+                "problem": "解决的问题。",
+                "innovation": "创新内容。",
+                "experiment": "实验。",
                 "limitations": "局限。",
+                "open_questions": "未解决问题。",
             }
         },
     )
@@ -448,10 +483,11 @@ def test_structured_completion_summary_requires_every_non_blank_section(
         f"/api/papers/{paper['id']}/finish",
         json={
             "completion_summary_structured": {
-                "research_question": "研究问题。",
-                "evidence_and_contribution": "证据与贡献。",
-                "experiments": "实验。",
+                "problem": "解决的问题。",
+                "innovation": "创新内容。",
+                "experiment": "实验。",
                 "limitations": "局限。",
+                "open_questions": "未解决问题。",
                 "user_attitude": "   ",
             }
         },
@@ -464,10 +500,11 @@ def test_structured_completion_summary_requires_every_non_blank_section(
         f"/api/papers/{paper['id']}/metadata",
         json={
             "completion_summary_structured": {
-                "research_question": "研究问题。",
-                "evidence_and_contribution": "证据与贡献。",
-                "experiments": "实验。",
+                "problem": "解决的问题。",
+                "innovation": "创新内容。",
+                "experiment": "实验。",
                 "limitations": "局限。",
+                "open_questions": "未解决问题。",
             }
         },
     )
@@ -477,10 +514,11 @@ def test_structured_completion_summary_requires_every_non_blank_section(
             "interested": False,
             "quality": False,
             "completion_summary_structured": {
-                "research_question": "研究问题。",
-                "evidence_and_contribution": "证据与贡献。",
-                "experiments": "实验。",
+                "problem": "解决的问题。",
+                "innovation": "创新内容。",
+                "experiment": "实验。",
                 "limitations": "局限。",
+                "open_questions": "未解决问题。",
                 "user_attitude": "   ",
             },
         },
@@ -503,10 +541,11 @@ def test_legacy_completion_summary_is_migrated_to_editable_structure(
     assert response.status_code == 200, response.text
     assert response.json()["completion_summary"] == summary
     structured = response.json()["completion_summary_structured"]
-    assert structured["evidence_and_contribution"] == summary
-    assert structured["research_question"] == "历史记录未单独记录研究问题。"
-    assert structured["experiments"] == "历史记录未单独记录实验结论。"
+    assert structured["innovation"] == summary
+    assert structured["problem"] == "历史记录未单独记录解决的问题。"
+    assert structured["experiment"] == "历史记录未单独记录实验结果。"
     assert structured["limitations"] == "历史记录未单独记录局限。"
+    assert structured["open_questions"] == "历史记录未单独记录未解决问题。"
     assert structured["user_attitude"] == "历史记录中没有可确认的用户态度。"
     assert "overview" not in structured
 
@@ -542,10 +581,11 @@ def test_legacy_markdown_sections_are_migrated_without_losing_content(
 
     assert response.status_code == 200, response.text
     assert response.json()["completion_summary_structured"] == {
-        "research_question": "旧问题。",
-        "evidence_and_contribution": "旧贡献。",
-        "experiments": "旧实验。",
+        "problem": "旧问题。",
+        "innovation": "旧贡献。",
+        "experiment": "旧实验。",
         "limitations": "旧局限。",
+        "open_questions": "历史记录未单独记录未解决问题。",
         "user_attitude": "旧态度。",
     }
 
@@ -763,7 +803,7 @@ def test_graph_and_brief_snapshot(client: TestClient) -> None:
     historical = client.get(f"/api/briefs/{brief['id']}").json()
     historical_paper = historical["items"][0]["paper"]
     assert historical_paper["completion_summary_structured"][
-        "evidence_and_contribution"
+        "innovation"
     ] == "Reading complete after publication."
     assert "Reading complete after publication." in historical_paper[
         "completion_summary"
@@ -878,7 +918,7 @@ def test_brief_publish_drops_papers_that_started_reading_after_ranking(
     assert [item["paper"]["id"] for item in published.json()["items"]] == [eligible["id"]]
 
 
-def test_brief_publish_prewarms_only_first_four_featured_papers(
+def test_brief_accepts_only_top_five_and_prewarms_first_four_featured_papers(
     client: TestClient,
     monkeypatch,
 ) -> None:
@@ -912,7 +952,7 @@ def test_brief_publish_prewarms_only_first_four_featured_papers(
             f"/api/briefs/{brief['id']}/items",
             json={"paper_id": related["id"], "rank": 6, "tier": "related"},
         ).status_code
-        == 200
+        == 409
     )
 
     published = client.post(f"/api/briefs/{brief['id']}/publish")
@@ -1594,11 +1634,12 @@ def test_confirm_feedback_preserves_metadata_tags_when_tag_ids_are_omitted(
     assert [item["name"] for item in confirmed.json()["tags"]] == ["保留标签"]
 
 
-def test_scheduled_daily_is_idempotent(client: TestClient) -> None:
-    from frontier.config import settings
+def test_scheduled_daily_is_idempotent(client: TestClient, monkeypatch) -> None:
     from frontier.scheduler import scheduled_daily
 
-    target = datetime.now(ZoneInfo(settings.timezone)).date().isoformat()
+    target_date = date(2040, 1, 2)
+    target = target_date.isoformat()
+    monkeypatch.setattr("frontier.scheduler.current_research_date", lambda _session: target_date)
     scheduled_daily()
     scheduled_daily()
     tasks = client.get("/api/tasks", params={"limit": 200}).json()

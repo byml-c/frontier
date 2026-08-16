@@ -20,6 +20,7 @@ from ..services.interest_evidence import (
     build_interest_context,
     interest_context_snapshot,
     paper_interest_level,
+    paper_quality_level,
 )
 from ..services.manual_recommendations import (
     current_analysis_state,
@@ -65,6 +66,7 @@ def _paper_snapshot(session: Session, paper: Paper) -> dict:
         "innovation": paper.innovation,
         "experiment": paper.experiment,
         "limitations": paper.limitations,
+        "open_questions": metadata.get("open_questions"),
         "research_score": paper.research_score,
         "relevance_score": paper.relevance_score,
         "recommendation_reason": paper.recommendation_reason,
@@ -109,6 +111,7 @@ def _serialize_brief(session: Session, brief: Brief, *, detail: bool = True) -> 
             ),
             "current_status": paper.status,
             "interest_level": paper_interest_level(paper),
+            "quality_level": paper_quality_level(paper),
             "is_interested": paper.is_interested,
             "is_quality": paper.is_quality,
         }
@@ -253,7 +256,7 @@ def add_brief_item(
             )
         ).all()
     )
-    limit = int(get_setting(session, "brief_limit", 10))
+    limit = min(5, int(get_setting(session, "brief_limit", 5)))
     if current_count >= limit:
         raise HTTPException(status_code=409, detail=f"Brief item limit reached ({limit})")
     featured_count = len(
@@ -261,7 +264,7 @@ def add_brief_item(
             select(BriefItem.id).where(BriefItem.brief_id == brief_id, BriefItem.tier == "featured")
         ).all()
     )
-    featured_limit = int(get_setting(session, "featured_limit", 5))
+    featured_limit = int(get_setting(session, "featured_limit", 4))
     if payload.tier == "featured" and featured_count >= featured_limit:
         raise HTTPException(
             status_code=409, detail=f"Featured item limit reached ({featured_limit})"
@@ -302,6 +305,13 @@ def publish_brief(
     ]
     if not rows:
         raise HTTPException(status_code=409, detail="Cannot publish a brief without unread papers")
+    recommendation_count = sum(item.tier != "manual" for item, _paper in rows)
+    limit = min(5, int(get_setting(session, "brief_limit", 5)))
+    if recommendation_count > limit:
+        raise HTTPException(
+            status_code=409,
+            detail=f"Brief contains more than the top {limit} recommendations",
+        )
     for item, _paper in excluded_rows:
         session.delete(item)
     for item, paper in rows:

@@ -23,7 +23,7 @@ from ..models import (
 )
 from .common import as_json_value
 from .completion_summary import completion_summary_structured
-from .interest_evidence import paper_interest_level
+from .interest_evidence import paper_interest_level, paper_quality_level
 from .paper_conversations import find_paper_conversation
 
 _PAPER_FACT_FIELDS = (
@@ -93,6 +93,8 @@ def _paper_facts(paper: Paper) -> dict[str, Any]:
     return {
         **{field: as_json_value(getattr(paper, field)) for field in _PAPER_FACT_FIELDS},
         "interest_level": paper_interest_level(paper),
+        "quality_level": paper_quality_level(paper),
+        "open_questions": (paper.metadata_json or {}).get("open_questions"),
     }
 
 

@@ -65,10 +65,11 @@ def test_paper_agent_context_composes_existing_state_without_pdf_text(
         save_completion_summary(
             paper,
             {
-                "research_question": "精读研究问题 [[page:1]]",
-                "evidence_and_contribution": "精读贡献 [[page:3]]",
-                "experiments": "精读实验 [[page:5]]",
+                "problem": "精读解决的问题 [[page:1]]",
+                "innovation": "精读创新 [[page:3]]",
+                "experiment": "精读实验 [[page:5]]",
                 "limitations": "精读局限 [[page:8]]",
+                "open_questions": "精读未解决问题 [[page:8]]",
                 "user_attitude": "用户认为值得复现。",
             },
         )

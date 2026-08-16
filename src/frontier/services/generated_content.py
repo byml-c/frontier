@@ -12,6 +12,7 @@ PAPER_ANALYSIS_PROSE_FIELDS = frozenset(
         "innovation",
         "experiment",
         "limitations",
+        "open_questions",
         "recommendation_reason",
         "completion_summary",
     }
@@ -19,11 +20,16 @@ PAPER_ANALYSIS_PROSE_FIELDS = frozenset(
 
 COMPLETION_SUMMARY_PROSE_FIELDS = frozenset(
     {
+        "problem",
+        "innovation",
+        "experiment",
+        "limitations",
+        "open_questions",
+        "user_attitude",
+        # Accepted only as compatibility input while old queued tasks drain.
         "research_question",
         "evidence_and_contribution",
         "experiments",
-        "limitations",
-        "user_attitude",
     }
 )
 

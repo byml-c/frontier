@@ -8,6 +8,7 @@ export type NodeRef = {
 export type Tag = { id: string; name: string; color?: string | null };
 
 export type InterestLevel = "ignored" | "neutral" | "interested";
+export type QualityLevel = "poor" | "normal" | "excellent";
 
 export type SuggestedNode = {
   node_id?: string | null;
@@ -33,10 +34,11 @@ export type NewConfirmedNode = {
 };
 
 export type CompletionSummaryStructured = {
-  research_question?: string | null;
-  evidence_and_contribution?: string | null;
-  experiments?: string | null;
+  problem?: string | null;
+  innovation?: string | null;
+  experiment?: string | null;
   limitations?: string | null;
+  open_questions?: string | null;
   user_attitude?: string | null;
 };
 
@@ -61,11 +63,13 @@ export type Paper = {
   innovation?: string | null;
   experiment?: string | null;
   limitations?: string | null;
+  open_questions?: string | null;
   research_score?: number | null;
   relevance_score?: number | null;
   recommendation_reason?: string | null;
   is_interested: boolean;
   interest_level?: InterestLevel | null;
+  quality_level?: QualityLevel | null;
   is_quality: boolean;
   completion_summary?: string | null;
   completion_summary_structured?: CompletionSummaryStructured | null;
@@ -88,6 +92,7 @@ export type BriefItem = {
   current_status: string;
   is_interested: boolean;
   interest_level?: InterestLevel | null;
+  quality_level?: QualityLevel | null;
   is_quality: boolean;
 };
 

@@ -14,6 +14,7 @@ from sqlalchemy.orm import Session
 from ..config import settings
 from ..database import SessionLocal
 from ..models import Paper
+from .heavy_work import paper_processing_slot
 from .ingest import download_paper_pdf
 
 _conversion_lock = threading.Lock()
@@ -214,6 +215,11 @@ def _estimate_conversion_seconds(page_count: int) -> tuple[int, int]:
 
 
 def _convert_document_task(paper_id: str, force: bool) -> None:
+    with paper_processing_slot():
+        _convert_document_task_serial(paper_id, force)
+
+
+def _convert_document_task_serial(paper_id: str, force: bool) -> None:
     version: str | None = None
     started_at = datetime.now(UTC).isoformat()
     page_count = 0

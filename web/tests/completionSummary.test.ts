@@ -8,17 +8,18 @@ const readerSource = readFileSync(new URL("../src/pages/ReaderPage.tsx", import.
 const metadataSource = readFileSync(new URL("../src/components/PaperMetadataDialog.tsx", import.meta.url), "utf8");
 
 const summary = {
-  research_question: "研究问题",
-  evidence_and_contribution: "证据与贡献",
-  experiments: "实验",
+  problem: "解决的问题",
+  innovation: "创新内容",
+  experiment: "实验结果",
   limitations: "局限",
+  open_questions: "未解决问题",
   user_attitude: "用户很感兴趣",
 };
 
 test("private reading summary keeps all structured sections in order", () => {
   assert.deepEqual(
     completionSummarySections(summary, "private").map(({ key }) => key),
-    ["research_question", "evidence_and_contribution", "experiments", "limitations", "user_attitude"],
+    ["problem", "innovation", "experiment", "limitations", "open_questions", "user_attitude"],
   );
 });
 
@@ -26,7 +27,7 @@ test("public reading summary cannot expose user attitude", () => {
   const sections = completionSummarySections(summary, "public");
   assert.deepEqual(
     sections.map(({ key }) => key),
-    ["research_question", "evidence_and_contribution", "experiments", "limitations"],
+    ["problem", "innovation", "experiment", "limitations", "open_questions"],
   );
   assert.equal(JSON.stringify(sections).includes("用户很感兴趣"), false);
 });
@@ -42,7 +43,7 @@ test("daily replaces brief analysis with the public structured reading summary",
 test("structured summary drafts require every editable section", () => {
   const draft = completionSummaryDraft(summary);
   assert.equal(completionSummaryDraftIsComplete(draft), true);
-  assert.equal(completionSummaryDraftIsComplete(draft && { ...draft, experiments: " " }), false);
+  assert.equal(completionSummaryDraftIsComplete(draft && { ...draft, experiment: " " }), false);
 });
 
 test("generated and metadata reading summaries use the shared editor", () => {
@@ -53,4 +54,18 @@ test("generated and metadata reading summaries use the shared editor", () => {
   assert.doesNotMatch(metadataSource, /paper\.data\?\.completion_summary\b/);
   assert.doesNotMatch(readerSource, /overview: paper\.completion_summary/);
   assert.doesNotMatch(metadataSource + readerSource, /历史精读总结/);
+});
+
+test("paper details default to overview and switch one shared reading editor", () => {
+  assert.match(metadataSource, /label="概览"/);
+  assert.match(metadataSource, /label="精读"/);
+  assert.match(metadataSource, /if \(open\) setTab\("overview"\)/);
+  assert.match(metadataSource, /<Switch/);
+  assert.match(metadataSource, /checked=\{readingTab === "reading"\}/);
+  assert.match(metadataSource, /value=\{readingTab === "reading" && summaryDraft \? summaryDraft : dailyDraft\}/);
+  assert.match(metadataSource, /disabledFields=\{readingTab === "daily" \? \["user_attitude"\] : \[\]\}/);
+  assert.doesNotMatch(metadataSource, /<Tab value="daily"/);
+  assert.match(metadataSource, /<PaperEvaluationSliders/);
+  assert.doesNotMatch(metadataSource, /field\("research_score"/);
+  assert.doesNotMatch(metadataSource, /field\("relevance_score"/);
 });

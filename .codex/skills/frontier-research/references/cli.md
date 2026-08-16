@@ -23,7 +23,7 @@ uv run frontier paper resources PAPER_ID --kind figure --block-id BLOCK_ID
 uv run frontier paper agent-context PAPER_ID
 uv run frontier paper agent-context PAPER_ID --conversation-id CONVERSATION_ID
 uv run frontier paper context PAPER_ID
-uv run frontier paper finish PAPER_ID --data '{"completion_summary_structured":{"research_question":"... [[page:1]]","evidence_and_contribution":"... [[page:4]]","experiments":"... [[page:7]]","limitations":"... [[page:12]]","user_attitude":"..."},"suggested_interest_level":"interested","suggested_quality":true,"suggested_tags":["VLA"],"suggested_nodes":[{"node_id":"EXISTING_NODE_ID","name":"VLA","core_question":"如何让机器人把视觉与语言理解转化为可泛化的动作策略？","reason":"论文为该问题提供新证据"}]}'
+uv run frontier paper finish PAPER_ID --data '{"completion_summary_structured":{"problem":"... [[page:1]]","innovation":"... [[page:4]]","experiment":"... [[page:7]]","limitations":"... [[page:12]]","open_questions":"... [[page:12]]","user_attitude":"..."},"suggested_interest_level":"interested","suggested_quality_level":"excellent","suggested_tags":["VLA"],"suggested_nodes":[{"node_id":"EXISTING_NODE_ID","name":"VLA","core_question":"如何让机器人把视觉与语言理解转化为可泛化的动作策略？","reason":"论文为该问题提供新证据"}]}'
 ```
 
 `paper list --query` searches the saved library by title, abstract, all authors, primary
@@ -34,7 +34,7 @@ Use the task prompt's `paper agent-context --conversation-id` command only when 
 
 `full_analysis` is the reusable deep-analysis slot. Keep only non-duplicated structures such as claim/evidence items, method components, figure/table indexes, glossary entries, unresolved questions, a schema version, and the source PDF version. Explicit Paper summary fields remain canonical for their respective conclusions; `metadata_json` is not a second paper-knowledge store.
 
-`paper finish` stores the five completion-summary sections structurally. The Server also renders a
+`paper finish` stores the six completion-summary sections structurally. The Server also renders a
 legacy Markdown `completion_summary` for older private clients. `user_attitude` is private and is
 excluded from daily and brief summary payloads.
 

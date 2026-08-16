@@ -71,10 +71,11 @@ def _published_brief(
 
 def _summary(attitude: str) -> dict[str, str]:
     return {
-        "research_question": "研究问题。",
-        "evidence_and_contribution": "证据与贡献。",
-        "experiments": "实验结果。",
+        "problem": "解决的问题。",
+        "innovation": "创新内容。",
+        "experiment": "实验结果。",
         "limitations": "局限。",
+        "open_questions": "未解决问题。",
         "user_attitude": attitude,
     }
 
@@ -139,7 +140,7 @@ def test_confirmed_feedback_is_attributed_and_reused_by_daily_context(
     assert provenance["evidence_key"] == f"paper:{paper['id']}:feedback:1"
     context = client.get("/api/interests/context").json()
     signal = next(item for item in context["recent_feedback"] if item["paper_id"] == paper["id"])
-    assert signal["labels"] == {"interest": "positive", "quality": "negative"}
+    assert signal["labels"] == {"interest": "positive", "quality": "neutral"}
     assert signal["user_attitude"].startswith("用户明确关注")
     assert signal["attribution"]["resolution"] == "explicit"
     assert signal["attribution"]["brief_item_id"] == item["id"]
@@ -149,7 +150,7 @@ def test_confirmed_feedback_is_attributed_and_reused_by_daily_context(
         if item["name"] == tag["name"]
     )
     assert topic["positive_interest"] == 1
-    assert topic["negative_quality"] == 1
+    assert topic["neutral_quality"] == 1
     assert topic["interest_affinity"] == 0.3333
     calibration = context["calibration"]
     assert (
@@ -172,7 +173,7 @@ def test_confirmed_feedback_is_attributed_and_reused_by_daily_context(
     before_research_sum = (before["research_brier_score"] or 0) * before_research_count
     assert calibration["research_prediction_sample_count"] == before_research_count + 1
     assert calibration["research_brier_score"] == pytest.approx(
-        (before_research_sum + 0.36) / (before_research_count + 1), abs=0.0002
+        (before_research_sum + 0.01) / (before_research_count + 1), abs=0.0002
     )
 
     metadata_update = client.patch(
@@ -368,7 +369,7 @@ def test_finish_suggests_nodes_and_confirm_atomically_mounts_them(
         detail = client.get(f"/api/graph/nodes/{node['id']}").json()
         progress = [item for item in detail["progress"] if item["paper_id"] == paper["id"]]
         assert len(progress) == 1
-        assert "证据与贡献" in progress[0]["content"]
+        assert "创新内容" in progress[0]["content"]
 
     repeated = client.post(
         f"/api/papers/{paper['id']}/confirm-feedback", json=payload

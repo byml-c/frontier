@@ -36,10 +36,11 @@ def _paper(client: TestClient) -> dict:
 def test_daily_selection_exposes_only_read_only_share_data(client: TestClient) -> None:
     paper = _paper(client)
     structured = {
-        "research_question": "研究问题 [[page:1]]。",
-        "evidence_and_contribution": "证据与贡献 [[page:2]]。",
-        "experiments": "实验结果 [[page:3]]。",
+        "problem": "解决的问题 [[page:1]]。",
+        "innovation": "创新内容 [[page:2]]。",
+        "experiment": "实验结果 [[page:3]]。",
         "limitations": "局限性 [[page:4]]。",
+        "open_questions": "未解决问题 [[page:4]]。",
         "user_attitude": "用户非常感兴趣，这是私有内容。",
     }
     finished = client.post(
@@ -53,7 +54,7 @@ def test_daily_selection_exposes_only_read_only_share_data(client: TestClient) -
     assert finished.status_code == 200, finished.text
     structured = {
         **structured,
-        "research_question": "用户编辑后的研究问题 [[page:1]]。",
+        "problem": "用户编辑后的问题 [[page:1]]。",
         "user_attitude": "用户编辑后的态度仍然是私有内容。",
     }
     edited = client.patch(
@@ -360,10 +361,11 @@ def test_daily_legacy_fallback_never_uses_private_completion_summary(
     assert "completion_summary" not in public_paper
     assert private_marker not in str(public_paper)
     assert public_paper["completion_summary_structured"] == {
-        "research_question": "旧论文的研究问题。",
-        "evidence_and_contribution": "旧论文的证据与贡献。",
-        "experiments": "旧论文的实验。",
+        "problem": "旧论文的研究问题。",
+        "innovation": "旧论文的证据与贡献。",
+        "experiment": "旧论文的实验。",
         "limitations": "旧论文的局限。",
+        "open_questions": "历史记录未单独记录未解决问题。",
     }
 
 

@@ -14,6 +14,18 @@ ExecStart=/opt/frontier/.venv/bin/frontier-server
 Restart=on-failure
 RestartSec=5
 TimeoutStopSec=30
+KillMode=control-group
+# A per-Agent cgroup OOM must not stop the Web service with it.
+OOMPolicy=continue
+# Aggregate protection for a 2-vCPU host with roughly 1.6-2 GiB RAM.
+MemoryHigh=1152M
+MemoryMax=1280M
+MemorySwapMax=64M
+CPUQuota=150%
+IOWeight=50
+TasksMax=256
+# Frontier creates separate server and Agent leaves below this service cgroup.
+Delegate=cpu io memory pids
 UMask=0077
 
 [Install]

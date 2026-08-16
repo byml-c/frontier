@@ -9,7 +9,7 @@ from sqlalchemy import select
 from .agent_runner import enqueue_task, run_task
 from .config import settings
 from .database import SessionLocal
-from .models import TaskRun
+from .models import Brief, TaskRun
 from .services.backup import create_local_git_backup
 from .services.common import get_setting
 from .services.research_day import current_research_date
@@ -19,7 +19,16 @@ scheduler = BackgroundScheduler(timezone=ZoneInfo(settings.timezone))
 
 def scheduled_daily() -> None:
     with SessionLocal() as session:
-        target = current_research_date(session).isoformat()
+        target_date = current_research_date(session)
+        target = target_date.isoformat()
+        published = session.scalar(
+            select(Brief.id).where(
+                Brief.brief_date == target_date,
+                Brief.status == "published",
+            )
+        )
+        if published:
+            return
         existing = session.scalar(
             select(TaskRun).where(
                 TaskRun.kind == "daily_brief",

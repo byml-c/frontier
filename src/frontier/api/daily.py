@@ -97,6 +97,7 @@ def _public_paper(session: Session, paper: Paper) -> dict:
         "innovation": paper.innovation,
         "experiment": paper.experiment,
         "limitations": paper.limitations,
+        "open_questions": (paper.metadata_json or {}).get("open_questions"),
         "recommendation_reason": paper.recommendation_reason,
         "completion_summary_structured": completion_summary_structured(
             paper, include_user_attitude=False

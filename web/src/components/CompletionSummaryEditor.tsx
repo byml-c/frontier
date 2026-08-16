@@ -9,10 +9,14 @@ export function CompletionSummaryEditor({
   value,
   onChange,
   disabled = false,
+  disabledFields = [],
+  required = true,
 }: {
   value: CompletionSummaryDraft;
   onChange: (value: CompletionSummaryDraft) => void;
   disabled?: boolean;
+  disabledFields?: readonly CompletionSummaryField[];
+  required?: boolean;
 }) {
   function update(field: CompletionSummaryField, content: string) {
     onChange({ ...value, [field]: content });
@@ -32,9 +36,9 @@ export function CompletionSummaryEditor({
             minRows={3}
             maxRows={10}
             value={value[field]}
-            disabled={disabled}
-            error={!value[field].trim()}
-            helperText={!value[field].trim() ? "此项不能为空" : "支持 Markdown 和页码引用"}
+            disabled={disabled || disabledFields.includes(field)}
+            error={required && !disabledFields.includes(field) && !value[field].trim()}
+            helperText={required && !disabledFields.includes(field) && !value[field].trim() ? "此项不能为空" : ""}
             onChange={(event) => update(field, event.target.value)}
             inputProps={{ "aria-label": title }}
             sx={{ mt: .75 }}

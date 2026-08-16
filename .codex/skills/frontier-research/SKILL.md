@@ -45,7 +45,7 @@ The `daily_brief` run is the root Agent for the whole daily ingestion workflow. 
 4. Respect current limits exactly: abstract reads, full-text reads, total brief items, and featured items.
 5. Rank research value and personal relevance separately. Apply recency as a decay signal, not a hard daily cutoff.
 6. Download and read full PDF text before making a final recommendation. When text is insufficient, render the relevant PDF page with `paper render-page` and inspect that image.
-7. Record concise analysis: one-line summary, one-line comment, problem, innovation, experiments, limitations, scores, and recommendation reason.
+7. Record concise analysis: one-line summary, one-line comment, problem, innovation, experiment, limitations, open questions, scores, and recommendation reason.
 8. Do not attach daily or candidate papers to the graph. Record probable relevance in paper analysis or recommendation fields until the user completes reading and confirms feedback.
 9. Do not add paper-backed node progress during the daily workflow.
 10. Create one dated brief with the context `source_digest` as `interest_context_digest`, add ranked
@@ -129,11 +129,12 @@ When the user explicitly finishes reading, run this workflow on the same active 
 Then:
 
 1. Synthesize the PDF, annotations, notes, and conversation.
-2. Produce `completion_summary_structured` with separate `research_question`,
-   `evidence_and_contribution`, `experiments`, `limitations`, and `user_attitude` fields. Cite every
-   material paper claim in the first four fields as `[[page:N]]`; infer user attitude only from the
+2. Produce `completion_summary_structured` with separate `problem`, `innovation`, `experiment`,
+   `limitations`, `open_questions`, and `user_attitude` fields. Cite every material paper claim in
+   the first five fields as `[[page:N]]`; infer user attitude only from the
    user's own annotations, notes, or conversation.
-3. Suggest one explicit interest level (`ignored`, `neutral`, or `interested`), paper quality,
+3. Suggest one explicit interest level (`ignored`, `neutral`, or `interested`), one explicit quality
+   level (`poor`, `normal`, or `excellent`),
    tags, and concrete graph-node candidates. Existing-node candidates include the exact node ID;
    new-node candidates include a distinct core research question and paper-specific relationship
    reason.

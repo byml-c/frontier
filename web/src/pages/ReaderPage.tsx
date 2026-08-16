@@ -15,7 +15,7 @@ import ReplayRounded from "@mui/icons-material/ReplayRounded";
 import SearchRounded from "@mui/icons-material/SearchRounded";
 import ZoomInRounded from "@mui/icons-material/ZoomInRounded";
 import ZoomOutRounded from "@mui/icons-material/ZoomOutRounded";
-import { Alert, Box, Button, Chip, CircularProgress, FormControl, IconButton, InputAdornment, MenuItem, Paper as MuiPaper, Select, Stack, Tab, Tabs, TextField, ToggleButton, ToggleButtonGroup, Tooltip, Typography, useMediaQuery, useTheme } from "@mui/material";
+import { Alert, Box, Button, Chip, CircularProgress, FormControl, IconButton, InputAdornment, MenuItem, Paper as MuiPaper, Select, Stack, Tab, Tabs, TextField, Tooltip, Typography, useMediaQuery, useTheme } from "@mui/material";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { FormEvent, useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { Document, Page, pdfjs } from "react-pdf";
@@ -35,6 +35,7 @@ import { MarkdownMessage } from "../components/MarkdownMessage";
 import { MobileConfirmAction } from "../components/MobileConfirmAction";
 import { PageHeader } from "../components/PageHeader";
 import { PaperMetadataDialog } from "../components/PaperMetadataDialog";
+import { PaperEvaluationSliders } from "../components/PaperEvaluationSliders";
 import { PaperNotesPanel } from "../components/PaperNotesPanel";
 import { normalizeExactName } from "../components/exactName";
 import { PaperNodeSelector } from "../components/PaperNodeSelector";
@@ -47,7 +48,7 @@ import { TextPaperReader, type TextReaderSelection } from "../components/TextPap
 import { ArchitectureMath } from "../features/architecture/ArchitectureText";
 import { ArchitectureWorkspace, type ArchitectureWorkspaceHandle } from "../features/architecture/ArchitectureWorkspace";
 import type { ArchitectureChatCard, ArchitectureCommand, ArchitectureReaderContext } from "../features/architecture/types";
-import type { AgentRuntimeState, Annotation, ConfirmedNodeLink, Conversation, InterestLevel, Message, NewConfirmedNode, Paper, PaperDocument, ResearchNode, SuggestedNode, Tag } from "../types";
+import type { AgentRuntimeState, Annotation, ConfirmedNodeLink, Conversation, InterestLevel, Message, NewConfirmedNode, Paper, PaperDocument, QualityLevel, ResearchNode, SuggestedNode, Tag } from "../types";
 
 pdfjs.GlobalWorkerOptions.workerSrc = new URL("pdfjs-dist/build/pdf.worker.min.mjs", import.meta.url).toString();
 type SelectionPosition = {
@@ -468,10 +469,18 @@ function suggestedInterestLevel(paper: Paper): InterestLevel {
   return paper.pending_feedback?.suggested_interested ? "interested" : "neutral";
 }
 
+function suggestedQualityLevel(paper: Paper): QualityLevel {
+  const candidate = paper.pending_feedback?.suggested_quality_level;
+  if (candidate === "poor" || candidate === "normal" || candidate === "excellent") {
+    return candidate;
+  }
+  return paper.pending_feedback?.suggested_quality ? "excellent" : "normal";
+}
+
 function FeedbackModal({ open, paper, processing, activities, processError, onClose, onSaved }: { open: boolean; paper: Paper; processing: boolean; activities: AgentActivityItem[]; processError: string; onClose: () => void; onSaved: () => void }) {
   const queryClient = useQueryClient();
   const [interestLevel, setInterestLevel] = useState<InterestLevel>(() => suggestedInterestLevel(paper));
-  const [quality, setQuality] = useState(Boolean(paper.pending_feedback?.suggested_quality));
+  const [qualityLevel, setQualityLevel] = useState<QualityLevel>(() => suggestedQualityLevel(paper));
   const [selected, setSelected] = useState<string[]>([]);
   const [newTags, setNewTags] = useState<string[]>([]);
   const [selectedNodeLinks, setSelectedNodeLinks] = useState<ConfirmedNodeLink[]>([]);
@@ -489,7 +498,7 @@ function FeedbackModal({ open, paper, processing, activities, processError, onCl
   const confirm = useMutation({
     mutationFn: () => api(`/api/papers/${paper.id}/confirm-feedback`, jsonBody({
       interest_level: interestLevel,
-      quality,
+      quality_level: qualityLevel,
       tag_ids: selected,
       new_tags: newTags,
       node_links: selectedNodeLinks,
@@ -513,7 +522,7 @@ function FeedbackModal({ open, paper, processing, activities, processError, onCl
   useEffect(() => {
     if (open && (!wasOpen.current || (wasProcessing.current && !processing))) {
       setInterestLevel(suggestedInterestLevel(paper));
-      setQuality(Boolean(paper.pending_feedback?.suggested_quality));
+      setQualityLevel(suggestedQualityLevel(paper));
       setSelected(paper.tags.map((tag) => tag.id));
       setNewTags([]);
       setSelectedNodeLinks(
@@ -583,21 +592,15 @@ function FeedbackModal({ open, paper, processing, activities, processError, onCl
               {!summaryComplete && <Alert severity="warning">请补全所有精读总结后再保存。</Alert>}
               <Box>
                 <Typography variant="h3" sx={{ mb: 1 }}>你的判断</Typography>
-                <Stack direction={{ xs: "column", sm: "row" }} gap={1} alignItems={{ sm: "center" }}>
-                  <ToggleButtonGroup
-                    exclusive
-                    size="small"
-                    value={interestLevel}
-                    onChange={(_, value: InterestLevel | null) => value && setInterestLevel(value)}
-                    aria-label="兴趣程度"
-                  >
-                    <ToggleButton value="ignored">忽略</ToggleButton>
-                    <ToggleButton value="neutral">一般</ToggleButton>
-                    <ToggleButton value="interested">感兴趣</ToggleButton>
-                  </ToggleButtonGroup>
-                  <Chip clickable aria-pressed={quality} color={quality ? "primary" : "default"} variant={quality ? "filled" : "outlined"} icon={quality ? <CheckRounded /> : undefined} label="优质论文" onClick={() => setQuality((value) => !value)} />
-                </Stack>
-                <Typography variant="caption" color="text.secondary">兴趣判断不会改变已精读状态；“一般”不会作为负兴趣训练。</Typography>
+                <PaperEvaluationSliders
+                  researchScore={paper.research_score}
+                  relevanceScore={paper.relevance_score}
+                  qualityLevel={qualityLevel}
+                  interestLevel={interestLevel}
+                  onQualityChange={setQualityLevel}
+                  onInterestChange={setInterestLevel}
+                />
+                <Typography variant="caption" color="text.secondary">质量与兴趣相互独立；“正常”和“相关”都不会作为负向评价。</Typography>
               </Box>
               <Box>
                 <Typography variant="h3">标签</Typography>
