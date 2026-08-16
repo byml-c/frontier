@@ -4,6 +4,7 @@ import hashlib
 import json
 import logging
 import threading
+from collections import deque
 from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
@@ -17,8 +18,14 @@ from ..models import Paper
 from .heavy_work import paper_processing_slot
 from .ingest import download_paper_pdf
 
+_DOCUMENT_CONVERSION_QUEUE_LIMIT = 32
+_DOCUMENT_WORKER_SHUTDOWN_TIMEOUT_SECONDS = 2.0
 _conversion_lock = threading.Lock()
+_conversion_condition = threading.Condition(_conversion_lock)
 _converting: set[str] = set()
+_conversion_queue: deque[tuple[str, bool]] = deque()
+_conversion_worker: threading.Thread | None = None
+_conversion_worker_stopping = False
 # Increment whenever cached reader output semantics change. Old caches and old
 # worker statuses then become stale and are rebuilt lazily on the next access.
 DOCUMENT_SCHEMA_VERSION = 9
@@ -75,8 +82,12 @@ def document_status(session: Session, paper: Paper) -> dict[str, Any]:
             return payload
     if status_path.exists():
         status = json.loads(status_path.read_text(encoding="utf-8"))
-        if status.get("status") == "failed" and _document_payload_is_current(status, version):
-            return status
+        if status.get("status") == "failed" and _document_payload_is_current(
+            status,
+            version,
+            allow_missing_version=bool(status.get("retryable")),
+        ):
+            return {**status, "version": version}
         if (
             status.get("status") == "processing"
             and _document_payload_is_current(status, version, allow_missing_version=True)
@@ -88,116 +99,145 @@ def document_status(session: Session, paper: Paper) -> dict[str, Any]:
 
 
 def queue_document_conversion(paper_id: str, *, force: bool = False) -> bool:
-    with _conversion_lock:
+    now = datetime.now(UTC).isoformat()
+    with _conversion_condition:
         if paper_id in _converting:
             return False
+        if not _ensure_conversion_worker_locked():
+            _write_conversion_rejection(
+                paper_id,
+                now,
+                "文档转换 worker 正在关闭或启动失败，请稍后重试",
+            )
+            return False
+        if len(_conversion_queue) >= _DOCUMENT_CONVERSION_QUEUE_LIMIT:
+            _write_conversion_rejection(
+                paper_id,
+                now,
+                "文档转换队列已满，请稍后重试",
+            )
+            return False
         _converting.add(paper_id)
-    # Persist the queued state before starting the worker. The API may be polled
-    # again before the thread opens the PDF; without this timestamp the UI looked
-    # permanently frozen at its local 3% placeholder.
-    now = datetime.now(UTC).isoformat()
-    _write_status(
-        paper_id,
-        {
-            "paper_id": paper_id,
-            "schema_version": DOCUMENT_SCHEMA_VERSION,
-            "status": "processing",
-            "phase": "queued",
-            "phase_label": "等待转换任务启动",
-            "progress": 1,
-            "stage": 0,
-            "stage_count": 4,
-            "started_at": now,
-            "updated_at": now,
-        },
-    )
-    thread = threading.Thread(
-        target=_convert_document_task,
-        args=(paper_id, force),
-        name=f"document-reader-{paper_id[:8]}",
-        daemon=True,
-    )
-    try:
-        thread.start()
-    except Exception as exc:
-        with _conversion_lock:
-            _converting.discard(paper_id)
-        _write_status(
-            paper_id,
-            {
-                "paper_id": paper_id,
-                "schema_version": DOCUMENT_SCHEMA_VERSION,
-                "status": "failed",
-                "started_at": now,
-                "error": f"转换任务启动失败：{exc}",
-                "updated_at": datetime.now(UTC).isoformat(),
-            },
-        )
-        logger.exception("Failed to start document conversion thread for %s", paper_id)
-        return False
-    return True
-
-
-def queue_document_conversions(paper_ids: list[str], *, limit: int = 4) -> list[str]:
-    """Queue a small paper batch on one worker to protect low-resource servers."""
-    unique_ids = list(dict.fromkeys(paper_ids))[: max(0, limit)]
-    claimed: list[str] = []
-    with _conversion_lock:
-        for paper_id in unique_ids:
-            if paper_id not in _converting:
-                _converting.add(paper_id)
-                claimed.append(paper_id)
-    if not claimed:
-        return []
-
-    now = datetime.now(UTC).isoformat()
-    for paper_id in claimed:
-        _write_status(
-            paper_id,
-            {
-                "paper_id": paper_id,
-                "schema_version": DOCUMENT_SCHEMA_VERSION,
-                "status": "processing",
-                "phase": "queued",
-                "phase_label": "等待每日推荐文本缓存",
-                "progress": 1,
-                "stage": 0,
-                "stage_count": 4,
-                "started_at": now,
-                "updated_at": now,
-            },
-        )
-
-    def convert_batch() -> None:
-        for paper_id in claimed:
-            _convert_document_task(paper_id, False)
-
-    thread = threading.Thread(
-        target=convert_batch,
-        name="document-reader-featured",
-        daemon=True,
-    )
-    try:
-        thread.start()
-    except Exception as exc:
-        with _conversion_lock:
-            for paper_id in claimed:
-                _converting.discard(paper_id)
-        for paper_id in claimed:
+        try:
             _write_status(
                 paper_id,
                 {
                     "paper_id": paper_id,
                     "schema_version": DOCUMENT_SCHEMA_VERSION,
-                    "status": "failed",
+                    "status": "processing",
+                    "phase": "queued",
+                    "phase_label": "等待转换任务启动",
+                    "progress": 1,
+                    "stage": 0,
+                    "stage_count": 4,
                     "started_at": now,
-                    "error": f"每日推荐文本缓存启动失败：{exc}",
-                    "updated_at": datetime.now(UTC).isoformat(),
+                    "updated_at": now,
                 },
             )
-        logger.exception("Failed to start featured document conversion batch")
-        return []
-    return claimed
+        except Exception:
+            _converting.discard(paper_id)
+            raise
+        _conversion_queue.append((paper_id, force))
+        _conversion_condition.notify()
+    return True
+
+
+def queue_document_conversions(paper_ids: list[str], *, limit: int = 4) -> list[str]:
+    """Queue a bounded paper batch on the single document worker."""
+    unique_ids = list(dict.fromkeys(paper_ids))[: max(0, limit)]
+    return [paper_id for paper_id in unique_ids if queue_document_conversion(paper_id)]
+
+
+def shutdown_document_worker(
+    *, wait_seconds: float = _DOCUMENT_WORKER_SHUTDOWN_TIMEOUT_SECONDS
+) -> None:
+    """Stop accepting work, fail queued jobs, and briefly join the fixed worker."""
+    global _conversion_worker_stopping
+
+    with _conversion_condition:
+        _conversion_worker_stopping = True
+        worker = _conversion_worker
+        pending = list(_conversion_queue)
+        _conversion_queue.clear()
+        for paper_id, _force in pending:
+            _converting.discard(paper_id)
+        _conversion_condition.notify_all()
+
+    try:
+        stopped_at = datetime.now(UTC).isoformat()
+        for paper_id, _force in pending:
+            try:
+                _write_status(
+                    paper_id,
+                    {
+                        "paper_id": paper_id,
+                        "schema_version": DOCUMENT_SCHEMA_VERSION,
+                        "status": "failed",
+                        "retryable": True,
+                        "error": "服务正在关闭，排队中的文档转换已中断，请稍后重试",
+                        "updated_at": stopped_at,
+                    },
+                )
+            except OSError:
+                logger.exception("Failed to persist shutdown state for %s", paper_id)
+    finally:
+        if worker is not None and worker is not threading.current_thread():
+            worker.join(timeout=max(0.0, wait_seconds))
+
+
+def _ensure_conversion_worker_locked() -> bool:
+    global _conversion_worker, _conversion_worker_stopping
+
+    if _conversion_worker is not None and _conversion_worker.is_alive():
+        return not _conversion_worker_stopping
+    _conversion_worker = None
+    _conversion_worker_stopping = False
+    worker = threading.Thread(
+        target=_document_conversion_worker_loop,
+        name="document-reader-worker",
+        daemon=True,
+    )
+    try:
+        worker.start()
+    except Exception:
+        logger.exception("Failed to start the document conversion worker")
+        return False
+    _conversion_worker = worker
+    return True
+
+
+def _document_conversion_worker_loop() -> None:
+    global _conversion_worker
+
+    try:
+        while True:
+            with _conversion_condition:
+                while not _conversion_queue and not _conversion_worker_stopping:
+                    _conversion_condition.wait()
+                if _conversion_worker_stopping:
+                    return
+                paper_id, force = _conversion_queue.popleft()
+            _convert_document_task(paper_id, force)
+    finally:
+        with _conversion_condition:
+            if _conversion_worker is threading.current_thread():
+                _conversion_worker = None
+            _conversion_condition.notify_all()
+
+
+def _write_conversion_rejection(paper_id: str, started_at: str, error: str) -> None:
+    _write_status(
+        paper_id,
+        {
+            "paper_id": paper_id,
+            "schema_version": DOCUMENT_SCHEMA_VERSION,
+            "status": "failed",
+            "retryable": True,
+            "started_at": started_at,
+            "error": error,
+            "updated_at": datetime.now(UTC).isoformat(),
+        },
+    )
 
 
 def _write_status(paper_id: str, payload: dict[str, Any]) -> None:

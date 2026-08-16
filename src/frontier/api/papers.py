@@ -21,7 +21,7 @@ from fastapi.responses import FileResponse, StreamingResponse
 from sqlalchemy import Text, and_, case, cast, func, or_, select, update
 from sqlalchemy.orm import Session
 
-from ..agent_runner import build_prompt, enqueue_task, run_task
+from ..agent_runner import build_prompt, enqueue_task
 from ..config import settings
 from ..database import SessionLocal, get_session
 from ..interactive_stream import cancel_codex_run, encode_stream_event
@@ -79,7 +79,7 @@ from ..services.document_resources import RESOURCE_KINDS, structured_document_re
 from ..services.ingest import (
     create_or_update_paper,
     download_paper_pdf,
-    extract_pdf_text,
+    ensure_pdf_text_cache,
     ingest_arxiv,
     ingest_pdf_bytes,
     ingest_url,
@@ -106,6 +106,7 @@ from ..services.paper_agent_context import (
     sync_paper_agent_context,
 )
 from ..services.task_control import ACTIVE_TASK_STATUSES
+from ..services.task_dispatcher import submit_task
 from ..services.translation_provider import stream_translation_prompt
 
 router = APIRouter(prefix="/api/papers", tags=["papers"])
@@ -168,10 +169,12 @@ def _manual_ingest_result(
     analyze: bool,
 ) -> dict:
     brief, _item, task, task_created = stage_manual_recommendation(
-        session, paper, queue_analysis=analyze
+        session,
+        paper,
+        queue_analysis=analyze and settings.enable_codex_runs,
     )
-    if task and task_created and settings.enable_codex_runs:
-        background_tasks.add_task(run_task, task.id)
+    if task and task_created:
+        background_tasks.add_task(submit_task, task.id)
     return {
         "paper": _serialize_paper(session, paper, detail=True),
         "created": created,
@@ -806,10 +809,12 @@ def generate_paper_metadata(
     background_tasks: BackgroundTasks,
     session: Annotated[Session, Depends(get_session)],
 ) -> dict:
+    if not settings.enable_codex_runs:
+        raise HTTPException(status_code=503, detail="Agent 运行已在服务器设置中停用")
     paper = _paper_or_404(session, paper_id)
     task, created = queue_paper_metadata_analysis(session, paper)
-    if created and settings.enable_codex_runs:
-        background_tasks.add_task(run_task, task.id)
+    if created:
+        background_tasks.add_task(submit_task, task.id)
     return {"id": task.id, "status": task.status, "created": created}
 
 
@@ -1266,12 +1271,17 @@ def get_pdf_text(
     paper_id: str,
     session: Annotated[Session, Depends(get_session)],
     force: bool = False,
-) -> dict:
+) -> FileResponse:
     paper = _paper_or_404(session, paper_id)
     try:
-        return extract_pdf_text(session, paper, force=force)
+        cache = ensure_pdf_text_cache(session, paper, force=force)
     except Exception as exc:
         raise HTTPException(status_code=400, detail=f"PDF extraction failed: {exc}") from exc
+    return FileResponse(
+        cache,
+        media_type="application/json",
+        headers={"Cache-Control": "private, no-store"},
+    )
 
 
 @router.get("/{paper_id}/document")
@@ -1283,7 +1293,11 @@ def get_document_reader(
     try:
         status = document_status(session, paper)
         if status.get("status") in {"missing", "processing"}:
-            queue_document_conversion(paper_id)
+            queued = queue_document_conversion(paper_id)
+            if not queued:
+                refreshed = document_status(session, paper)
+                if refreshed.get("status") == "failed":
+                    return refreshed
             return {**status, "status": "processing"}
         return status
     except Exception as exc:
@@ -1297,7 +1311,10 @@ def rebuild_document_reader(
 ) -> dict:
     _paper_or_404(session, paper_id)
     queued = queue_document_conversion(paper_id, force=True)
-    return {"paper_id": paper_id, "status": "processing", "queued": queued}
+    if queued:
+        return {"paper_id": paper_id, "status": "processing", "queued": True}
+    paper = _paper_or_404(session, paper_id)
+    return {**document_status(session, paper), "queued": False}
 
 
 @router.get("/{paper_id}/document/resources")
@@ -1392,7 +1409,7 @@ def translate_selection(
             "target_language": payload.target_language,
         },
     )
-    background_tasks.add_task(run_task, task_id)
+    background_tasks.add_task(submit_task, task_id)
     return {"id": task_id, "status": "queued"}
 
 
@@ -1456,16 +1473,23 @@ def stream_translation(
     session.commit()
 
     def generate():  # type: ignore[no-untyped-def]
-        yield encode_stream_event("meta", cached=False, task_id=task.id)
         content = ""
+        terminal = False
         try:
+            # Keep even the initial protocol event inside the guarded region. A
+            # browser can disconnect immediately after receiving metadata, and
+            # GeneratorExit is not caught by ``except Exception``.
+            yield encode_stream_event("meta", cached=False, task_id=task.id)
             with SessionLocal() as runner_session:
                 running = runner_session.get(TaskRun, task.id)
                 if running:
                     running.status = "running"
                     running.started_at = utcnow()
                     runner_session.commit()
-            for delta in stream_translation_prompt(build_prompt(task)):
+            for delta in stream_translation_prompt(
+                build_prompt(task),
+                timeout_seconds=settings.translation_timeout_seconds,
+            ):
                 content += delta
                 yield encode_stream_event("delta", delta=delta)
             with SessionLocal() as runner_session:
@@ -1486,6 +1510,7 @@ def stream_translation(
                     running.result_json = {"response": content, "cached": False}
                     running.finished_at = utcnow()
                 runner_session.commit()
+            terminal = True
             yield encode_stream_event("done", content=content, cached=False)
         except Exception as exc:  # noqa: BLE001
             with SessionLocal() as runner_session:
@@ -1495,7 +1520,23 @@ def stream_translation(
                     running.error = str(exc)
                     running.finished_at = utcnow()
                     runner_session.commit()
+            terminal = True
             yield encode_stream_event("error", message=str(exc))
+        finally:
+            if not terminal:
+                interruption = "浏览器连接已中断；翻译任务已停止。"
+                with SessionLocal() as runner_session:
+                    running = runner_session.get(TaskRun, task.id)
+                    if running and running.status in {"queued", "running"}:
+                        running.status = "failed"
+                        running.error = interruption
+                        running.result_json = {
+                            **(running.result_json or {}),
+                            "response": content,
+                            "stream_status": "interrupted",
+                        }
+                        running.finished_at = utcnow()
+                        runner_session.commit()
 
     return StreamingResponse(
         generate(),

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import threading
+import time
 from atexit import register
 from collections.abc import Iterator
 from dataclasses import dataclass
@@ -159,6 +160,7 @@ def stream_translation_prompt(
         "Accept": "text/event-stream",
     }
     emitted = False
+    deadline = time.monotonic() + timeout_seconds if timeout_seconds is not None else None
     try:
         request_options = {}
         if timeout_seconds is not None:
@@ -175,21 +177,40 @@ def stream_translation_prompt(
                 raise TranslationProviderError(
                     f"翻译模型请求失败（{response.status_code}）：{body[:500]}"
                 )
-            for line in response.iter_lines():
-                if not line.startswith("data:"):
-                    continue
-                data = line[5:].strip()
-                if not data or data == "[DONE]":
-                    continue
-                try:
-                    event = json.loads(data)
-                    delta = event.get("choices", [{}])[0].get("delta", {}).get("content")
-                except (json.JSONDecodeError, IndexError, AttributeError, TypeError):
-                    continue
-                if isinstance(delta, str) and delta:
+            pending = ""
+            for chunk in response.iter_text():
+                if deadline is not None and time.monotonic() >= deadline:
+                    raise TranslationProviderError(
+                        f"翻译任务超过总时限（{timeout_seconds:g} 秒）"
+                    )
+                pending += chunk
+                lines = pending.split("\n")
+                pending = lines.pop()
+                for line in lines:
+                    delta = _translation_delta(line.rstrip("\r"))
+                    if delta:
+                        emitted = True
+                        yield delta
+            if pending:
+                delta = _translation_delta(pending.rstrip("\r"))
+                if delta:
                     emitted = True
                     yield delta
             if not emitted:
                 raise TranslationProviderError("翻译模型已响应，但没有返回可显示的文本")
     except httpx.HTTPError as exc:
         raise TranslationProviderError(f"无法连接翻译模型：{exc}") from exc
+
+
+def _translation_delta(line: str) -> str | None:
+    if not line.startswith("data:"):
+        return None
+    data = line[5:].strip()
+    if not data or data == "[DONE]":
+        return None
+    try:
+        event = json.loads(data)
+        delta = event.get("choices", [{}])[0].get("delta", {}).get("content")
+    except (json.JSONDecodeError, IndexError, AttributeError, TypeError):
+        return None
+    return delta if isinstance(delta, str) and delta else None

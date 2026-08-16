@@ -4,43 +4,30 @@ from zoneinfo import ZoneInfo
 
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
-from sqlalchemy import select
 
-from .agent_runner import enqueue_task, run_task
 from .config import settings
 from .database import SessionLocal
-from .models import Brief, TaskRun
 from .services.backup import create_local_git_backup
 from .services.common import get_setting
 from .services.research_day import current_research_date
+from .services.task_control import get_or_create_daily_task
+from .services.task_dispatcher import submit_task
 
 scheduler = BackgroundScheduler(timezone=ZoneInfo(settings.timezone))
 
 
 def scheduled_daily() -> None:
+    if not settings.enable_codex_runs:
+        return
     with SessionLocal() as session:
         target_date = current_research_date(session)
-        target = target_date.isoformat()
-        published = session.scalar(
-            select(Brief.id).where(
-                Brief.brief_date == target_date,
-                Brief.status == "published",
-            )
+        claim = get_or_create_daily_task(
+            session,
+            target_date,
+            payload={"trigger": "schedule"},
         )
-        if published:
-            return
-        existing = session.scalar(
-            select(TaskRun).where(
-                TaskRun.kind == "daily_brief",
-                TaskRun.payload_json["date"].as_string() == target,
-                TaskRun.status.in_(["queued", "running", "completed"]),
-            )
-        )
-        if existing:
-            return
-    task_id = enqueue_task("daily_brief", {"date": target, "trigger": "schedule"})
-    if settings.enable_codex_runs:
-        run_task(task_id)
+    if claim.task is not None and claim.task.status == "queued":
+        submit_task(claim.task.id)
 
 
 def configure_jobs() -> None:

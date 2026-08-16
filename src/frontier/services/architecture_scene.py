@@ -116,13 +116,38 @@ def architecture_document_payload(session: Session, paper_id: str) -> dict[str, 
             "currentPdfVersion": _paper_pdf_version(paper),
             "stale": False,
         }
+    generation_task = (
+        session.get(TaskRun, item.generation_task_id) if item.generation_task_id else None
+    )
+    if item.generation_task_id and (
+        generation_task is None or generation_task.status not in {"queued", "running"}
+    ):
+        stale_task_id = item.generation_task_id
+        if generation_task is None:
+            item.status = "ready" if item.scene_json else "failed"
+            item.error = item.error or "关联的架构生成任务不存在"
+        elif generation_task.status == "cancelled":
+            item.status = "ready" if item.scene_json else "missing"
+            item.error = None
+        elif generation_task.status == "completed" and item.scene_json:
+            item.status = "ready"
+            item.error = None
+        else:
+            item.status = "ready" if item.scene_json else "failed"
+            item.error = generation_task.error or item.error or "架构生成任务未提交结果"
+        item.generation_task_id = None
+        if (
+            item.lock_owner_type == "agent"
+            and item.lock_owner_id == stale_task_id
+        ):
+            item.lock_owner_type = None
+            item.lock_owner_id = None
+            item.lock_expires_at = None
+        generation_task = None
     lock_active = refresh_lock(session, item)
     if session.is_modified(item):
         session.commit()
     current_pdf_version = _paper_pdf_version(paper)
-    generation_task = (
-        session.get(TaskRun, item.generation_task_id) if item.generation_task_id else None
-    )
     progress = None
     if generation_task and isinstance(generation_task.result_json, dict):
         candidate = generation_task.result_json.get("architectureProgress")
@@ -183,7 +208,7 @@ def acquire_architecture_lock(
         item.lock_expires_at = datetime.now(UTC) + timedelta(seconds=USER_LOCK_LEASE_SECONDS)
     item.lock_owner_type = owner_type
     item.lock_owner_id = owner_id
-    session.commit()
+    session.flush()
     return item
 
 
@@ -202,7 +227,7 @@ def release_architecture_lock(
         item.lock_owner_type = None
         item.lock_owner_id = None
         item.lock_expires_at = None
-        session.commit()
+        session.flush()
 
 
 def release_agent_lock_for_task(session: Session, task_id: str) -> None:

@@ -15,7 +15,7 @@ import { ErrorState, Loading } from "../../components/States";
 import { ArchitectureNodeCard, ArchitectureNodeCardEditor, type ArchitectureNodeDraft } from "./ArchitectureNodeCard";
 import { ArchitectureReader, type ArchitectureReaderHandle } from "./ArchitectureReader";
 import { parseArchitectureList } from "./architectureText";
-import { isArchitectureScene, type ArchitectureChatCard, type ArchitectureCommand, type ArchitectureDiagnostic, type ArchitectureDocument, type ArchitectureNode, type ArchitectureReaderContext, type ArchitectureScene } from "./types";
+import { architectureOperationIsActive, isArchitectureScene, type ArchitectureChatCard, type ArchitectureCommand, type ArchitectureDiagnostic, type ArchitectureDocument, type ArchitectureNode, type ArchitectureReaderContext, type ArchitectureScene } from "./types";
 
 type Props = {
   paperId: string;
@@ -55,10 +55,13 @@ export const ArchitectureWorkspace = forwardRef<ArchitectureWorkspaceHandle, Pro
   const architecture = useQuery({
     queryKey: ["paper-architecture", paperId],
     queryFn: () => api<ArchitectureDocument>(`/api/papers/${paperId}/architecture`),
-    refetchInterval: (query) => query.state.data?.status === "generating" ? 1500 : false,
+    refetchInterval: (query) => {
+      return architectureOperationIsActive(query.state.data) ? 1500 : false;
+    },
   });
   const document = architecture.data;
   const scene = document?.scene;
+  const architectureActive = architectureOperationIsActive(document);
   documentRef.current = document ?? null;
   selectedRef.current = selected;
   latestDraftRef.current = draft;
@@ -70,9 +73,9 @@ export const ArchitectureWorkspace = forwardRef<ArchitectureWorkspaceHandle, Pro
   }), []);
 
   useEffect(() => {
-    onAgentBusyChange?.(Boolean(document?.status === "generating" || document?.lock?.ownerType === "agent"));
+    onAgentBusyChange?.(architectureActive);
     return () => onAgentBusyChange?.(false);
-  }, [document?.lock?.ownerType, document?.status, onAgentBusyChange]);
+  }, [architectureActive, onAgentBusyChange]);
 
   const generate = useMutation({
     mutationFn: (rebuild: boolean) => api<ArchitectureDocument>(`/api/papers/${paperId}/architecture/generate`, jsonBody({ rebuild })),

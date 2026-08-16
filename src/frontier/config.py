@@ -71,6 +71,7 @@ class Settings(BaseSettings):
     paper_download_max_bytes: int = Field(default=64 * 1024**2, ge=1)
     paper_text_max_chars: int = Field(default=20_000_000, ge=1)
     translation_env_file: Path = PROJECT_ROOT / "translation.env"
+    translation_timeout_seconds: int = Field(default=120, ge=1)
     enable_scheduler: bool = True
     enable_codex_runs: bool = True
     access_password: str = "byml-frontier"

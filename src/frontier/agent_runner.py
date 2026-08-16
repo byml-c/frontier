@@ -5,6 +5,7 @@ import os
 import re
 import subprocess
 import threading
+import time
 from datetime import datetime
 from typing import Any
 from zoneinfo import ZoneInfo
@@ -14,9 +15,18 @@ from sqlalchemy.orm import Session
 
 from .config import PROJECT_ROOT, settings
 from .database import SessionLocal
-from .interactive_stream import _stop_process, register_codex_run, unregister_codex_run
+from .interactive_stream import (
+    _stop_process,
+    evict_idle_codex_app_servers,
+    register_codex_run,
+    stream_codex_prompt,
+    unregister_codex_run,
+)
 from .models import ArchitectureDocument, Brief, Conversation, Message, Paper, TaskRun, utcnow
 from .services.agent_runtime import (
+    AgentSlotCancelled,
+    AgentSlotTimeout,
+    attach_scope_to_process,
     codex_subagent_limit_args,
     create_agent_scope,
     root_agent_slot,
@@ -457,7 +467,12 @@ def _run_translation_task(task_id: str) -> None:
             task.started_at = utcnow()
             prompt = build_prompt(task)
             session.commit()
-        content = "".join(stream_translation_prompt(prompt))
+        content = "".join(
+            stream_translation_prompt(
+                prompt,
+                timeout_seconds=settings.translation_timeout_seconds,
+            )
+        )
         with SessionLocal() as session:
             task = session.get(TaskRun, task_id)
             if not task or task.status == "cancelled":
@@ -529,15 +544,334 @@ def _codex_exec_command(
 def run_task(task_id: str) -> None:
     with SessionLocal() as session:
         task = session.get(TaskRun, task_id)
+        if not task or task.status != "queued":
+            return
         is_translation = bool(task and task.kind == "translate")
+        uses_app_server = bool(
+            task and (task.payload_json or {}).get("conversation_id")
+        )
+        remaining_seconds = _remaining_task_seconds(
+            task, settings.agent_task_timeout_seconds
+        )
+        if not is_translation and remaining_seconds <= 0:
+            _fail_expired_queued_task(session, task)
+            return
     if is_translation:
         _run_translation_task(task_id)
         return
-    with root_agent_slot():
-        _run_codex_task(task_id)
+    if uses_app_server:
+        _run_app_server_task(task_id)
+        return
+
+    def no_longer_queued() -> bool:
+        with SessionLocal() as session:
+            waiting = session.get(TaskRun, task_id)
+            return waiting is None or waiting.status != "queued"
+
+    deadline = time.monotonic() + remaining_seconds
+    try:
+        with root_agent_slot(deadline=deadline, cancelled=no_longer_queued):
+            evict_idle_codex_app_servers()
+            _run_codex_task(
+                task_id,
+                timeout_seconds=max(0.001, deadline - time.monotonic()),
+            )
+    except AgentSlotCancelled:
+        return
+    except AgentSlotTimeout:
+        with SessionLocal() as session:
+            waiting = session.get(TaskRun, task_id)
+            transition = session.execute(
+                update(TaskRun)
+                .where(TaskRun.id == task_id, TaskRun.status == "queued")
+                .values(
+                    status="failed",
+                    error=(
+                        "Agent exceeded the configured wall-clock timeout while "
+                        "waiting for execution capacity."
+                    ),
+                    result_json={
+                        **((waiting.result_json or {}) if waiting else {}),
+                        "termination_reason": "capacity_timeout",
+                    },
+                    finished_at=utcnow(),
+                )
+            )
+            if transition.rowcount == 1:
+                if waiting and waiting.kind in {
+                    "manual_paper_analysis",
+                    "paper_metadata_analysis",
+                }:
+                    set_manual_analysis_state(
+                        session,
+                        waiting,
+                        "failed",
+                        error=(
+                            "Agent exceeded the configured wall-clock timeout while "
+                            "waiting for execution capacity."
+                        ),
+                    )
+                session.commit()
+            else:
+                session.rollback()
 
 
-def _run_codex_task(task_id: str) -> None:
+def _remaining_task_seconds(task: TaskRun, budget_seconds: float) -> float:
+    now = utcnow()
+    created_at = task.created_at
+    if created_at.tzinfo is None:
+        created_at = created_at.replace(tzinfo=now.tzinfo)
+    elapsed = max(0.0, (now - created_at).total_seconds())
+    return max(0.0, budget_seconds - elapsed)
+
+
+def _fail_expired_queued_task(session: Session, task: TaskRun) -> None:
+    error = "Agent exceeded the configured wall-clock timeout while queued."
+    transition = session.execute(
+        update(TaskRun)
+        .where(TaskRun.id == task.id, TaskRun.status == "queued")
+        .values(
+            status="failed",
+            error=error,
+            result_json={
+                **(task.result_json or {}),
+                "termination_reason": "queue_timeout",
+            },
+            finished_at=utcnow(),
+        )
+    )
+    if transition.rowcount != 1:
+        session.rollback()
+        return
+    if task.kind == "architecture_generation":
+        document = session.get(
+            ArchitectureDocument, (task.payload_json or {}).get("paper_id")
+        )
+        if document and document.generation_task_id == task.id:
+            document.status = "ready" if document.scene_json else "failed"
+            document.error = error
+            document.generation_task_id = None
+        release_agent_lock_for_task(session, task.id)
+    elif task.kind in {"manual_paper_analysis", "paper_metadata_analysis"}:
+        set_manual_analysis_state(session, task, "failed", error=error)
+    log_operation(
+        session,
+        actor="system",
+        action="task.failed_queue_timeout",
+        entity_type="task",
+        entity_id=task.id,
+        task_id=task.id,
+    )
+    session.commit()
+
+
+def _run_app_server_task(task_id: str) -> None:
+    """Run a conversation-bound background task through its app-server owner.
+
+    A persisted Codex thread may stay loaded in the app-server between turns. Starting
+    an independent ``codex exec resume`` for that same thread creates two writers and
+    fails immediately. The pool serializes every background turn for that conversation.
+    """
+    with SessionLocal() as session:
+        task = session.get(TaskRun, task_id)
+        if not task or task.status != "queued":
+            return
+        remaining_seconds = _remaining_task_seconds(
+            task, settings.agent_task_timeout_seconds
+        )
+        if remaining_seconds <= 0:
+            _fail_expired_queued_task(session, task)
+            return
+        if task.kind == "graph_maintenance" and not _graph_feedback_is_active(
+            session, task
+        ):
+            task.status = "cancelled"
+            task.finished_at = utcnow()
+            task.result_json = {
+                **(task.result_json or {}),
+                "stream_status": "cancelled",
+            }
+            session.commit()
+            return
+        task.status = "running"
+        task.started_at = utcnow()
+        task_kind = task.kind
+        is_architecture = task_kind == "architecture_generation"
+        log_path = settings.task_dir / f"{task.id}.jsonl"
+        task.log_path = str(log_path)
+        prompt = build_prompt(task)
+        conversation_id = task.payload_json.get("conversation_id")
+        conversation = (
+            session.get(Conversation, conversation_id)
+            if isinstance(conversation_id, str)
+            else None
+        )
+        session_id = conversation.codex_session_id if conversation else None
+        recovery_prompt = (
+            build_conversation_recovery_prompt(session, conversation.id, prompt)
+            if conversation and session_id
+            else None
+        )
+        session.commit()
+
+    response_parts: list[str] = []
+    thread_id = session_id
+    try:
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        with log_path.open("w", encoding="utf-8") as log_file:
+            for event in stream_codex_prompt(
+                prompt,
+                session_id=session_id,
+                recovery_prompt=recovery_prompt,
+                run_id=task_id,
+                timeout_seconds=remaining_seconds,
+            ):
+                log_file.write(json.dumps(event, ensure_ascii=False) + "\n")
+                log_file.flush()
+                if is_architecture:
+                    persist_architecture_progress(task_id, event)
+                if event.get("type") == "thread":
+                    thread_id = str(event["thread_id"])
+                    with SessionLocal() as session:
+                        running = session.get(TaskRun, task_id)
+                        current_conversation = (
+                            session.get(Conversation, conversation_id)
+                            if isinstance(conversation_id, str)
+                            else None
+                        )
+                        if running and running.status == "running":
+                            running.codex_session_id = thread_id
+                            if current_conversation:
+                                current_conversation.codex_session_id = thread_id
+                            session.commit()
+                elif event.get("type") == "delta":
+                    response_parts.append(str(event.get("delta") or ""))
+
+        response = "".join(response_parts)
+        with SessionLocal() as session:
+            task = session.get(TaskRun, task_id)
+            if not task:
+                return
+            if task.status == "cancelled":
+                return
+            document = (
+                session.get(ArchitectureDocument, task.payload_json.get("paper_id"))
+                if is_architecture
+                else None
+            )
+            base_revision = int(task.payload_json.get("base_revision") or 0)
+            completed = not is_architecture or bool(
+                document
+                and document.status == "ready"
+                and document.scene_json
+                and document.revision > base_revision
+            )
+            final_status = "completed" if completed else "failed"
+            final_error = (
+                None
+                if completed
+                else "Agent finished without committing a valid Architecture Scene."
+            )
+            transition = session.execute(
+                update(TaskRun)
+                .where(TaskRun.id == task_id, TaskRun.status == "running")
+                .values(
+                    status=final_status,
+                    error=final_error,
+                    result_json={
+                        **(task.result_json or {}),
+                        "response": response,
+                        "termination_reason": "completed",
+                    },
+                    codex_session_id=thread_id,
+                    finished_at=utcnow(),
+                )
+            )
+            if transition.rowcount != 1:
+                session.rollback()
+                return
+            if (
+                is_architecture
+                and document
+                and document.generation_task_id == task.id
+            ):
+                document.status = (
+                    "ready" if completed or document.scene_json else "failed"
+                )
+                document.error = final_error
+                document.generation_task_id = None
+            if is_architecture:
+                release_agent_lock_for_task(session, task.id)
+            current_conversation = (
+                session.get(Conversation, conversation_id)
+                if isinstance(conversation_id, str)
+                else None
+            )
+            if current_conversation:
+                current_conversation.codex_session_id = (
+                    thread_id or current_conversation.codex_session_id
+                )
+                if task_kind in {"paper_chat", "global_chat", "graph_maintenance"}:
+                    paper_id = (
+                        task.payload_json.get("paper_id") if task_kind == "paper_chat" else None
+                    )
+                    session.add(
+                        Message(
+                            conversation_id=current_conversation.id,
+                            role="assistant",
+                            content=response,
+                            citations_json=_parse_citations(response, paper_id),
+                        )
+                    )
+            log_operation(
+                session,
+                actor="system",
+                action=f"task.{final_status}",
+                entity_type="task",
+                entity_id=task.id,
+                task_id=task.id,
+            )
+            session.commit()
+    except Exception as exc:  # noqa: BLE001 - persist all runner failures for the user
+        with SessionLocal() as session:
+            task = session.get(TaskRun, task_id)
+            if task and task.status != "cancelled":
+                task.status = "failed"
+                task.error = str(exc)
+                task.result_json = {
+                    **(task.result_json or {}),
+                    "response": "".join(response_parts),
+                    "termination_reason": "failed",
+                }
+                task.codex_session_id = thread_id
+                task.finished_at = utcnow()
+                document = (
+                    session.get(ArchitectureDocument, task.payload_json.get("paper_id"))
+                    if is_architecture
+                    else None
+                )
+                if (
+                    is_architecture
+                    and document
+                    and document.generation_task_id == task.id
+                ):
+                    document.status = "ready" if document.scene_json else "failed"
+                    document.error = task.error
+                    document.generation_task_id = None
+                if is_architecture:
+                    release_agent_lock_for_task(session, task.id)
+                log_operation(
+                    session,
+                    actor="system",
+                    action="task.failed",
+                    entity_type="task",
+                    entity_id=task.id,
+                    task_id=task.id,
+                )
+                session.commit()
+
+
+def _run_codex_task(task_id: str, *, timeout_seconds: float | None = None) -> None:
     with SessionLocal() as session:
         task = session.get(TaskRun, task_id)
         if not task or task.status != "queued":
@@ -603,14 +937,17 @@ def _run_codex_task(task_id: str) -> None:
                 bufsize=1,
                 start_new_session=os.name == "posix",
             )
+            attach_scope_to_process(process, scope)
 
             def stop_after_timeout() -> None:
                 if process.poll() is None:
                     timed_out.set()
+                    process._frontier_termination_reason = "timeout"
                     _stop_process(process)
 
+            wall_timeout = timeout_seconds or settings.agent_task_timeout_seconds
             timeout = threading.Timer(
-                settings.agent_task_timeout_seconds,
+                wall_timeout,
                 stop_after_timeout,
             )
             timeout.daemon = True
@@ -630,6 +967,13 @@ def _run_codex_task(task_id: str) -> None:
                         persist_architecture_progress(task_id, event)
                     session_id = session_id or _find_session_id(event)
                 return_code = process.wait()
+                scope.termination_reason = (
+                    "timeout"
+                    if timed_out.is_set()
+                    else "completed"
+                    if return_code == 0
+                    else "process_exit"
+                )
             finally:
                 timeout.cancel()
                 unregister_codex_run(task_id, process)
@@ -644,7 +988,7 @@ def _run_codex_task(task_id: str) -> None:
                         ArchitectureDocument.generation_task_id == task_id
                     )
                 )
-                if document:
+                if document and document.generation_task_id == task.id:
                     document.status = "ready" if document.scene_json else "missing"
                     document.error = None
                     document.generation_task_id = None
@@ -659,12 +1003,23 @@ def _run_codex_task(task_id: str) -> None:
                 )
             final_status = "completed"
             final_error = None
-            final_result = {"response": response}
+            termination_reason = (
+                "timeout"
+                if timed_out.is_set()
+                else "completed"
+                if return_code == 0
+                else "process_exit"
+            )
+            final_result = {
+                "response": response,
+                "termination_reason": termination_reason,
+                "resource_snapshot": scope.last_snapshot,
+            }
             if timed_out.is_set():
                 final_status = "failed"
                 final_error = (
                     "Agent exceeded the configured wall-clock timeout "
-                    f"of {settings.agent_task_timeout_seconds} seconds."
+                    f"of {wall_timeout} seconds."
                 )
             elif return_code != 0:
                 final_status = "failed"
@@ -717,7 +1072,7 @@ def _run_codex_task(task_id: str) -> None:
                 document = session.get(
                     ArchitectureDocument, task.payload_json.get("paper_id")
                 )
-                if document:
+                if document and document.generation_task_id == task.id:
                     if final_status == "failed":
                         document.status = "ready" if document.scene_json else "failed"
                         document.error = final_error
@@ -770,7 +1125,7 @@ def _run_codex_task(task_id: str) -> None:
                     document = session.get(
                         ArchitectureDocument, task.payload_json.get("paper_id")
                     )
-                    if document:
+                    if document and document.generation_task_id == task.id:
                         document.status = "ready" if document.scene_json else "failed"
                         document.error = task.error
                         document.generation_task_id = None

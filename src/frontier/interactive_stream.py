@@ -13,6 +13,8 @@ from typing import Any
 
 from .config import PROJECT_ROOT, settings
 from .services.agent_runtime import (
+    AgentSlotCancelled,
+    AgentSlotTimeout,
     attach_scope_to_process,
     close_process_scope,
     codex_subagent_limit_args,
@@ -28,6 +30,35 @@ class CodexStreamError(RuntimeError):
 
 class CodexRunCancelled(CodexStreamError):
     pass
+
+
+class _RunWaitHandle:
+    """Cancellation target registered before root/pool capacity is acquired."""
+
+    def __init__(self) -> None:
+        self.cancelled = threading.Event()
+        self._target: Any = None
+        self._lock = threading.Lock()
+
+    def cancel(self) -> None:
+        with self._lock:
+            self.cancelled.set()
+            target = self._target
+        _cancel_run_target(target)
+
+    def bind(self, target: Any) -> None:
+        with self._lock:
+            if self.cancelled.is_set():
+                cancelled = True
+            else:
+                self._target = target
+                cancelled = False
+        if cancelled:
+            _cancel_run_target(target)
+            raise CodexRunCancelled("Agent 工作流已由用户中断")
+
+    def is_cancelled(self) -> bool:
+        return self.cancelled.is_set()
 
 
 _ACTIVE_RUNS: dict[str, Any] = {}
@@ -108,7 +139,9 @@ def _environment() -> dict[str, str]:
     return agent_environment()
 
 
-def _stop_process(process: subprocess.Popen[str] | None) -> None:
+def _stop_process(
+    process: subprocess.Popen[str] | None, *, termination_reason: str | None = None
+) -> None:
     if process is None:
         return
     try:
@@ -132,7 +165,15 @@ def _stop_process(process: subprocess.Popen[str] | None) -> None:
                     process.kill()
                 process.wait(timeout=3)
     finally:
-        close_process_scope(process)
+        reason = termination_reason or getattr(process, "_frontier_termination_reason", None)
+        close_process_scope(process, termination_reason=reason)
+
+
+def _stop_process_for_reason(
+    process: subprocess.Popen[str], termination_reason: str
+) -> None:
+    process._frontier_termination_reason = termination_reason
+    _stop_process(process)
 
 
 def _start_process() -> subprocess.Popen[str]:
@@ -203,6 +244,8 @@ class _CodexAppServerWorker:
         self.process = process
         self.busy = False
         self.loaded_threads: dict[str, dict[str, Any]] = {}
+        self.lease_generation = 0
+        self.active_lease_id: int | None = None
         self._write_lock = threading.Lock()
         self._request_lock = threading.Lock()
         self._next_request_id = 2
@@ -251,7 +294,8 @@ class CodexAppServerPool:
         self._condition = threading.Condition()
         self._workers: list[_CodexAppServerWorker] = []
         self._thread_workers: dict[str, _CodexAppServerWorker] = {}
-        self._active_threads: set[str] = set()
+        self._active_threads: dict[str, tuple[_CodexAppServerWorker, int]] = {}
+        self._forgotten_threads: set[str] = set()
         self._starting_workers = 0
         self._closed = False
 
@@ -263,16 +307,23 @@ class CodexAppServerPool:
         worker = self.acquire()
         self.release(worker)
 
-    def acquire(self, thread_id: str | None = None) -> _CodexAppServerWorker:
+    def acquire(
+        self,
+        thread_id: str | None = None,
+        *,
+        deadline: float | None = None,
+        cancelled: threading.Event | None = None,
+    ) -> _CodexAppServerWorker:
         while True:
             should_start = False
             with self._condition:
+                self._raise_if_wait_stopped(deadline, cancelled)
                 if self._closed:
                     raise CodexStreamError("Codex app-server pool is closed")
                 self._discard_dead_workers_locked()
 
                 if thread_id and thread_id in self._active_threads:
-                    self._condition.wait()
+                    self._wait_locked(deadline, cancelled)
                     continue
 
                 affinity_worker = self._thread_workers.get(thread_id) if thread_id else None
@@ -287,7 +338,7 @@ class CodexAppServerPool:
                     self._starting_workers += 1
                     should_start = True
                 else:
-                    self._condition.wait()
+                    self._wait_locked(deadline, cancelled)
 
             if not should_start:
                 continue
@@ -300,16 +351,26 @@ class CodexAppServerPool:
                 raise
             with self._condition:
                 self._starting_workers -= 1
+                try:
+                    self._raise_if_wait_stopped(deadline, cancelled)
+                except (CodexRunCancelled, CodexStreamError) as exc:
+                    self._condition.notify_all()
+                    stop_worker = True
+                    start_error: BaseException | None = exc
+                else:
+                    start_error = None
                 if self._closed:
                     self._condition.notify_all()
                     stop_worker = True
-                else:
+                    start_error = CodexStreamError("Codex app-server pool is closed")
+                elif start_error is None:
                     self._workers.append(worker)
                     self._condition.notify_all()
                     return self._claim_worker_locked(worker, thread_id)
             if stop_worker:
-                _stop_process(worker.process)
-                raise CodexStreamError("Codex app-server pool is closed")
+                _stop_process_for_reason(worker.process, "startup_abandoned")
+                assert start_error is not None
+                raise start_error
 
     def release(
         self,
@@ -318,29 +379,41 @@ class CodexAppServerPool:
         thread_id: str | None = None,
         previous_thread_id: str | None = None,
         discard: bool = False,
+        lease_id: int | None = None,
     ) -> None:
         stop_worker = False
         with self._condition:
+            claimed_lease = worker.active_lease_id if lease_id is None else lease_id
+            if claimed_lease is None or worker.active_lease_id != claimed_lease:
+                self._condition.notify_all()
+                return
             if previous_thread_id:
-                self._active_threads.discard(previous_thread_id)
+                self._discard_active_owner_locked(previous_thread_id, worker, claimed_lease)
             if thread_id:
-                self._active_threads.discard(thread_id)
+                self._discard_active_owner_locked(thread_id, worker, claimed_lease)
             if previous_thread_id and previous_thread_id != thread_id:
                 if self._thread_workers.get(previous_thread_id) is worker:
                     self._thread_workers.pop(previous_thread_id, None)
                 worker.forget_thread(previous_thread_id)
             if worker not in self._workers:
+                worker.active_lease_id = None
+                worker.busy = False
+                self._condition.notify_all()
                 return
             if discard or not worker.alive or self._closed:
-                self._remove_worker_locked(worker)
-                stop_worker = worker.alive
+                self._remove_worker_locked(worker, close_scope=False)
+                stop_worker = True
             else:
-                if thread_id:
+                if thread_id and thread_id not in self._forgotten_threads:
                     self._thread_workers[thread_id] = worker
+                elif thread_id:
+                    worker.forget_thread(thread_id)
+                    self._forgotten_threads.discard(thread_id)
                 worker.busy = False
+                worker.active_lease_id = None
             self._condition.notify_all()
         if stop_worker:
-            _stop_process(worker.process)
+            _stop_process_for_reason(worker.process, "pool_discard")
 
     def shutdown(self) -> None:
         with self._condition:
@@ -349,17 +422,68 @@ class CodexAppServerPool:
             self._workers.clear()
             self._thread_workers.clear()
             self._active_threads.clear()
+            self._forgotten_threads.clear()
             self._condition.notify_all()
         for worker in workers:
-            _stop_process(worker.process)
+            _stop_process_for_reason(worker.process, "pool_shutdown")
 
-    def bind_thread(self, worker: _CodexAppServerWorker, thread_id: str) -> None:
+    def evict_idle_workers(self) -> int:
+        """Release resident app-server memory before a headless batch run."""
+        with self._condition:
+            idle = [worker for worker in self._workers if not worker.busy]
+            for worker in idle:
+                self._remove_worker_locked(worker, close_scope=False)
+            if idle:
+                self._condition.notify_all()
+        for worker in idle:
+            _stop_process_for_reason(worker.process, "batch_capacity_reclaim")
+        return len(idle)
+
+    def forget_thread(self, thread_id: str | None) -> None:
+        """Drop persistent affinity even when its current turn releases later."""
+        if not thread_id:
+            return
+        with self._condition:
+            self._forgotten_threads.add(thread_id)
+            worker = self._thread_workers.pop(thread_id, None)
+            if worker is not None:
+                worker.forget_thread(thread_id)
+            self._condition.notify_all()
+
+    def bind_thread(
+        self, worker: _CodexAppServerWorker, thread_id: str, lease_id: int
+    ) -> None:
         """Bind a newly started/resumed thread before its first event is exposed."""
         with self._condition:
-            if worker not in self._workers or self._closed:
+            if (
+                worker not in self._workers
+                or self._closed
+                or worker.active_lease_id != lease_id
+            ):
                 return
-            self._active_threads.add(thread_id)
-            self._thread_workers[thread_id] = worker
+            self._active_threads[thread_id] = (worker, lease_id)
+            if thread_id not in self._forgotten_threads:
+                self._thread_workers[thread_id] = worker
+            else:
+                worker.forget_thread(thread_id)
+
+    def invalidate(
+        self,
+        worker: _CodexAppServerWorker,
+        lease_id: int,
+        *,
+        termination_reason: str,
+    ) -> bool:
+        """Poison exactly one active lease before stopping its worker."""
+        with self._condition:
+            if worker.active_lease_id != lease_id or worker not in self._workers:
+                return False
+            self._remove_worker_locked(worker, close_scope=False)
+            worker.active_lease_id = None
+            worker.busy = False
+            self._condition.notify_all()
+        _stop_process_for_reason(worker.process, termination_reason)
+        return True
 
     def _discard_dead_workers_locked(self) -> None:
         for worker in list(self._workers):
@@ -370,11 +494,15 @@ class CodexAppServerPool:
         self, worker: _CodexAppServerWorker, thread_id: str | None
     ) -> _CodexAppServerWorker:
         worker.busy = True
+        worker.lease_generation += 1
+        worker.active_lease_id = worker.lease_generation
         if thread_id:
-            self._active_threads.add(thread_id)
+            self._active_threads[thread_id] = (worker, worker.active_lease_id)
         return worker
 
-    def _remove_worker_locked(self, worker: _CodexAppServerWorker) -> None:
+    def _remove_worker_locked(
+        self, worker: _CodexAppServerWorker, *, close_scope: bool = True
+    ) -> None:
         if worker in self._workers:
             self._workers.remove(worker)
         stale_threads = [
@@ -384,7 +512,43 @@ class CodexAppServerPool:
         ]
         for thread_id in stale_threads:
             self._thread_workers.pop(thread_id, None)
-        close_process_scope(worker.process)
+        for thread_id, owner in list(self._active_threads.items()):
+            if owner[0] is worker:
+                self._active_threads.pop(thread_id, None)
+        if close_scope:
+            close_process_scope(worker.process)
+
+    def _discard_active_owner_locked(
+        self,
+        thread_id: str,
+        worker: _CodexAppServerWorker,
+        lease_id: int,
+    ) -> None:
+        if self._active_threads.get(thread_id) == (worker, lease_id):
+            self._active_threads.pop(thread_id, None)
+
+    def _wait_locked(
+        self,
+        deadline: float | None,
+        cancelled: threading.Event | None,
+    ) -> None:
+        self._raise_if_wait_stopped(deadline, cancelled)
+        remaining = None if deadline is None else deadline - time.monotonic()
+        timeout = None if remaining is None and cancelled is None else 0.1
+        if remaining is not None:
+            timeout = min(0.1, max(0.0, remaining))
+        self._condition.wait(timeout=timeout)
+        self._raise_if_wait_stopped(deadline, cancelled)
+
+    @staticmethod
+    def _raise_if_wait_stopped(
+        deadline: float | None,
+        cancelled: threading.Event | None,
+    ) -> None:
+        if cancelled is not None and cancelled.is_set():
+            raise CodexRunCancelled("Agent 工作流已由用户中断")
+        if deadline is not None and time.monotonic() >= deadline:
+            raise CodexStreamError("Agent timed out while waiting for app-server capacity")
 
 
 class _PooledTurnHandle:
@@ -397,6 +561,10 @@ class _PooledTurnHandle:
     ) -> None:
         self.worker = worker
         self.pool = pool
+        active_lease_id = worker.active_lease_id
+        if pool is not None and active_lease_id is None:
+            raise CodexStreamError("Codex app-server worker has no active lease")
+        self.lease_id = active_lease_id or 0
         self.thread_id: str | None = None
         self.turn_id: str | None = None
         self._cancelled = False
@@ -410,8 +578,11 @@ class _PooledTurnHandle:
     def bind_thread(self, thread_id: str) -> None:
         with self._lock:
             self.thread_id = thread_id
+            cancelled = self._cancelled
         if self.pool:
-            self.pool.bind_thread(self.worker, thread_id)
+            self.pool.bind_thread(self.worker, thread_id, self.lease_id)
+            if cancelled:
+                self.pool.forget_thread(thread_id)
 
     def bind_turn(self, turn_id: str) -> None:
         with self._lock:
@@ -445,11 +616,13 @@ class _PooledTurnHandle:
                 )
                 watchdog.daemon = True
                 self._cancel_watchdog = watchdog
+        if watchdog:
+            watchdog.start()
+        if self.pool and thread_id:
+            self.pool.forget_thread(thread_id)
         if should_interrupt:
             assert turn_id is not None
             self._interrupt(thread_id=thread_id, turn_id=turn_id)
-        if watchdog:
-            watchdog.start()
 
     @property
     def reusable(self) -> bool:
@@ -480,7 +653,14 @@ class _PooledTurnHandle:
         with self._lock:
             if self._finished or self._terminal:
                 return
-        _stop_process(self.worker.process)
+        if self.pool:
+            self.pool.invalidate(
+                self.worker,
+                self.lease_id,
+                termination_reason="cancel_watchdog",
+            )
+        else:
+            _stop_process_for_reason(self.worker.process, "cancel_watchdog")
 
     def _claim_interrupt_locked(self) -> bool:
         should_interrupt = bool(
@@ -525,12 +705,36 @@ def stop_codex_app_server_pool() -> None:
     _APP_SERVER_POOL.shutdown()
 
 
+def cancel_all_codex_runs() -> int:
+    """Cancel every registered direct, waiting, or pooled Codex run on shutdown."""
+    with _RUNS_LOCK:
+        targets = list(_ACTIVE_RUNS.values())
+        _ACTIVE_RUNS.clear()
+    for target in targets:
+        _cancel_run_target(target)
+    return len(targets)
+
+
+def forget_codex_thread(thread_id: str | None) -> None:
+    """Forget a Conversation thread that Frontier intentionally abandoned."""
+    _APP_SERVER_POOL.forget_thread(thread_id)
+
+
+def evict_idle_codex_app_servers() -> int:
+    """Evict only app-server workers that do not own an active turn."""
+    return _APP_SERVER_POOL.evict_idle_workers()
+
+
 def _cancel_run_target(target: Any) -> None:
     if target is None:
         return
-    if isinstance(target, _PooledTurnHandle):
+    if isinstance(target, (_PooledTurnHandle, _RunWaitHandle)):
         target.cancel()
     else:
+        try:
+            target._frontier_termination_reason = "cancelled"
+        except (AttributeError, TypeError):
+            pass
         _stop_process(target)
 
 
@@ -1173,56 +1377,88 @@ def stream_codex_prompt(
     reasoning_effort: str | None = None,
     ephemeral: bool = False,
     run_id: str | None = None,
+    timeout_seconds: float | None = None,
 ) -> Iterator[dict[str, Any]]:
-    with root_agent_slot():
-        worker = _APP_SERVER_POOL.acquire(session_id)
-        run_handle = _PooledTurnHandle(worker, _APP_SERVER_POOL)
-        timed_out = threading.Event()
-        finished = threading.Event()
-
-        def stop_after_turn_timeout() -> None:
-            if not finished.is_set() and worker.alive:
-                timed_out.set()
-                _stop_process(worker.process)
-
-        turn_timeout = threading.Timer(
-            settings.agent_interactive_timeout_seconds,
-            stop_after_turn_timeout,
-        )
-        turn_timeout.daemon = True
-        turn_timeout.start()
+    wall_timeout = (
+        settings.agent_interactive_timeout_seconds
+        if timeout_seconds is None
+        else timeout_seconds
+    )
+    deadline = time.monotonic() + wall_timeout
+    run_control = _RunWaitHandle()
+    try:
+        if run_id:
+            register_codex_run(run_id, run_control)
         try:
-            if run_id:
-                register_codex_run(run_id, run_handle)
-            try:
-                yield from _stream_turn(
-                    worker,
-                    prompt,
+            with root_agent_slot(
+                deadline=deadline,
+                cancelled=run_control.is_cancelled,
+            ):
+                worker = _APP_SERVER_POOL.acquire(
                     session_id,
-                    recovery_prompt=recovery_prompt,
-                    reasoning_effort=reasoning_effort,
-                    ephemeral=ephemeral,
-                    run_handle=run_handle,
+                    deadline=deadline,
+                    cancelled=run_control.cancelled,
                 )
-            except CodexStreamError:
-                if timed_out.is_set():
-                    raise CodexStreamError(
-                        "Agent turn exceeded the configured wall-clock timeout "
-                        f"of {settings.agent_interactive_timeout_seconds} seconds"
-                    ) from None
-                raise
-        finally:
-            finished.set()
-            turn_timeout.cancel()
-            reusable = run_handle.reusable
-            if not reusable:
-                run_handle.cancel()
-            run_handle.finish()
-            if run_id:
-                unregister_codex_run(run_id, run_handle)
-            _APP_SERVER_POOL.release(
-                worker,
-                thread_id=run_handle.thread_id,
-                previous_thread_id=session_id,
-                discard=not reusable,
-            )
+                run_handle = _PooledTurnHandle(worker, _APP_SERVER_POOL)
+                timed_out = threading.Event()
+                finished = threading.Event()
+                turn_timeout: threading.Timer | None = None
+
+                def stop_after_turn_timeout() -> None:
+                    if finished.is_set():
+                        return
+                    if _APP_SERVER_POOL.invalidate(
+                        worker,
+                        run_handle.lease_id,
+                        termination_reason="turn_timeout",
+                    ):
+                        timed_out.set()
+
+                try:
+                    run_control.bind(run_handle)
+                    remaining = max(0.001, deadline - time.monotonic())
+                    turn_timeout = threading.Timer(remaining, stop_after_turn_timeout)
+                    turn_timeout.daemon = True
+                    turn_timeout.start()
+                    try:
+                        yield from _stream_turn(
+                            worker,
+                            prompt,
+                            session_id,
+                            recovery_prompt=recovery_prompt,
+                            reasoning_effort=reasoning_effort,
+                            ephemeral=ephemeral,
+                            run_handle=run_handle,
+                        )
+                    except CodexStreamError:
+                        if timed_out.is_set():
+                            raise CodexStreamError(
+                                "Agent turn exceeded the configured wall-clock timeout "
+                                f"of {wall_timeout} seconds"
+                            ) from None
+                        raise
+                finally:
+                    finished.set()
+                    if turn_timeout:
+                        turn_timeout.cancel()
+                    reusable = run_handle.reusable
+                    if not reusable:
+                        run_handle.cancel()
+                    run_handle.finish()
+                    _APP_SERVER_POOL.release(
+                        worker,
+                        thread_id=run_handle.thread_id,
+                        previous_thread_id=session_id,
+                        discard=not reusable,
+                        lease_id=run_handle.lease_id,
+                    )
+        except AgentSlotCancelled as exc:
+            raise CodexRunCancelled("Agent 工作流已由用户中断") from exc
+        except AgentSlotTimeout as exc:
+            raise CodexStreamError(
+                "Agent turn exceeded the configured wall-clock timeout "
+                f"of {wall_timeout} seconds"
+            ) from exc
+    finally:
+        if run_id:
+            unregister_codex_run(run_id, run_control)

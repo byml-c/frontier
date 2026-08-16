@@ -54,6 +54,39 @@ def architecture_progress_updates(
                 "status": "completed",
             }
         )
+    elif event_type == "thread":
+        updates.append(
+            {
+                "id": "agent-startup",
+                "kind": "status",
+                "label": "Agent 已连接",
+                "status": "completed",
+            }
+        )
+        updates.append(
+            {
+                "id": "architecture-analysis",
+                "kind": "reasoning",
+                "label": "正在分析论文架构",
+                "status": "running",
+            }
+        )
+    elif event_type == "activity":
+        status = event.get("status")
+        if status in {"running", "completed", "failed", "cancelled"}:
+            updates.append(
+                {
+                    "id": str(event.get("activity_id") or "architecture-activity"),
+                    "kind": str(event.get("kind") or "status"),
+                    "label": str(event.get("label") or "正在处理论文架构"),
+                    **(
+                        {"detail": _short_progress_text(event["detail"])}
+                        if isinstance(event.get("detail"), str) and event["detail"].strip()
+                        else {}
+                    ),
+                    "status": status,
+                }
+            )
     elif event_type == "turn.started":
         updates.append(
             {

@@ -848,11 +848,10 @@ def test_cancel_retracts_profile_and_removes_paper_backed_graph_state(
     cancelled = client.post(f"/api/papers/{paper['id']}/cancel-reading")
     assert cancelled.status_code == 200, cancelled.text
     assert cancelled.json()["metadata_json"]["feedback_provenance"]["active"] is False
-    stale_task = client.post(
-        "/api/tasks",
-        json={
-            "kind": "graph_maintenance",
-            "payload_json": {
+    with SessionLocal() as session:
+        stale_task = TaskRun(
+            kind="graph_maintenance",
+            payload_json={
                 "context": {
                     "paper_id": paper["id"],
                     "feedback_evidence_key": confirmed["metadata_json"][
@@ -860,14 +859,15 @@ def test_cancel_retracts_profile_and_removes_paper_backed_graph_state(
                     ]["evidence_key"],
                 }
             },
-        },
-    )
-    assert stale_task.status_code == 200, stale_task.text
-    run_task(stale_task.json()["id"])
+        )
+        session.add(stale_task)
+        session.commit()
+        stale_task_id = stale_task.id
+    run_task(stale_task_id)
     guarded_task = next(
         task
         for task in client.get("/api/tasks", params={"limit": 200}).json()
-        if task["id"] == stale_task.json()["id"]
+        if task["id"] == stale_task_id
     )
     assert guarded_task["status"] == "cancelled"
     context = client.get("/api/interests/context").json()
@@ -894,14 +894,13 @@ def test_brief_freezes_interest_context_digest_and_calibration(client: TestClien
 
 
 def test_reused_draft_brief_refreshes_task_and_context_digest(client: TestClient) -> None:
-    first_task = client.post(
-        "/api/tasks",
-        json={"kind": "daily_brief", "payload_json": {"date": "2032-04-01"}},
-    ).json()["id"]
-    second_task = client.post(
-        "/api/tasks",
-        json={"kind": "daily_brief", "payload_json": {"date": "2032-04-01"}},
-    ).json()["id"]
+    with SessionLocal() as session:
+        first_run = TaskRun(kind="daily_brief", payload_json={"date": "2032-04-01"})
+        second_run = TaskRun(kind="daily_brief", payload_json={"date": "2032-04-01"})
+        session.add_all([first_run, second_run])
+        session.commit()
+        first_task = first_run.id
+        second_task = second_run.id
     first = client.post(
         "/api/briefs",
         json={

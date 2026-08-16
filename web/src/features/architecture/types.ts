@@ -139,6 +139,14 @@ export type ArchitectureDocument = {
   stale?: boolean;
 };
 
+export function architectureOperationIsActive(document?: ArchitectureDocument | null): boolean {
+  return Boolean(
+    document?.status === "generating"
+    || document?.taskId
+    || document?.lock?.ownerType === "agent",
+  );
+}
+
 export type ArchitectureCommand =
   | { type: "focus" | "expand" | "collapse"; target: string }
   | { type: "highlight" | "highlight-path"; targets: string[] }

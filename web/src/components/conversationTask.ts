@@ -3,6 +3,15 @@ import type { Conversation, Message } from "../types";
 export type ActiveConversationTask = { id: string; status: "queued" | "running" };
 
 export function activeConversationTask(conversation?: Conversation): ActiveConversationTask | null {
+  if (conversation && "active_task" in conversation) {
+    const authoritative = conversation.active_task;
+    if (
+      authoritative
+      && (authoritative.status === "queued" || authoritative.status === "running")
+      && authoritative.id
+    ) return authoritative;
+    return null;
+  }
   const assistant = [...(conversation?.messages ?? [])]
     .reverse()
     .find((message) => message.role === "assistant");

@@ -11,14 +11,13 @@ from sqlalchemy.orm import Session
 from ..agent_runner import (
     build_conversation_recovery_prompt,
     build_prompt,
-    enqueue_task,
-    run_task,
 )
 from ..config import settings
 from ..database import SessionLocal, get_session
 from ..interactive_stream import encode_stream_event, stream_codex_prompt
 from ..models import AppSetting, Conversation, Memory, OperationLog, Paper, TaskRun, utcnow
 from ..schemas import MemoryCreate, MemoryUpdate, SettingUpdate, TaskCreate
+from ..services.architecture_scene import release_agent_lock_for_task
 from ..services.backup import create_local_git_backup
 from ..services.bootstrap import import_bibtex
 from ..services.common import (
@@ -38,7 +37,12 @@ from ..services.task_control import (
     ACTIVE_TASK_STATUSES,
     active_task_for_conversation,
     cancel_task_run,
+    get_or_create_daily_task,
+    get_or_create_retry_task,
+    serialized_task_claim,
+    task_claim_transaction,
 )
+from ..services.task_dispatcher import submit_task
 from ..services.translation_provider import stream_translation_prompt
 
 router = APIRouter(prefix="/api", tags=["system"])
@@ -284,6 +288,7 @@ def get_task(task_id: str, session: Annotated[Session, Depends(get_session)]) ->
 
 
 @router.post("/tasks/{task_id}/cancel")
+@serialized_task_claim
 def cancel_task(
     task_id: str,
     session: Annotated[Session, Depends(get_session)],
@@ -325,7 +330,6 @@ def _task_payload_with_paper_conversation(
         raise HTTPException(status_code=404, detail="Paper not found")
 
     conversation = get_or_create_paper_conversation(session, paper_id)
-    session.commit()
     if active_task_for_conversation(session, conversation.id):
         raise HTTPException(status_code=409, detail="该论文的 Agent 正在处理另一项任务")
     return {
@@ -354,11 +358,43 @@ def create_task(
     }
     if payload.kind not in allowed:
         raise HTTPException(status_code=400, detail=f"Unsupported task kind: {payload.kind}")
-    task_payload = _task_payload_with_paper_conversation(session, payload)
-    task_id = enqueue_task(payload.kind, task_payload)
-    if payload.kind == "translate" or settings.enable_codex_runs:
-        background_tasks.add_task(run_task, task_id)
-    return {"id": task_id, "status": "queued"}
+    if payload.kind != "translate" and not settings.enable_codex_runs:
+        raise HTTPException(status_code=503, detail="Agent 运行已在服务器设置中停用")
+    if payload.kind == "daily_brief":
+        task_payload = dict(payload.payload_json)
+        raw_date = task_payload.get("date")
+        if raw_date is None:
+            run_date = current_research_date(session)
+        else:
+            try:
+                run_date = date.fromisoformat(str(raw_date))
+            except ValueError as exc:
+                raise HTTPException(
+                    status_code=422,
+                    detail="daily_brief requires an ISO date",
+                ) from exc
+        claim = get_or_create_daily_task(session, run_date, payload=task_payload)
+        if claim.published_brief_id:
+            raise HTTPException(status_code=409, detail="该日期的日报已经发布")
+        assert claim.task is not None
+        if claim.task.status == "queued":
+            background_tasks.add_task(submit_task, claim.task.id)
+        return {"id": claim.task.id, "status": claim.task.status}
+
+    with task_claim_transaction(session):
+        task_payload = _task_payload_with_paper_conversation(session, payload)
+        conversation_id = task_payload.get("conversation_id")
+        if (
+            payload.kind != "finish_reading"
+            and isinstance(conversation_id, str)
+            and active_task_for_conversation(session, conversation_id)
+        ):
+            raise HTTPException(status_code=409, detail="该对话的 Agent 正在处理另一项任务")
+        task = TaskRun(kind=payload.kind, payload_json=task_payload)
+        session.add(task)
+        session.flush()
+    background_tasks.add_task(submit_task, task.id)
+    return {"id": task.id, "status": "queued"}
 
 
 @router.post("/tasks/stream")
@@ -377,26 +413,39 @@ def stream_task(
         raise HTTPException(
             status_code=400, detail=f"Unsupported streaming task kind: {payload.kind}"
         )
-    task_payload = _task_payload_with_paper_conversation(session, payload)
-    task_id = enqueue_task(payload.kind, task_payload)
+    if payload.kind != "translate" and not settings.enable_codex_runs:
+        raise HTTPException(status_code=503, detail="Agent 运行已在服务器设置中停用")
+    with task_claim_transaction(session):
+        task_payload = _task_payload_with_paper_conversation(session, payload)
+        conversation_id = task_payload.get("conversation_id")
+        if (
+            payload.kind != "finish_reading"
+            and isinstance(conversation_id, str)
+            and active_task_for_conversation(session, conversation_id)
+        ):
+            raise HTTPException(status_code=409, detail="该对话的 Agent 正在处理另一项任务")
+        task = TaskRun(kind=payload.kind, payload_json=task_payload)
+        session.add(task)
+        session.flush()
+        task_id = task.id
     conversation_id = (
         task_payload.get("conversation_id") if payload.kind == "finish_reading" else None
     )
 
     def generate():  # type: ignore[no-untyped-def]
-        yield encode_stream_event("meta", task_id=task_id)
-        yield encode_stream_event(
-            "activity",
-            activity_id="agent-startup",
-            kind="status",
-            label="正在启动 Agent",
-            status="running",
-        )
         content = ""
         thread_id = None
         session_id = None
         recovery_prompt = None
         try:
+            yield encode_stream_event("meta", task_id=task_id)
+            yield encode_stream_event(
+                "activity",
+                activity_id="agent-startup",
+                kind="status",
+                label="正在启动 Agent",
+                status="running",
+            )
             if payload.kind != "translate" and not settings.enable_codex_runs:
                 raise RuntimeError("Agent 运行已在服务器设置中停用")
             with SessionLocal() as runner_session:
@@ -423,7 +472,10 @@ def stream_task(
                         )
                 runner_session.commit()
             if payload.kind == "translate":
-                for delta in stream_translation_prompt(prompt):
+                for delta in stream_translation_prompt(
+                    prompt,
+                    timeout_seconds=settings.translation_timeout_seconds,
+                ):
                     content += delta
                     yield encode_stream_event("delta", delta=delta)
             else:
@@ -513,6 +565,21 @@ def stream_task(
                 yield encode_stream_event("cancelled", task_id=task_id)
             else:
                 yield encode_stream_event("error", message=str(exc), task_id=task_id)
+        finally:
+            interruption = "浏览器连接已中断；任务已停止并保留此前生成的内容。"
+            with SessionLocal() as runner_session:
+                running = runner_session.get(TaskRun, task_id)
+                if running and running.status in {"queued", "running"}:
+                    running.status = "failed"
+                    running.error = interruption
+                    running.result_json = {
+                        **(running.result_json or {}),
+                        "response": content,
+                        "stream_status": "interrupted",
+                    }
+                    running.finished_at = utcnow()
+                    release_agent_lock_for_task(runner_session, task_id)
+                    runner_session.commit()
 
     return StreamingResponse(
         generate(),
@@ -537,10 +604,25 @@ def retry_task(
             status_code=409,
             detail="请从论文架构页重新生成，以便先获取最新 revision 和编辑锁",
         )
-    new_id = enqueue_task(old.kind, {**old.payload_json, "retry_of": old.id})
-    if settings.enable_codex_runs:
-        background_tasks.add_task(run_task, new_id)
-    return {"id": new_id, "status": "queued", "retry_of": old.id}
+    if old.kind != "translate" and not settings.enable_codex_runs:
+        raise HTTPException(status_code=503, detail="Agent 运行已在服务器设置中停用")
+    try:
+        claim = get_or_create_retry_task(session, old)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    if claim.published_brief_id:
+        raise HTTPException(status_code=409, detail="该日期的日报已经发布")
+    if claim.conversation_conflict:
+        raise HTTPException(status_code=409, detail="该对话的 Agent 正在处理另一项任务")
+    if claim.task is None:
+        raise HTTPException(status_code=404, detail="Task not found")
+    if claim.task.status == "queued":
+        background_tasks.add_task(submit_task, claim.task.id)
+    return {
+        "id": claim.task.id,
+        "status": claim.task.status,
+        "retry_of": old.id,
+    }
 
 
 @router.post("/tasks/run-daily")
@@ -549,11 +631,16 @@ def run_daily(
     session: Annotated[Session, Depends(get_session)],
     target_date: date | None = None,
 ) -> dict:
+    if not settings.enable_codex_runs:
+        raise HTTPException(status_code=503, detail="Agent 运行已在服务器设置中停用")
     run_date = target_date or current_research_date(session)
-    task_id = enqueue_task("daily_brief", {"date": run_date.isoformat()})
-    if settings.enable_codex_runs:
-        background_tasks.add_task(run_task, task_id)
-    return {"id": task_id, "status": "queued"}
+    claim = get_or_create_daily_task(session, run_date)
+    if claim.published_brief_id:
+        raise HTTPException(status_code=409, detail="该日期的日报已经发布")
+    assert claim.task is not None
+    if claim.task.status == "queued":
+        background_tasks.add_task(submit_task, claim.task.id)
+    return {"id": claim.task.id, "status": claim.task.status}
 
 
 @router.get("/logs")

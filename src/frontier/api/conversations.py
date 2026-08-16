@@ -12,8 +12,6 @@ from ..agent_runner import (
     _parse_citations,
     build_conversation_recovery_prompt,
     build_prompt,
-    enqueue_task,
-    run_task,
 )
 from ..config import settings
 from ..database import SessionLocal, get_session
@@ -24,7 +22,13 @@ from ..services.architecture_scene import release_agent_lock_for_task
 from ..services.common import model_dict
 from ..services.paper_agent_context import paper_agent_context_sync_required
 from ..services.paper_conversations import get_or_create_paper_conversation
-from ..services.task_control import active_task_for_conversation, cancelled_activities
+from ..services.task_control import (
+    active_task_for_conversation,
+    cancelled_activities,
+    serialized_task_claim,
+    task_claim_transaction,
+)
+from ..services.task_dispatcher import submit_task
 
 router = APIRouter(prefix="/api/conversations", tags=["conversations"])
 
@@ -44,6 +48,10 @@ def _serialize(session: Session, conversation: Conversation) -> dict:
         .order_by(Message.created_at)
     ).all()
     payload["messages"] = [model_dict(message) for message in messages]
+    active_task = active_task_for_conversation(session, conversation.id)
+    payload["active_task"] = (
+        {"id": active_task.id, "status": active_task.status} if active_task else None
+    )
     return payload
 
 
@@ -257,44 +265,47 @@ def send_message(
     background_tasks: BackgroundTasks,
     session: Annotated[Session, Depends(get_session)],
 ) -> dict:
-    conversation = _conversation_or_404(session, conversation_id)
-    if active_task_for_conversation(session, conversation.id):
-        raise HTTPException(status_code=409, detail="该对话的 Agent 正在处理另一项任务")
-    context = dict(payload.context_json)
-    if payload.selected_text:
-        context["selected_text"] = payload.selected_text
-    if payload.page_number:
-        context["page_number"] = payload.page_number
-    message = Message(
-        conversation_id=conversation.id,
-        role="user",
-        content=payload.content,
-        context_json=context,
-    )
-    session.add(message)
-    session.commit()
-    task_kind = "paper_chat" if conversation.kind == "paper" else "global_chat"
-    task_payload = {
-        "conversation_id": conversation.id,
-        "message": payload.content,
-        "context": context,
-    }
-    if conversation.kind == "paper":
-        task_payload["paper_id"] = conversation.reference_id
-        paper = session.get(Paper, conversation.reference_id)
-        if paper is not None:
-            task_payload["paper_context_sync_required"] = paper_agent_context_sync_required(
-                session, paper, conversation
-            )
-    task_id = enqueue_task(task_kind, task_payload)
-    message.context_json = {**context, "task_id": task_id}
-    session.commit()
-    if settings.enable_codex_runs:
-        background_tasks.add_task(run_task, task_id)
-    return {"message": model_dict(message), "task_id": task_id, "status": "queued"}
+    if not settings.enable_codex_runs:
+        raise HTTPException(status_code=503, detail="Agent 运行已在服务器设置中停用")
+    with task_claim_transaction(session):
+        conversation = _conversation_or_404(session, conversation_id)
+        if active_task_for_conversation(session, conversation.id):
+            raise HTTPException(status_code=409, detail="该对话的 Agent 正在处理另一项任务")
+        context = dict(payload.context_json)
+        if payload.selected_text:
+            context["selected_text"] = payload.selected_text
+        if payload.page_number:
+            context["page_number"] = payload.page_number
+        message = Message(
+            conversation_id=conversation.id,
+            role="user",
+            content=payload.content,
+            context_json=context,
+        )
+        session.add(message)
+        task_kind = "paper_chat" if conversation.kind == "paper" else "global_chat"
+        task_payload = {
+            "conversation_id": conversation.id,
+            "message": payload.content,
+            "context": context,
+        }
+        if conversation.kind == "paper":
+            task_payload["paper_id"] = conversation.reference_id
+            paper = session.get(Paper, conversation.reference_id)
+            if paper is not None:
+                task_payload["paper_context_sync_required"] = paper_agent_context_sync_required(
+                    session, paper, conversation
+                )
+        task = TaskRun(kind=task_kind, payload_json=task_payload)
+        session.add(task)
+        session.flush()
+        message.context_json = {**context, "task_id": task.id}
+    background_tasks.add_task(submit_task, task.id)
+    return {"message": model_dict(message), "task_id": task.id, "status": "queued"}
 
 
 @router.post("/{conversation_id}/messages/stream")
+@serialized_task_claim
 def stream_message(
     conversation_id: str,
     payload: MessageCreate,
@@ -394,13 +405,16 @@ def stream_message(
             content=payload.content,
             context_json=context,
         )
-        session.add(message)
-        session.flush()
         task_payload = {
             "conversation_id": conversation.id,
             "message": payload.content,
             "context": context,
         }
+    if not settings.enable_codex_runs:
+        raise HTTPException(status_code=503, detail="Agent 运行已在服务器设置中停用")
+    if message:
+        session.add(message)
+        session.flush()
     if conversation.kind == "paper":
         task_payload["paper_id"] = conversation.reference_id
         paper = session.get(Paper, conversation.reference_id)
@@ -436,7 +450,7 @@ def stream_message(
         "stream_status": "queued",
         "activities": [],
     }
-    session.commit()
+    session.flush()
     assistant_id = assistant.id
 
     def generate():  # type: ignore[no-untyped-def]
@@ -503,17 +517,17 @@ def stream_message(
             )
             return encode_stream_event("activity", **event)
 
-        meta = {"task_id": task.id, "retry_assistant_id": payload.retry_assistant_id}
-        if message:
-            meta["message"] = model_dict(message)
-        yield encode_stream_event("meta", **meta)
-        yield activity_event(
-            activity_id="agent-startup",
-            kind="status",
-            label="正在启动 Agent",
-            status="running",
-        )
         try:
+            meta = {"task_id": task.id, "retry_assistant_id": payload.retry_assistant_id}
+            if message:
+                meta["message"] = model_dict(message)
+            yield encode_stream_event("meta", **meta)
+            yield activity_event(
+                activity_id="agent-startup",
+                kind="status",
+                label="正在启动 Agent",
+                status="running",
+            )
             if not settings.enable_codex_runs:
                 raise RuntimeError("Agent 运行已在服务器设置中停用")
             with SessionLocal() as runner_session:

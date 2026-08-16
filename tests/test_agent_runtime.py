@@ -2,13 +2,15 @@ from __future__ import annotations
 
 import errno
 import threading
+import time
+from datetime import timedelta
 from pathlib import Path
 
 import pytest
 
 from frontier import agent_runner
 from frontier.database import SessionLocal, create_tables
-from frontier.models import TaskRun
+from frontier.models import Conversation, Message, TaskRun, utcnow
 from frontier.services import agent_runtime
 
 
@@ -68,6 +70,25 @@ def test_new_and_resumed_exec_commands_enforce_subagent_limits(monkeypatch) -> N
     assert resumed[-2] == "thread-1"
 
 
+def test_suspended_stream_cannot_reenter_root_slot_on_its_worker_thread(
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(agent_runtime, "_ROOT_AGENT_SLOTS", threading.BoundedSemaphore(1))
+
+    def suspended_stream():
+        with agent_runtime.root_agent_slot():
+            yield "started"
+
+    stream = suspended_stream()
+    assert next(stream) == "started"
+    with (
+        pytest.raises(agent_runtime.AgentSlotTimeout),
+        agent_runtime.root_agent_slot(deadline=time.monotonic() + 0.02),
+    ):
+        pytest.fail("an unrelated call must not inherit a suspended stream's slot")
+    stream.close()
+
+
 def test_required_cgroup_failure_is_fail_closed(monkeypatch, tmp_path: Path) -> None:
     _reset_runtime(monkeypatch)
     monkeypatch.setattr(agent_runtime.settings, "agent_cgroup_mode", "required")
@@ -111,7 +132,7 @@ def test_delegated_layout_writes_aggregate_and_per_run_budgets(
     assert wrapped[-4:] == ["--", "codex", "exec", "prompt"]
 
 
-def test_unsupported_partition_io_max_keeps_memory_cpu_and_pids_isolation(
+def test_required_mode_fails_closed_when_all_io_max_devices_are_unsupported(
     monkeypatch,
     tmp_path: Path,
 ) -> None:
@@ -135,19 +156,13 @@ def test_unsupported_partition_io_max_keeps_memory_cpu_and_pids_isolation(
     monkeypatch.setattr(agent_runtime, "_read_control", fake_read)
     monkeypatch.setattr(agent_runtime, "_write_control", reject_io_max)
 
-    assert agent_runtime.initialize_agent_resource_manager() is True
-    scope = agent_runtime.create_agent_scope("daily-task")
-    assert scope.path is not None
-    assert (scope.path / "memory.max").read_text(encoding="utf-8") == str(
-        agent_runtime.settings.agent_memory_max_bytes
-    )
-    assert (scope.path / "cpu.max").read_text(encoding="utf-8") == "100000 100000"
-    assert (scope.path / "pids.max").read_text(encoding="utf-8") == str(
-        agent_runtime.settings.agent_tasks_max
-    )
+    assert agent_runtime.initialize_agent_resource_manager() is False
+    with pytest.raises(agent_runtime.AgentResourceUnavailable, match="No such device"):
+        agent_runtime.create_agent_scope("daily-task")
 
 
-def test_root_agent_slot_serializes_callers() -> None:
+def test_root_agent_slot_serializes_callers(monkeypatch) -> None:
+    monkeypatch.setattr(agent_runtime, "_ROOT_AGENT_SLOTS", threading.BoundedSemaphore(1))
     first_entered = threading.Event()
     release_first = threading.Event()
     second_entered = threading.Event()
@@ -172,6 +187,164 @@ def test_root_agent_slot_serializes_callers() -> None:
     assert second_entered.wait(timeout=1)
     first_thread.join(timeout=1)
     second_thread.join(timeout=1)
+
+
+def test_root_agent_slot_wait_can_be_cancelled(monkeypatch) -> None:
+    monkeypatch.setattr(agent_runtime, "_ROOT_AGENT_SLOTS", threading.BoundedSemaphore(1))
+    cancelled = threading.Event()
+    finished = threading.Event()
+    errors: list[BaseException] = []
+
+    with agent_runtime.root_agent_slot():
+        def waiter() -> None:
+            try:
+                with agent_runtime.root_agent_slot(cancelled=cancelled.is_set):
+                    pytest.fail("cancelled waiter must not acquire the slot")
+            except BaseException as exc:  # noqa: BLE001
+                errors.append(exc)
+            finally:
+                finished.set()
+
+        thread = threading.Thread(target=waiter)
+        thread.start()
+        cancelled.set()
+        assert finished.wait(timeout=1)
+
+    thread.join(timeout=1)
+    assert len(errors) == 1
+    assert isinstance(errors[0], agent_runtime.AgentSlotCancelled)
+
+
+def test_agent_scope_close_captures_structured_resource_snapshot(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    controls = {
+        "memory.events": "low 1\noom 2\noom_kill 1\n",
+        "pids.events": "max 3\n",
+        "cpu.stat": "usage_usec 42\nthrottled_usec 7\n",
+        "io.stat": "8:0 rbytes=10 wbytes=20\n",
+    }
+    for name, value in controls.items():
+        (tmp_path / name).write_text(value, encoding="utf-8")
+    monkeypatch.setattr(Path, "rmdir", lambda _path: None)
+    scope = agent_runtime.AgentCgroupScope(tmp_path)
+
+    snapshot = scope.close(termination_reason="timeout")
+
+    assert scope.termination_reason == "timeout"
+    assert snapshot is not None
+    assert snapshot["memory.events"]["oom_kill"] == 1
+    assert snapshot["pids.events"]["max"] == 3
+    assert snapshot["cpu.stat"]["throttled_usec"] == 7
+    assert snapshot["io.stat"] == {"8:0": {"rbytes": 10, "wbytes": 20}}
+
+
+def test_background_conversation_task_uses_app_server(monkeypatch, tmp_path: Path) -> None:
+    create_tables()
+    monkeypatch.setattr(agent_runner.settings, "data_dir", tmp_path)
+    monkeypatch.setattr(agent_runner.settings, "agent_task_timeout_seconds", 60)
+    observed: dict[str, object] = {}
+
+    def fake_stream(prompt: str, session_id: str | None = None, **options):
+        observed.update(prompt=prompt, session_id=session_id, **options)
+        yield {"type": "thread", "thread_id": "thread-new"}
+        yield {"type": "delta", "delta": "后台回答"}
+
+    monkeypatch.setattr(agent_runner, "stream_codex_prompt", fake_stream)
+    monkeypatch.setattr(
+        agent_runner,
+        "_codex_exec_command",
+        lambda *_args, **_kwargs: pytest.fail("conversation tasks must not use codex exec"),
+    )
+    with SessionLocal() as session:
+        conversation = Conversation(
+            kind="global",
+            title="background",
+            status="active",
+            codex_session_id="thread-old",
+        )
+        session.add(conversation)
+        session.flush()
+        task = TaskRun(
+            kind="global_chat",
+            created_at=utcnow() - timedelta(seconds=20),
+            payload_json={
+                "conversation_id": conversation.id,
+                "message": "继续",
+                "context": {},
+            },
+        )
+        session.add(task)
+        session.commit()
+        task_id = task.id
+        conversation_id = conversation.id
+
+    agent_runner.run_task(task_id)
+
+    assert observed["session_id"] == "thread-old"
+    assert observed["run_id"] == task_id
+    assert 39 <= float(observed["timeout_seconds"]) <= 41
+    with SessionLocal() as session:
+        task = session.get(TaskRun, task_id)
+        conversation = session.get(Conversation, conversation_id)
+        messages = session.query(Message).filter_by(conversation_id=conversation_id).all()
+        assert task is not None and task.status == "completed"
+        assert conversation is not None and conversation.codex_session_id == "thread-new"
+        assert [message.content for message in messages] == ["后台回答"]
+
+
+def test_expired_queued_task_fails_before_agent_start(monkeypatch) -> None:
+    create_tables()
+    monkeypatch.setattr(agent_runner.settings, "agent_task_timeout_seconds", 30)
+    monkeypatch.setattr(
+        agent_runner,
+        "_run_codex_task",
+        lambda *_args, **_kwargs: pytest.fail("expired tasks must not start Codex"),
+    )
+    with SessionLocal() as session:
+        task = TaskRun(
+            kind="daily_brief",
+            created_at=utcnow() - timedelta(seconds=31),
+            payload_json={"date": "2035-01-02"},
+        )
+        session.add(task)
+        session.commit()
+        task_id = task.id
+
+    agent_runner.run_task(task_id)
+
+    with SessionLocal() as session:
+        task = session.get(TaskRun, task_id)
+        assert task is not None and task.status == "failed"
+        assert task.result_json["termination_reason"] == "queue_timeout"
+
+
+def test_direct_task_root_wait_and_process_share_persisted_budget(monkeypatch) -> None:
+    create_tables()
+    monkeypatch.setattr(agent_runner.settings, "agent_task_timeout_seconds", 60)
+    monkeypatch.setattr(agent_runtime, "_ROOT_AGENT_SLOTS", threading.BoundedSemaphore(1))
+    monkeypatch.setattr(agent_runner, "evict_idle_codex_app_servers", lambda: 0)
+    observed: dict[str, float] = {}
+
+    def fake_run(_task_id: str, *, timeout_seconds: float | None = None) -> None:
+        assert timeout_seconds is not None
+        observed["timeout_seconds"] = timeout_seconds
+
+    monkeypatch.setattr(agent_runner, "_run_codex_task", fake_run)
+    with SessionLocal() as session:
+        task = TaskRun(
+            kind="daily_brief",
+            created_at=utcnow() - timedelta(seconds=20),
+            payload_json={"date": "2035-01-03"},
+        )
+        session.add(task)
+        session.commit()
+        task_id = task.id
+
+    agent_runner.run_task(task_id)
+
+    assert 39 <= observed["timeout_seconds"] <= 41
 
 
 def test_batch_agent_timeout_is_persisted_as_failure(monkeypatch, tmp_path: Path) -> None:
@@ -228,3 +401,6 @@ def test_batch_agent_timeout_is_persisted_as_failure(monkeypatch, tmp_path: Path
         assert task.status == "failed"
         assert task.finished_at is not None
         assert task.error is not None and "30 seconds" in task.error
+        assert task.result_json["termination_reason"] == "timeout"
+        assert task.result_json["resource_snapshot"] == {}
+    assert process._frontier_agent_cgroup_scope.path is None

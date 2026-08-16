@@ -2,11 +2,15 @@ from __future__ import annotations
 
 import html
 import ipaddress
+import json
+import multiprocessing
 import os
 import socket
+import uuid
 from datetime import datetime
 from html.parser import HTMLParser
 from pathlib import Path
+from time import monotonic
 from urllib.parse import urljoin, urlparse
 
 import feedparser
@@ -24,6 +28,11 @@ from .outbound_network import external_httpx_kwargs
 
 USER_AGENT = "FrontierResearch/0.1 (personal research assistant)"
 ARXIV_API = "https://export.arxiv.org/api/query"
+_PDF_DOWNLOAD_TOTAL_TIMEOUT_SECONDS = 90.0
+_PDF_DOWNLOAD_IO_TIMEOUT_SECONDS = 5.0
+_PDF_TEXT_EXTRACTION_TIMEOUT_SECONDS = 75.0
+_PDF_TEXT_PROCESS_STOP_TIMEOUT_SECONDS = 2.0
+_PDF_TEXT_CACHE_OVERHEAD_BYTES = 16 * 1024**2
 
 
 class MetadataParser(HTMLParser):
@@ -379,42 +388,56 @@ def download_paper_pdf(session: Session, paper: Paper) -> Path:
             return Path(paper.pdf_path)
         if not paper.pdf_url:
             raise ValueError("Paper has no PDF URL")
+        deadline = monotonic() + _PDF_DOWNLOAD_TOTAL_TIMEOUT_SECONDS
         safe_url = _safe_remote_url(paper.pdf_url)
         target = settings.pdf_dir / f"{paper.id}.pdf"
         temporary = target.with_suffix(".pdf.download")
         temporary.unlink(missing_ok=True)
         try:
-            with httpx.stream(
-                "GET",
-                safe_url,
-                headers={"User-Agent": USER_AGENT},
-                timeout=90,
-                follow_redirects=True,
-                **external_httpx_kwargs(safe_url),
-            ) as response:
-                response.raise_for_status()
-                content_length = response.headers.get("content-length")
-                if (
-                    content_length is not None
-                    and int(content_length) > settings.paper_download_max_bytes
-                ):
-                    raise ValueError("PDF exceeds the configured download size limit")
-                received = 0
-                signature = b""
-                with temporary.open("wb") as output:
-                    for chunk in response.iter_bytes(chunk_size=64 * 1024):
-                        if not chunk:
-                            continue
-                        received += len(chunk)
-                        if received > settings.paper_download_max_bytes:
-                            raise ValueError("PDF exceeds the configured download size limit")
-                        if len(signature) < 4:
-                            signature += chunk[: 4 - len(signature)]
-                        output.write(chunk)
-                    output.flush()
-                    os.fsync(output.fileno())
-                if signature != b"%PDF":
-                    raise ValueError("Downloaded file is not a PDF")
+            current_url = safe_url
+            for _redirect in range(11):
+                with httpx.stream(
+                    "GET",
+                    current_url,
+                    headers={"User-Agent": USER_AGENT},
+                    timeout=_download_operation_timeout(deadline),
+                    follow_redirects=False,
+                    **external_httpx_kwargs(current_url),
+                ) as response:
+                    _check_download_deadline(deadline)
+                    if response.has_redirect_location:
+                        current_url = _safe_remote_url(
+                            urljoin(str(response.url), response.headers["location"])
+                        )
+                        continue
+                    response.raise_for_status()
+                    content_length = response.headers.get("content-length")
+                    if (
+                        content_length is not None
+                        and int(content_length) > settings.paper_download_max_bytes
+                    ):
+                        raise ValueError("PDF exceeds the configured download size limit")
+                    received = 0
+                    signature = b""
+                    with temporary.open("wb") as output:
+                        for chunk in response.iter_bytes(chunk_size=64 * 1024):
+                            _check_download_deadline(deadline)
+                            if not chunk:
+                                continue
+                            received += len(chunk)
+                            if received > settings.paper_download_max_bytes:
+                                raise ValueError("PDF exceeds the configured download size limit")
+                            if len(signature) < 4:
+                                signature += chunk[: 4 - len(signature)]
+                            output.write(chunk)
+                        output.flush()
+                        os.fsync(output.fileno())
+                    _check_download_deadline(deadline)
+                    if signature != b"%PDF":
+                        raise ValueError("Downloaded file is not a PDF")
+                    break
+            else:
+                raise ValueError("PDF download exceeded the redirect limit")
             temporary.replace(target)
         finally:
             temporary.unlink(missing_ok=True)
@@ -423,37 +446,169 @@ def download_paper_pdf(session: Session, paper: Paper) -> Path:
         return target
 
 
-def extract_pdf_text(session: Session, paper: Paper, *, force: bool = False) -> dict:
-    import json
+def _check_download_deadline(deadline: float) -> None:
+    if monotonic() >= deadline:
+        raise TimeoutError(
+            "PDF download exceeded the configured total deadline of "
+            f"{_PDF_DOWNLOAD_TOTAL_TIMEOUT_SECONDS:g} seconds"
+        )
 
-    with paper_processing_slot():
-        cache = settings.text_dir / f"{paper.id}.json"
-        if cache.exists() and not force:
-            return json.loads(cache.read_text(encoding="utf-8"))
-        path = download_paper_pdf(session, paper)
-        with pymupdf.open(path) as document:
-            pages = []
+
+def _download_operation_timeout(deadline: float) -> httpx.Timeout:
+    remaining = deadline - monotonic()
+    if remaining <= 0:
+        _check_download_deadline(deadline)
+    operation_timeout = min(_PDF_DOWNLOAD_IO_TIMEOUT_SECONDS, remaining)
+    return httpx.Timeout(operation_timeout)
+
+
+def _pdf_text_cache_path(paper_id: str) -> Path:
+    return settings.text_dir / f"{paper_id}.json"
+
+
+def _validate_pdf_text_payload(payload: object) -> dict:
+    if not isinstance(payload, dict) or not isinstance(payload.get("pages"), list):
+        raise TypeError("Cached PDF text has an invalid structure")
+    extracted_chars = 0
+    for page in payload["pages"]:
+        if not isinstance(page, dict) or not isinstance(page.get("text"), str):
+            raise TypeError("Cached PDF text has an invalid page entry")
+        extracted_chars += len(page["text"])
+        if extracted_chars > settings.paper_text_max_chars:
+            raise ValueError("Cached PDF text exceeds the configured size limit")
+    return payload
+
+
+def _load_pdf_text_cache(cache: Path) -> dict:
+    max_cache_bytes = (
+        settings.paper_text_max_chars * 4 + _PDF_TEXT_CACHE_OVERHEAD_BYTES
+    )
+    if cache.stat().st_size > max_cache_bytes:
+        raise ValueError("Cached PDF text file exceeds the configured size limit")
+    with cache.open("r", encoding="utf-8") as source:
+        return _validate_pdf_text_payload(json.load(source))
+
+
+def _pdf_text_extraction_worker(
+    path: str,
+    temporary: str,
+    paper_id: str,
+    max_chars: int,
+    result_pipe: object,
+) -> None:
+    """Extract into JSON incrementally; the parent owns timeout and publication."""
+    try:
+        with pymupdf.open(path) as document, Path(temporary).open(
+            "w", encoding="utf-8"
+        ) as output:
+            output.write('{"paper_id":')
+            json.dump(paper_id, output, ensure_ascii=False)
+            output.write(f',"page_count":{document.page_count},"pages":[')
             extracted_chars = 0
             for index, page in enumerate(document):
                 text = page.get_text("text")
                 extracted_chars += len(text)
-                if extracted_chars > settings.paper_text_max_chars:
+                if extracted_chars > max_chars:
                     raise ValueError("Extracted PDF text exceeds the configured size limit")
-                pages.append({
-                    "page_number": index + 1,
-                    "text": text,
-                    "width": page.rect.width,
-                    "height": page.rect.height,
-                })
-            result = {
-                "paper_id": paper.id,
-                "page_count": document.page_count,
-                "pages": pages,
-            }
-        temporary = cache.with_suffix(".json.tmp")
-        temporary.write_text(json.dumps(result, ensure_ascii=False), encoding="utf-8")
+                if index:
+                    output.write(",")
+                json.dump(
+                    {
+                        "page_number": index + 1,
+                        "text": text,
+                        "width": page.rect.width,
+                        "height": page.rect.height,
+                    },
+                    output,
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                )
+            output.write("]}")
+            output.flush()
+            os.fsync(output.fileno())
+        result_pipe.send(("ok", extracted_chars))  # type: ignore[attr-defined]
+    except BaseException as exc:  # noqa: BLE001 - report child failures to the parent
+        try:
+            result_pipe.send(("error", f"{type(exc).__name__}: {exc}"))  # type: ignore[attr-defined]
+        except (BrokenPipeError, EOFError, OSError):
+            pass
+    finally:
+        result_pipe.close()  # type: ignore[attr-defined]
+
+
+def _stop_extraction_process(process: multiprocessing.Process) -> None:
+    if not process.is_alive():
+        return
+    process.terminate()
+    process.join(timeout=_PDF_TEXT_PROCESS_STOP_TIMEOUT_SECONDS)
+    if process.is_alive():
+        process.kill()
+        process.join(timeout=_PDF_TEXT_PROCESS_STOP_TIMEOUT_SECONDS)
+
+
+def _extract_pdf_text_to_cache(path: Path, cache: Path, paper_id: str) -> None:
+    temporary = cache.with_name(f"{cache.name}.tmp-{uuid.uuid4().hex}")
+    context = multiprocessing.get_context("spawn")
+    result_pipe, child_pipe = context.Pipe(duplex=False)
+    process = context.Process(
+        target=_pdf_text_extraction_worker,
+        args=(
+            str(path),
+            str(temporary),
+            paper_id,
+            settings.paper_text_max_chars,
+            child_pipe,
+        ),
+        name=f"pdf-text-{paper_id[:8]}",
+        daemon=True,
+    )
+    try:
+        process.start()
+        child_pipe.close()
+        process.join(timeout=_PDF_TEXT_EXTRACTION_TIMEOUT_SECONDS)
+        if process.is_alive():
+            _stop_extraction_process(process)
+            raise TimeoutError(
+                "PDF text extraction exceeded the configured hard timeout of "
+                f"{_PDF_TEXT_EXTRACTION_TIMEOUT_SECONDS:g} seconds"
+            )
+        message = result_pipe.recv() if result_pipe.poll() else None
+        if process.exitcode != 0 or not message or message[0] != "ok":
+            detail = message[1] if message and len(message) > 1 else process.exitcode
+            raise ValueError(f"PDF text extraction failed: {detail}")
         temporary.replace(cache)
-        return result
+    finally:
+        child_pipe.close()
+        result_pipe.close()
+        if process.is_alive():
+            _stop_extraction_process(process)
+        try:
+            process.close()
+        except ValueError:
+            pass
+        temporary.unlink(missing_ok=True)
+
+
+def ensure_pdf_text_cache(
+    session: Session, paper: Paper, *, force: bool = False
+) -> Path:
+    """Validate or build a bounded cache without retaining the full text in Web memory."""
+
+    with paper_processing_slot():
+        cache = _pdf_text_cache_path(paper.id)
+        if cache.exists() and not force:
+            _load_pdf_text_cache(cache)
+            return cache
+        path = download_paper_pdf(session, paper)
+        _extract_pdf_text_to_cache(path, cache, paper.id)
+        return cache
+
+
+def extract_pdf_text(session: Session, paper: Paper, *, force: bool = False) -> dict:
+    """Compatibility helper for in-process callers that explicitly need a dict."""
+    with paper_processing_slot():
+        cache = ensure_pdf_text_cache(session, paper, force=force)
+        return _load_pdf_text_cache(cache)
 
 
 def render_pdf_page(session: Session, paper: Paper, page_number: int, *, dpi: int = 144) -> Path:

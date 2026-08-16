@@ -11,6 +11,12 @@ from frontier.database import SessionLocal
 from frontier.models import Conversation, Message, TaskRun
 
 
+@pytest.fixture(autouse=True)
+def _enable_task_agent(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(system.settings, "enable_codex_runs", True)
+    monkeypatch.setattr(system, "submit_task", lambda _task_id: True)
+
+
 def _create_paper(client: TestClient) -> str:
     response = client.post(
         "/api/papers",

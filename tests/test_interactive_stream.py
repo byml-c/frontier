@@ -743,12 +743,13 @@ def test_cancel_watchdog_kills_worker_when_turn_never_binds(monkeypatch) -> None
             return None
 
     process = _FakeProcess()
-    worker = interactive_stream._CodexAppServerWorker(process)  # type: ignore[arg-type]
     pool = CodexAppServerPool(max_workers=1)
-    handle = interactive_stream._PooledTurnHandle(worker, pool)
     stopped: list[object] = []
+    monkeypatch.setattr(interactive_stream, "_start_process", lambda: process)
     monkeypatch.setattr(interactive_stream.threading, "Timer", ImmediateTimer)
     monkeypatch.setattr(interactive_stream, "_stop_process", stopped.append)
+    worker = pool.acquire()
+    handle = interactive_stream._PooledTurnHandle(worker, pool)
     handle.bind_thread("thread-1")
     handle.mark_turn_requested()
 
@@ -967,3 +968,154 @@ def test_pool_shutdown_wakes_waiting_acquire(monkeypatch) -> None:
     assert len(errors) == 1
     assert isinstance(errors[0], CodexStreamError)
     pool.release(active)
+
+
+def test_dead_worker_owner_release_cannot_miss_waiter_or_clear_new_owner(
+    monkeypatch,
+) -> None:
+    first = _FakeProcess()
+    second = _FakeProcess()
+    processes = iter([first, second])
+    monkeypatch.setattr(interactive_stream, "_start_process", lambda: next(processes))
+    monkeypatch.setattr(interactive_stream, "_stop_process", lambda _process: None)
+    pool = CodexAppServerPool(max_workers=1)
+    old_worker = pool.acquire("thread-1")
+    old_lease = old_worker.active_lease_id
+    first.alive = False
+    acquired = threading.Event()
+    replacement: list[interactive_stream._CodexAppServerWorker] = []
+
+    def wait_for_replacement() -> None:
+        replacement.append(pool.acquire("thread-1"))
+        acquired.set()
+
+    waiter = threading.Thread(target=wait_for_replacement)
+    waiter.start()
+    assert acquired.wait(timeout=1)
+    pool.release(
+        old_worker,
+        thread_id="thread-1",
+        previous_thread_id="thread-1",
+        lease_id=old_lease,
+    )
+
+    new_worker = replacement[0]
+    assert new_worker.process is second
+    assert pool._active_threads["thread-1"][0] is new_worker
+    pool.release(
+        new_worker,
+        thread_id="thread-1",
+        previous_thread_id="thread-1",
+        lease_id=new_worker.active_lease_id,
+    )
+    waiter.join(timeout=1)
+    pool.shutdown()
+
+
+def test_stale_lease_timeout_cannot_kill_reassigned_worker(monkeypatch) -> None:
+    process = _FakeProcess()
+    stopped: list[object] = []
+    monkeypatch.setattr(interactive_stream, "_start_process", lambda: process)
+    monkeypatch.setattr(interactive_stream, "_stop_process", stopped.append)
+    pool = CodexAppServerPool(max_workers=1)
+    worker = pool.acquire()
+    stale_lease = worker.active_lease_id
+    pool.release(worker, lease_id=stale_lease)
+    reassigned = pool.acquire()
+
+    assert reassigned is worker
+    assert reassigned.active_lease_id != stale_lease
+    assert pool.invalidate(
+        worker,
+        stale_lease,
+        termination_reason="turn_timeout",
+    ) is False
+    assert stopped == []
+
+    pool.release(reassigned, lease_id=reassigned.active_lease_id)
+    pool.shutdown()
+
+
+def test_pool_wait_is_cancelled_without_releasing_current_owner(monkeypatch) -> None:
+    process = _FakeProcess()
+    monkeypatch.setattr(interactive_stream, "_start_process", lambda: process)
+    monkeypatch.setattr(interactive_stream, "_stop_process", lambda _process: None)
+    pool = CodexAppServerPool(max_workers=1)
+    owner = pool.acquire()
+    cancelled = threading.Event()
+    finished = threading.Event()
+    errors: list[BaseException] = []
+
+    def wait_for_worker() -> None:
+        try:
+            pool.acquire(cancelled=cancelled)
+        except BaseException as exc:  # noqa: BLE001
+            errors.append(exc)
+        finally:
+            finished.set()
+
+    waiter = threading.Thread(target=wait_for_worker)
+    waiter.start()
+    cancelled.set()
+    assert finished.wait(timeout=1)
+    assert len(errors) == 1
+    assert isinstance(errors[0], interactive_stream.CodexRunCancelled)
+
+    pool.release(owner, lease_id=owner.active_lease_id)
+    waiter.join(timeout=1)
+    pool.shutdown()
+
+
+def test_evict_idle_workers_reclaims_only_unowned_app_servers(monkeypatch) -> None:
+    first = _FakeProcess()
+    second = _FakeProcess()
+    processes = iter([first, second])
+    stopped: list[object] = []
+    monkeypatch.setattr(interactive_stream, "_start_process", lambda: next(processes))
+    monkeypatch.setattr(interactive_stream, "_stop_process", stopped.append)
+    pool = CodexAppServerPool(max_workers=2)
+    idle = pool.acquire("thread-idle")
+    active = pool.acquire("thread-active")
+    pool.release(
+        idle,
+        thread_id="thread-idle",
+        lease_id=idle.active_lease_id,
+    )
+
+    assert pool.evict_idle_workers() == 1
+    assert stopped == [first]
+    assert pool._workers == [active]
+
+    pool.release(
+        active,
+        thread_id="thread-active",
+        lease_id=active.active_lease_id,
+    )
+    pool.shutdown()
+
+
+def test_cancelled_turn_does_not_restore_abandoned_thread_affinity(monkeypatch) -> None:
+    process = _FakeProcess()
+    monkeypatch.setattr(interactive_stream, "_start_process", lambda: process)
+    monkeypatch.setattr(interactive_stream, "_stop_process", lambda _process: None)
+    pool = CodexAppServerPool(max_workers=1)
+    worker = pool.acquire("thread-abandoned")
+    handle = interactive_stream._PooledTurnHandle(worker, pool)
+    handle.bind_thread("thread-abandoned")
+    worker.loaded_threads["thread-abandoned"] = {
+        "thread": {"id": "thread-abandoned"}
+    }
+    handle.mark_terminal()
+    handle.cancel()
+    handle.finish()
+
+    pool.release(
+        worker,
+        thread_id="thread-abandoned",
+        previous_thread_id="thread-abandoned",
+        lease_id=handle.lease_id,
+    )
+
+    assert "thread-abandoned" not in pool._thread_workers
+    assert "thread-abandoned" not in worker.loaded_threads
+    pool.shutdown()

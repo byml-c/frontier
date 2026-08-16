@@ -36,12 +36,14 @@ Frontier 本机 API 会通过 `NO_PROXY` 保持直连。修改后需要重启 `f
 
 `FRONTIER_CODEX_APP_SERVER_MAX_WORKERS` 控制常驻 App Server 进程数上限，
 2C2G 部署默认为 1。首个 Agent 请求会创建 worker 并持续复用，其余 worker 只在并发请求需要时创建；
-已经加载的对话 thread 会优先回到同一 worker。修改该配置后需要重启 Frontier 服务。
+已经加载的对话 thread 会优先回到同一 worker。启动日报等独立批任务前会驱逐空闲 worker，
+把 Agent 汇总内存让给批任务；下一次交互会按需重建。修改该配置后需要重启 Frontier 服务。
 
 2C2G 部署还应保留 `.env.example` 中的 Agent 限额：根 Agent 总并发为 1，单次 Codex
 会话最多并发 1 个子代理、委派深度为 1、单个子代理最长 30 分钟，批任务总时限为 3
-小时，交互 turn 最长 1 小时。所有 Codex 命令都使用严格配置解析，旧版 CLI 不会静默
-忽略限额。日报全文下载和读取除 prompt 策略外，还由 Server 的全局闸门强制串行。
+小时（包含有界执行队列和资源槽等待），交互 turn 最长 1 小时。所有 Codex 命令都使用严格
+配置解析，旧版 CLI 不会静默忽略限额。日报全文下载和读取除 prompt 策略外，还由 Server
+的全局闸门强制串行。任务 claim 依赖单个 Frontier 服务进程；不要配置多个 Uvicorn worker。
 
 ```dotenv
 OPENAI_API_KEY=你的翻译模型密钥
@@ -79,10 +81,11 @@ unit 必须保持 `OOMPolicy=continue`，否则单个 Agent 子组发生 OOM 时
 一起停止；Web 主进程自身退出仍由 `Restart=on-failure` 拉起。
 Frontier 会从 `FRONTIER_DATA_DIR` 自动解析块设备号，并对 Web、Agent 汇总组和每个 Agent
 写入 `io.max`：默认读取 20 MiB/s、写入 10 MiB/s；`IOWeight` 仅保留为竞争优先级，
-不是硬上限。PDF 下载采用临时文件和原子替换，默认最多 64 MiB；PDF 下载、提取、渲染
-与结构化转换全局并发为 1，提取文本默认最多 2000 万字符。
+不是硬上限。PDF 下载采用临时文件和原子替换，默认最多 64 MiB、总时限 90 秒；PDF 下载、
+提取、渲染与结构化转换全局并发为 1。PyMuPDF 正文提取在可终止子进程中逐页写缓存，默认
+75 秒硬时限、最多 2000 万字符；转换请求进入单 worker 的 32 项有界去重队列。
 `FRONTIER_AGENT_CGROUP_MODE=required` 时，如果 unit 未启用 `Delegate` 或控制器不可用，
-Web 仍会启动，但 Agent 任务会明确失败，不会退回无隔离运行。
+或数据盘无法写入 `io.max`，Web 仍会启动，但 Agent 任务会明确失败，不会退回无隔离运行。
 
 升级已有安装时，不能只拉取代码；还要合并新版 `.env.example` 中的
 `FRONTIER_AGENT_*`、`FRONTIER_CODEX_MAX_CONCURRENT_SUBAGENTS` 与子代理超时配置，并把
@@ -139,8 +142,9 @@ tailscale serve status
 ## 5. 从开发机一键更新
 
 项目提供了固定部署到 SSH 别名 `SelfALI` 的脚本。它会在服务器的
-`/home/byml/agent/frontier` 中执行仅快进拉取、同步前端依赖、构建 Web，随后重启并
-检查 `frontier.service`：
+`/home/byml/agent/frontier` 中执行仅快进拉取，随后从 `.env.example` 向服务器 `.env`
+补充 2C2G 资源管理所需的新配置，再同步前端依赖、构建 Web、重启并检查
+`frontier.service`：
 
 ```bash
 ./deploy/deploy-self-ali.sh
@@ -148,6 +152,11 @@ tailscale serve status
 
 脚本只部署已经提交并推送到 Git 远端的代码，不会自动提交或推送本机修改。服务器
 工作区若有未提交的受版本控制文件修改，部署会停止，避免覆盖服务器上的改动。
+环境同步只处理 `deploy/frontier-2c2g-env.keys` 白名单中的键，并且只补充缺失项；服务器
+已有值始终保留，密码、代理、端口和数据路径不会被复制或覆盖。该步骤使用同目录临时文件
+原子替换 `.env`，可重复运行。如果环境要求 `FRONTIER_AGENT_CGROUP_MODE=required`，脚本
+还会在重启前验证 systemd unit 已设置 `Delegate=yes`；未满足时停止部署，避免发布后所有
+Agent 因隔离不可用而失败。
 
 若 `Self_ALI` 使用非 root 用户，需要允许其无交互地重启和检查该服务。使用
 `sudo visudo -f /etc/sudoers.d/frontier-deploy` 添加以下规则，并把 `byml` 替换为实际

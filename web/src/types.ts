@@ -267,6 +267,7 @@ export type Conversation = {
   reference_id?: string | null;
   title?: string | null;
   status: string;
+  active_task?: { id: string; status: "queued" | "running" } | null;
   messages: Message[];
 };
 

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from datetime import UTC, date, datetime, timedelta
 from itertools import pairwise
 from zoneinfo import ZoneInfo
@@ -7,6 +8,7 @@ from zoneinfo import ZoneInfo
 import pymupdf
 import pytest
 from fastapi.testclient import TestClient
+from sqlalchemy import select
 
 from frontier.agent_runner import _parse_citations
 from frontier.api.papers import _translation_key
@@ -36,6 +38,94 @@ def create_paper(client: TestClient, title: str = "Tactile VLA for Fine Manipula
     )
     assert response.status_code == 200, response.text
     return response.json()["paper"]
+
+
+def test_stream_close_after_metadata_marks_task_interrupted(client: TestClient) -> None:
+    from frontier.api.system import stream_task
+    from frontier.database import SessionLocal
+    from frontier.models import TaskRun
+    from frontier.schemas import TaskCreate
+
+    with SessionLocal() as session:
+        response = stream_task(
+            TaskCreate(kind="translate", payload_json={"text": "hello"}),
+            session,
+        )
+
+    async def close_after_metadata() -> None:
+        iterator = response.body_iterator
+        first = await anext(iterator)
+        assert '"type": "meta"' in first
+        await iterator.aclose()
+
+    asyncio.run(close_after_metadata())
+    with SessionLocal() as session:
+        task = session.scalar(select(TaskRun).order_by(TaskRun.created_at.desc()).limit(1))
+        assert task is not None
+        assert task.status == "failed"
+        assert task.result_json["stream_status"] == "interrupted"
+
+
+def test_conversation_close_after_metadata_releases_active_task(
+    client: TestClient,
+    monkeypatch,
+) -> None:
+    from frontier.api import conversations
+    from frontier.database import SessionLocal
+    from frontier.schemas import MessageCreate
+
+    monkeypatch.setattr(conversations.settings, "enable_codex_runs", True)
+    conversation = client.post(
+        "/api/conversations",
+        json={"kind": "global", "title": "Early disconnect"},
+    ).json()
+    with SessionLocal() as session:
+        response = conversations.stream_message(
+            conversation["id"],
+            MessageCreate(content="请分析"),
+            session,
+        )
+
+    async def close_after_metadata() -> None:
+        iterator = response.body_iterator
+        first = await anext(iterator)
+        assert '"type": "meta"' in first
+        await iterator.aclose()
+
+    asyncio.run(close_after_metadata())
+    detail = client.get(f"/api/conversations/{conversation['id']}").json()
+    assert detail["active_task"] is None
+    assistant = detail["messages"][-1]
+    assert assistant["context_json"]["stream_status"] == "interrupted"
+    task = client.get(f"/api/tasks/{assistant['context_json']['task_id']}").json()
+    assert task["status"] == "failed"
+
+
+def test_translation_close_after_metadata_marks_task_interrupted(client: TestClient) -> None:
+    from frontier.api.papers import stream_translation
+    from frontier.database import SessionLocal
+    from frontier.models import TaskRun
+
+    paper = create_paper(client, "Translation disconnect")
+    with SessionLocal() as session:
+        response = stream_translation(
+            paper["id"],
+            TranslationRequest(text="disconnect-before-provider"),
+            session,
+        )
+
+    async def close_after_metadata() -> None:
+        iterator = response.body_iterator
+        first = await anext(iterator)
+        assert '"type": "meta"' in first
+        await iterator.aclose()
+
+    asyncio.run(close_after_metadata())
+    with SessionLocal() as session:
+        task = session.scalar(select(TaskRun).order_by(TaskRun.created_at.desc()).limit(1))
+        assert task is not None
+        assert task.status == "failed"
+        assert task.result_json["stream_status"] == "interrupted"
 
 
 def test_paper_search_covers_saved_metadata_and_abstract(client: TestClient) -> None:
@@ -1192,6 +1282,8 @@ def test_manual_ingest_stages_daily_recommendation_and_metadata_edit(
     client: TestClient,
     monkeypatch,
 ) -> None:
+    monkeypatch.setattr("frontier.api.papers.settings.enable_codex_runs", True)
+    monkeypatch.setattr("frontier.api.papers.submit_task", lambda _task_id: True)
     queued_batches: list[tuple[list[str], int]] = []
     monkeypatch.setattr(
         "frontier.api.papers.queue_document_conversions",
@@ -1285,7 +1377,11 @@ def test_manual_ingest_can_defer_agent_analysis(client: TestClient, monkeypatch)
     assert any(item["paper"]["id"] == result["paper"]["id"] for item in latest["items"])
 
 
-def test_memory_task_and_conversation(client: TestClient) -> None:
+def test_memory_task_and_conversation(client: TestClient, monkeypatch) -> None:
+    from frontier.api import conversations
+
+    monkeypatch.setattr(conversations.settings, "enable_codex_runs", True)
+    monkeypatch.setattr(conversations, "submit_task", lambda _task_id: True)
     memory = client.post(
         "/api/memories",
         json={
@@ -1619,7 +1715,10 @@ def test_service_startup_marks_orphaned_conversation_draft_as_interrupted(
 
 def test_metadata_generation_can_be_requested_without_adding_a_brief_item(
     client: TestClient,
+    monkeypatch,
 ) -> None:
+    monkeypatch.setattr("frontier.api.papers.settings.enable_codex_runs", True)
+    monkeypatch.setattr("frontier.api.papers.submit_task", lambda _task_id: True)
     paper = create_paper(client, "Explicit Metadata Generation Test")
     requested = client.post(f"/api/papers/{paper['id']}/metadata/generate")
     assert requested.status_code == 200, requested.text
@@ -1665,6 +1764,8 @@ def test_scheduled_daily_is_idempotent(client: TestClient, monkeypatch) -> None:
 
     target_date = date(2040, 1, 2)
     target = target_date.isoformat()
+    monkeypatch.setattr("frontier.scheduler.settings.enable_codex_runs", True)
+    monkeypatch.setattr("frontier.scheduler.submit_task", lambda _task_id: True)
     monkeypatch.setattr("frontier.scheduler.current_research_date", lambda _session: target_date)
     scheduled_daily()
     scheduled_daily()

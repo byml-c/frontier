@@ -17,6 +17,7 @@ from ..config import settings
 from ..database import SessionLocal
 from ..models import OperationLog, Paper
 from .common import log_operation, parse_arxiv_id
+from .heavy_work import paper_processing_slot
 
 AUTHOR_METADATA_PARSER_VERSION = 1
 BIBLIOGRAPHIC_PROVENANCE_KEY = "bibliographic_provenance"
@@ -307,7 +308,7 @@ def queue_cached_arxiv_author_metadata_backfill() -> bool:
     def run() -> None:
         global _backfill_running
         try:
-            with SessionLocal() as session:
+            with paper_processing_slot(), SessionLocal() as session:
                 updated = backfill_cached_arxiv_author_metadata(session)
             if updated:
                 logger.info("Backfilled arXiv HTML author metadata for %s papers", updated)

@@ -6,7 +6,6 @@ from fastapi import APIRouter, BackgroundTasks, Depends, File, HTTPException, Up
 from fastapi.responses import FileResponse
 from sqlalchemy.orm import Session
 
-from ..agent_runner import run_task
 from ..architecture_schemas import (
     ArchitectureAgentCommitRequest,
     ArchitectureCommandRequest,
@@ -33,7 +32,12 @@ from ..services.architecture_scene import (
 )
 from ..services.common import log_operation, model_dict
 from ..services.paper_conversations import get_or_create_paper_conversation
-from ..services.task_control import active_task_for_conversation
+from ..services.task_control import (
+    active_task_for_conversation,
+    serialized_task_claim,
+    task_claim_transaction,
+)
+from ..services.task_dispatcher import submit_task
 
 router = APIRouter(prefix="/api/papers/{paper_id}/architecture", tags=["architecture"])
 
@@ -93,6 +97,7 @@ def validate_architecture(payload: dict[str, Any]) -> dict[str, Any]:
 
 
 @router.post("/lock")
+@serialized_task_claim
 def acquire_user_lock(
     paper_id: str,
     payload: ArchitectureLockRequest,
@@ -102,12 +107,14 @@ def acquire_user_lock(
         acquire_architecture_lock(
             session, paper_id, owner_type="user", owner_id=payload.owner_id
         )
+        session.commit()
         return architecture_document_payload(session, paper_id)
     except ArchitectureError as exc:
         raise _architecture_error(exc) from exc
 
 
 @router.post("/lock/release")
+@serialized_task_claim
 def release_user_lock(
     paper_id: str,
     payload: ArchitectureLockRequest,
@@ -116,10 +123,12 @@ def release_user_lock(
     release_architecture_lock(
         session, paper_id, owner_type="user", owner_id=payload.owner_id
     )
+    session.commit()
     return architecture_document_payload(session, paper_id)
 
 
 @router.put("")
+@serialized_task_claim
 def save_user_architecture(
     paper_id: str,
     payload: ArchitectureCommitRequest,
@@ -149,6 +158,7 @@ def save_user_architecture(
 
 
 @router.post("/agent-lock")
+@serialized_task_claim
 def acquire_agent_lock(
     paper_id: str,
     payload: ArchitectureLockRequest,
@@ -158,12 +168,14 @@ def acquire_agent_lock(
         acquire_architecture_lock(
             session, paper_id, owner_type="agent", owner_id=payload.owner_id
         )
+        session.commit()
         return architecture_document_payload(session, paper_id)
     except ArchitectureError as exc:
         raise _architecture_error(exc) from exc
 
 
 @router.post("/agent-lock/release")
+@serialized_task_claim
 def release_agent_lock(
     paper_id: str,
     payload: ArchitectureLockRequest,
@@ -172,10 +184,12 @@ def release_agent_lock(
     release_architecture_lock(
         session, paper_id, owner_type="agent", owner_id=payload.owner_id
     )
+    session.commit()
     return architecture_document_payload(session, paper_id)
 
 
 @router.post("/agent-commit")
+@serialized_task_claim
 def save_agent_architecture(
     paper_id: str,
     payload: ArchitectureAgentCommitRequest,
@@ -248,48 +262,51 @@ def generate_architecture(
     session: Annotated[Session, Depends(get_session)],
 ) -> dict[str, Any]:
     _paper_or_404(session, paper_id)
-    current = architecture_document_payload(session, paper_id)
-    if current["status"] == "ready" and not payload.rebuild:
-        return current
-    conversation = get_or_create_paper_conversation(session, paper_id)
-    if active_task_for_conversation(session, conversation.id):
-        raise HTTPException(status_code=409, detail="该论文的 Agent 正在处理另一项任务")
-    task = TaskRun(
-        kind="architecture_generation",
-        payload_json={
-            "paper_id": paper_id,
-            "conversation_id": conversation.id,
-            "base_revision": current["revision"],
-            "rebuild": payload.rebuild,
-        },
-        result_json={
-            ARCHITECTURE_PROGRESS_KEY: {
-                "activities": [
-                    {
-                        "id": "agent-startup",
-                        "kind": "status",
-                        "label": "正在启动 Agent",
-                        "status": "running",
-                    }
-                ]
-            }
-        },
-    )
-    session.add(task)
-    session.flush()
+    if not settings.enable_codex_runs:
+        raise HTTPException(status_code=503, detail="Agent 运行已在服务器设置中停用")
     try:
-        item = acquire_architecture_lock(
-            session, paper_id, owner_type="agent", owner_id=task.id
-        )
+        with task_claim_transaction(session):
+            current = architecture_document_payload(session, paper_id)
+            if current["status"] == "ready" and not payload.rebuild:
+                return current
+            conversation = get_or_create_paper_conversation(session, paper_id)
+            if active_task_for_conversation(session, conversation.id):
+                raise HTTPException(
+                    status_code=409,
+                    detail="该论文的 Agent 正在处理另一项任务",
+                )
+            task = TaskRun(
+                kind="architecture_generation",
+                payload_json={
+                    "paper_id": paper_id,
+                    "conversation_id": conversation.id,
+                    "base_revision": current["revision"],
+                    "rebuild": payload.rebuild,
+                },
+                result_json={
+                    ARCHITECTURE_PROGRESS_KEY: {
+                        "activities": [
+                            {
+                                "id": "agent-startup",
+                                "kind": "status",
+                                "label": "正在启动 Agent",
+                                "status": "running",
+                            }
+                        ]
+                    }
+                },
+            )
+            session.add(task)
+            session.flush()
+            item = acquire_architecture_lock(
+                session, paper_id, owner_type="agent", owner_id=task.id
+            )
+            item.status = "generating"
+            item.generation_task_id = task.id
+            item.error = None
     except ArchitectureError as exc:
-        session.rollback()
         raise _architecture_error(exc) from exc
-    item.status = "generating"
-    item.generation_task_id = task.id
-    item.error = None
-    session.commit()
-    if settings.enable_codex_runs:
-        background_tasks.add_task(run_task, task.id)
+    background_tasks.add_task(submit_task, task.id)
     return architecture_document_payload(session, paper_id)
 
 

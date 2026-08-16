@@ -8,7 +8,7 @@ import sys
 import threading
 import time
 import uuid
-from collections.abc import Iterator, Sequence
+from collections.abc import Callable, Iterator, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
@@ -29,6 +29,14 @@ _INITIALIZATION_ERROR: str | None = None
 
 class AgentResourceUnavailable(RuntimeError):
     """Raised when production requires isolation but cgroup setup is unavailable."""
+
+
+class AgentSlotCancelled(RuntimeError):
+    """Raised while a root Agent is still waiting for execution capacity."""
+
+
+class AgentSlotTimeout(TimeoutError):
+    """Raised when the root Agent deadline expires before capacity is available."""
 
 
 @dataclass(frozen=True)
@@ -60,10 +68,34 @@ def codex_subagent_limit_args() -> list[str]:
 
 
 @contextmanager
-def root_agent_slot() -> Iterator[None]:
-    """Serialize root Codex work across exec tasks and interactive turns."""
-    _ROOT_AGENT_SLOTS.acquire()
+def root_agent_slot(
+    *,
+    deadline: float | None = None,
+    cancelled: Callable[[], bool] | None = None,
+) -> Iterator[None]:
+    """Acquire one global root-Agent slot with cancellation and deadline checks.
+
+    Ownership is deliberately not thread-local. Starlette may advance and close a
+    synchronous streaming iterator on different worker threads, while a suspended
+    worker thread may run unrelated requests.
+    """
+    if deadline is None and cancelled is None:
+        _ROOT_AGENT_SLOTS.acquire()
+    else:
+        while True:
+            if cancelled and cancelled():
+                raise AgentSlotCancelled("Agent run was cancelled while waiting for capacity")
+            remaining = None if deadline is None else deadline - time.monotonic()
+            if remaining is not None and remaining <= 0:
+                raise AgentSlotTimeout("Agent run timed out while waiting for capacity")
+            wait_seconds = 0.1 if remaining is None else min(0.1, remaining)
+            if _ROOT_AGENT_SLOTS.acquire(timeout=wait_seconds):
+                break
     try:
+        if cancelled and cancelled():
+            raise AgentSlotCancelled("Agent run was cancelled before startup")
+        if deadline is not None and time.monotonic() >= deadline:
+            raise AgentSlotTimeout("Agent run timed out before startup")
         yield
     finally:
         _ROOT_AGENT_SLOTS.release()
@@ -241,6 +273,8 @@ def _write_io_max(
                 raise
             unsupported = exc
     if unsupported is not None:
+        if settings.agent_cgroup_mode == "required":
+            raise unsupported
         logger.warning(
             "cgroup io.max is unsupported for %s; retaining io.weight only",
             ", ".join(io_devices),
@@ -262,6 +296,8 @@ class AgentCgroupScope:
         self.path = path
         self._closed = False
         self._close_lock = threading.Lock()
+        self.last_snapshot: dict[str, Any] | None = None
+        self.termination_reason: str | None = None
 
     def wrap_command(self, command: Sequence[str]) -> list[str]:
         if self.path is None:
@@ -275,13 +311,59 @@ class AgentCgroupScope:
             *command,
         ]
 
-    def close(self) -> None:
+    def snapshot(self) -> dict[str, Any]:
+        """Capture cgroup pressure/counter files before the scope is destroyed."""
+        if self.path is None:
+            return {}
+        snapshot: dict[str, Any] = {}
+        for name in ("memory.events", "pids.events", "cpu.stat", "io.stat"):
+            try:
+                raw = _read_control(self.path / name)
+            except OSError as exc:
+                snapshot[name] = {"read_error": str(exc)}
+                continue
+            if name == "io.stat":
+                devices: dict[str, dict[str, int]] = {}
+                for line in raw.splitlines():
+                    parts = line.split()
+                    counters: dict[str, int] = {}
+                    for item in parts[1:]:
+                        key, separator, value = item.partition("=")
+                        if separator and value.lstrip("-").isdigit():
+                            counters[key] = int(value)
+                    if parts:
+                        devices[parts[0]] = counters
+                snapshot[name] = devices
+                continue
+            values: dict[str, int] = {}
+            parseable = True
+            for line in raw.splitlines():
+                parts = line.split()
+                if len(parts) != 2 or not parts[1].lstrip("-").isdigit():
+                    parseable = False
+                    break
+                values[parts[0]] = int(parts[1])
+            snapshot[name] = values if parseable else {"raw": raw}
+        return snapshot
+
+    def close(self, *, termination_reason: str | None = None) -> dict[str, Any] | None:
         with self._close_lock:
             if self._closed:
-                return
+                return self.last_snapshot
+            self.termination_reason = self.termination_reason or termination_reason
+            self.last_snapshot = self.snapshot()
+            if self.path is not None:
+                logger.info(
+                    "Agent cgroup final snapshot",
+                    extra={
+                        "agent_cgroup_path": str(self.path),
+                        "agent_termination_reason": self.termination_reason,
+                        "agent_cgroup_snapshot": self.last_snapshot,
+                    },
+                )
             if self.path is None:
                 self._closed = True
-                return
+                return self.last_snapshot
             kill = self.path / "cgroup.kill"
             if kill.exists():
                 try:
@@ -292,19 +374,20 @@ class AgentCgroupScope:
                 try:
                     self.path.rmdir()
                     self._closed = True
-                    return
+                    return self.last_snapshot
                 except FileNotFoundError:
                     self._closed = True
-                    return
+                    return self.last_snapshot
                 except OSError:
                     time.sleep(0.05)
             logger.warning("Agent cgroup remained populated after cleanup: %s", self.path)
+            return self.last_snapshot
 
     def __enter__(self) -> Self:
         return self
 
-    def __exit__(self, _type: object, _value: object, _traceback: object) -> None:
-        self.close()
+    def __exit__(self, exc_type: object, _value: object, _traceback: object) -> None:
+        self.close(termination_reason="error" if exc_type else "completed")
 
 
 def create_agent_scope(run_id: str) -> AgentCgroupScope:
@@ -346,9 +429,12 @@ def attach_scope_to_process(process: Any, scope: AgentCgroupScope) -> None:
     process._frontier_agent_cgroup_scope = scope
 
 
-def close_process_scope(process: object | None) -> None:
+def close_process_scope(
+    process: object | None, *, termination_reason: str | None = None
+) -> dict[str, Any] | None:
     if process is None:
-        return
+        return None
     scope = getattr(process, "_frontier_agent_cgroup_scope", None)
     if isinstance(scope, AgentCgroupScope):
-        scope.close()
+        return scope.close(termination_reason=termination_reason)
+    return None

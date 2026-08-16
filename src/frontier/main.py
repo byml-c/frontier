@@ -15,6 +15,7 @@ from .auth import request_is_internal, request_is_trusted
 from .config import settings
 from .database import SessionLocal, create_tables
 from .interactive_stream import (
+    cancel_all_codex_runs,
     start_codex_app_server_pool,
     stop_codex_app_server_pool,
 )
@@ -26,6 +27,8 @@ from .services.author_metadata import queue_cached_arxiv_author_metadata_backfil
 from .services.common import ensure_default_settings
 from .services.completion_summary import migrate_legacy_completion_summaries
 from .services.daily_selections import migrate_legacy_daily_selections
+from .services.document_reader import shutdown_document_worker
+from .services.task_dispatcher import start_task_dispatcher, stop_task_dispatcher
 from .services.task_recovery import recover_interrupted_tasks
 from .services.translation_provider import close_translation_provider, warm_translation_provider
 
@@ -45,12 +48,16 @@ async def lifespan(_app: FastAPI):
     warm_translation_provider()
     if settings.enable_codex_runs:
         start_codex_app_server_pool()
+    start_task_dispatcher()
     start_scheduler()
     try:
         yield
     finally:
         stop_scheduler()
+        stop_task_dispatcher(wait=False)
+        cancel_all_codex_runs()
         stop_codex_app_server_pool()
+        shutdown_document_worker()
         close_translation_provider()
 
 

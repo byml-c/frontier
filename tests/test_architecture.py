@@ -1,11 +1,23 @@
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
+
+import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import select
 
+from frontier import agent_runner
+from frontier.api import architectures
 from frontier.database import SessionLocal
-from frontier.models import Conversation, TaskRun
+from frontier.models import ArchitectureDocument, Conversation, TaskRun
 from frontier.services.architecture_progress import architecture_progress_updates
+from frontier.services.architecture_scene import ArchitectureError
+
+
+@pytest.fixture(autouse=True)
+def _enable_architecture_agent(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(architectures.settings, "enable_codex_runs", True)
+    monkeypatch.setattr(architectures, "submit_task", lambda _task_id: True)
 
 
 def create_architecture_paper(client: TestClient, suffix: str) -> dict:
@@ -113,6 +125,83 @@ def sample_scene(*, layout_epoch: int = 1) -> dict:
         "sources": [{"id": "page-2", "kind": "paper-page", "pageNumber": 2}],
         "assets": [],
     }
+
+
+def test_architecture_background_generation_uses_paper_app_server_thread(
+    client: TestClient,
+    monkeypatch,
+) -> None:
+    paper_id = create_architecture_paper(client, "app-server-writer")["id"]
+    with SessionLocal() as session:
+        session.add(
+            Conversation(
+                kind="paper",
+                reference_id=paper_id,
+                title="论文问答",
+                status="active",
+                codex_session_id="paper-thread",
+            )
+        )
+        session.commit()
+
+    generated = client.post(
+        f"/api/papers/{paper_id}/architecture/generate",
+        json={"rebuild": True},
+    )
+    assert generated.status_code == 200, generated.text
+    task_id = generated.json()["taskId"]
+    observed: dict = {}
+
+    def fake_stream(prompt: str, session_id: str | None = None, **options):
+        observed.update(prompt=prompt, session_id=session_id, **options)
+        yield {"type": "thread", "thread_id": "paper-thread"}
+        yield {
+            "type": "activity",
+            "activity_id": "tool-1",
+            "kind": "tool",
+            "label": "已提交架构图",
+            "status": "completed",
+        }
+        yield {"type": "delta", "delta": "架构已生成。"}
+        with SessionLocal() as session:
+            document = session.get(ArchitectureDocument, paper_id)
+            assert document is not None
+            document.scene_json = sample_scene()
+            document.status = "ready"
+            document.revision += 1
+            session.commit()
+
+    monkeypatch.setattr(agent_runner, "stream_codex_prompt", fake_stream)
+    monkeypatch.setattr(
+        agent_runner,
+        "_codex_exec_command",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("architecture generation must not start codex exec resume")
+        ),
+    )
+
+    agent_runner.run_task(task_id)
+
+    assert observed["session_id"] == "paper-thread"
+    assert observed["run_id"] == task_id
+    assert agent_runner.settings.agent_task_timeout_seconds - 1 < observed["timeout_seconds"]
+    assert observed["timeout_seconds"] <= agent_runner.settings.agent_task_timeout_seconds
+    with SessionLocal() as session:
+        task = session.get(TaskRun, task_id)
+        conversation = session.scalar(
+            select(Conversation).where(
+                Conversation.reference_id == paper_id,
+                Conversation.status == "active",
+            )
+        )
+        document = session.get(ArchitectureDocument, paper_id)
+        assert task is not None and task.status == "completed"
+        assert task.result_json["response"] == "架构已生成。"
+        activities = task.result_json["architectureProgress"]["activities"]
+        assert any(item["id"] == "tool-1" for item in activities)
+        assert conversation is not None and conversation.codex_session_id == "paper-thread"
+        assert document is not None and document.generation_task_id is None
+        assert document.lock_owner_id is None
 
 
 def test_architecture_progress_uses_real_tool_events_and_line_count() -> None:
@@ -267,6 +356,157 @@ def test_generation_lock_blocks_user_and_cancel_releases_it(client: TestClient) 
     assert current["status"] == "missing"
     assert current["lock"] is None
     assert current["taskId"] is None
+
+
+def test_architecture_generate_claim_is_atomic_and_single_owner(
+    client: TestClient,
+) -> None:
+    paper = create_architecture_paper(client, "atomic-generation")
+    path = f"/api/papers/{paper['id']}/architecture/generate"
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        responses = list(pool.map(lambda _: client.post(path, json={"rebuild": True}), range(2)))
+
+    assert sorted(response.status_code for response in responses) == [200, 409]
+    with SessionLocal() as session:
+        tasks = session.scalars(
+            select(TaskRun).where(
+                TaskRun.kind == "architecture_generation",
+                TaskRun.payload_json["paper_id"].as_string() == paper["id"],
+            )
+        ).all()
+        document = session.get_one(ArchitectureDocument, paper["id"])
+        assert len(tasks) == 1
+        assert document.generation_task_id == tasks[0].id
+        assert document.lock_owner_id == tasks[0].id
+
+
+def test_architecture_generate_rolls_back_task_and_document_on_lock_failure(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    paper = create_architecture_paper(client, "atomic-rollback")
+
+    def fail_lock(*_args, **_kwargs):
+        raise ArchitectureError("injected lock failure")
+
+    monkeypatch.setattr(architectures, "acquire_architecture_lock", fail_lock)
+    response = client.post(
+        f"/api/papers/{paper['id']}/architecture/generate",
+        json={"rebuild": True},
+    )
+    assert response.status_code == 400
+    with SessionLocal() as session:
+        assert session.get(ArchitectureDocument, paper["id"]) is None
+        assert session.scalar(
+            select(TaskRun).where(
+                TaskRun.kind == "architecture_generation",
+                TaskRun.payload_json["paper_id"].as_string() == paper["id"],
+            )
+        ) is None
+
+
+def test_architecture_payload_heals_terminal_generation_pointer(client: TestClient) -> None:
+    paper = create_architecture_paper(client, "terminal-pointer")
+    with SessionLocal() as session:
+        task = TaskRun(
+            kind="architecture_generation",
+            status="failed",
+            error="worker stopped",
+            payload_json={"paper_id": paper["id"]},
+        )
+        session.add(task)
+        session.flush()
+        session.add(
+            ArchitectureDocument(
+                paper_id=paper["id"],
+                status="generating",
+                generation_task_id=task.id,
+                lock_owner_type="agent",
+                lock_owner_id=task.id,
+            )
+        )
+        session.commit()
+
+    response = client.get(f"/api/papers/{paper['id']}/architecture")
+    assert response.status_code == 200
+    assert response.json()["status"] == "failed"
+    assert response.json()["taskId"] is None
+    assert response.json()["lock"] is None
+
+
+def test_architecture_generate_disabled_leaves_no_queued_state(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    paper = create_architecture_paper(client, "disabled-generation")
+    monkeypatch.setattr(architectures.settings, "enable_codex_runs", False)
+
+    response = client.post(
+        f"/api/papers/{paper['id']}/architecture/generate",
+        json={"rebuild": True},
+    )
+    assert response.status_code == 503
+    with SessionLocal() as session:
+        assert session.get(ArchitectureDocument, paper["id"]) is None
+        assert session.scalar(
+            select(TaskRun).where(
+                TaskRun.kind == "architecture_generation",
+                TaskRun.payload_json["paper_id"].as_string() == paper["id"],
+            )
+        ) is None
+
+
+def test_architecture_lock_claim_has_one_owner(client: TestClient) -> None:
+    paper = create_architecture_paper(client, "atomic-user-lock")
+    path = f"/api/papers/{paper['id']}/architecture/lock"
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        responses = list(
+            pool.map(
+                lambda owner: client.post(path, json={"ownerId": owner}),
+                ["browser-a", "browser-b"],
+            )
+        )
+
+    assert sorted(response.status_code for response in responses) == [200, 423]
+    current = client.get(f"/api/papers/{paper['id']}/architecture").json()
+    assert current["lock"]["ownerId"] in {"browser-a", "browser-b"}
+
+
+def test_cancel_only_clears_architecture_pointer_owned_by_that_task(
+    client: TestClient,
+) -> None:
+    paper = create_architecture_paper(client, "cancel-owner")
+    with SessionLocal() as session:
+        cancelled_task = TaskRun(
+            kind="architecture_generation",
+            payload_json={"paper_id": paper["id"]},
+        )
+        owner_task = TaskRun(
+            kind="architecture_generation",
+            payload_json={"paper_id": paper["id"]},
+        )
+        session.add_all([cancelled_task, owner_task])
+        session.flush()
+        session.add(
+            ArchitectureDocument(
+                paper_id=paper["id"],
+                status="generating",
+                generation_task_id=owner_task.id,
+                lock_owner_type="agent",
+                lock_owner_id=owner_task.id,
+            )
+        )
+        session.commit()
+        cancelled_id = cancelled_task.id
+        owner_id = owner_task.id
+
+    response = client.post(f"/api/tasks/{cancelled_id}/cancel")
+    assert response.status_code == 200
+    with SessionLocal() as session:
+        document = session.get_one(ArchitectureDocument, paper["id"])
+        assert document.generation_task_id == owner_id
+        assert document.lock_owner_id == owner_id
 
 
 def test_architecture_commands_are_validated_against_current_scene(client: TestClient) -> None:

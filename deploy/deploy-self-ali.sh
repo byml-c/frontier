@@ -60,25 +60,50 @@ if [[ -n "${interactive_path}" ]]; then
   export PATH="${interactive_path}"
 fi
 
-echo "[1/4] 拉取代码"
+echo "[1/5] 拉取代码"
 before_commit="$(git rev-parse --short HEAD)"
 git pull --ff-only
 after_commit="$(git rev-parse --short HEAD)"
 echo "代码版本：${before_commit} -> ${after_commit}"
+
+echo "[2/5] 同步 2C2G 运行环境"
+"${project_dir}/deploy/sync-env-defaults.sh" \
+  "${project_dir}/.env" \
+  "${project_dir}/.env.example" \
+  "${project_dir}/deploy/frontier-2c2g-env.keys"
+
+cgroup_mode="$(awk -F= '
+  /^[[:space:]]*(export[[:space:]]+)?FRONTIER_AGENT_CGROUP_MODE[[:space:]]*=/ {
+    value = $0
+    sub(/^[^=]*=/, "", value)
+    gsub(/^[[:space:]]+|[[:space:]]+$/, "", value)
+    mode = value
+  }
+  END { print mode }
+' "${project_dir}/.env")"
+if [[ "${cgroup_mode}" == "required" ]]; then
+  delegate="$(systemctl show "${service_name}" --property=Delegate --value 2>/dev/null || true)"
+  if [[ "${delegate}" != "yes" ]]; then
+    echo "错误：环境已要求 cgroup 隔离，但 ${service_name} 尚未设置 Delegate=yes。" >&2
+    echo "请先同步 deploy/frontier.service.example 中的资源配置并执行 systemctl daemon-reload。" >&2
+    echo "服务尚未重启，当前线上进程不受本次环境文件修改影响。" >&2
+    exit 1
+  fi
+fi
 
 if ! command -v pnpm >/dev/null 2>&1; then
   echo "错误：服务器未安装 pnpm。" >&2
   exit 1
 fi
 
-echo "[2/4] 同步前端依赖"
+echo "[3/5] 同步前端依赖"
 cd "${project_dir}/web"
 pnpm install --frozen-lockfile
 
-echo "[3/4] 构建 Web"
+echo "[4/5] 构建 Web"
 pnpm build
 
-echo "[4/4] 重启 ${service_name}"
+echo "[5/5] 重启 ${service_name}"
 if [[ ${EUID} -eq 0 ]]; then
   systemctl restart "${service_name}"
   systemctl is-active --quiet "${service_name}"

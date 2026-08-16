@@ -1,9 +1,14 @@
 from __future__ import annotations
 
+import threading
+import time
+
 import pytest
 
+from frontier import interactive_stream
 from frontier.database import SessionLocal
 from frontier.models import Message, TaskRun
+from frontier.services import agent_runtime
 
 
 def test_cancel_conversation_task_persists_partial_response(client, monkeypatch) -> None:
@@ -151,3 +156,42 @@ def test_process_registry_stops_only_the_target_run(monkeypatch) -> None:
     assert stopped == [first]
     interactive_stream.unregister_codex_run("first-run", first)  # type: ignore[arg-type]
     interactive_stream.unregister_codex_run("second-run", second)  # type: ignore[arg-type]
+
+
+def test_stream_cancel_wakes_root_slot_waiter_before_worker_start(monkeypatch) -> None:
+    slots = threading.BoundedSemaphore(1)
+    slots.acquire()
+    monkeypatch.setattr(agent_runtime, "_ROOT_AGENT_SLOTS", slots)
+    errors: list[BaseException] = []
+
+    def consume() -> None:
+        try:
+            list(
+                interactive_stream.stream_codex_prompt(
+                    "queued",
+                    run_id="queued-before-root-slot",
+                    timeout_seconds=5,
+                )
+            )
+        except BaseException as exc:  # noqa: BLE001
+            errors.append(exc)
+
+    waiter = threading.Thread(target=consume)
+    waiter.start()
+    deadline = time.monotonic() + 1
+    while time.monotonic() < deadline:
+        with interactive_stream._RUNS_LOCK:
+            registered = "queued-before-root-slot" in interactive_stream._ACTIVE_RUNS
+        if registered:
+            break
+        time.sleep(0.005)
+    else:
+        pytest.fail("run did not register before waiting for the root slot")
+
+    assert interactive_stream.cancel_codex_run("queued-before-root-slot") is True
+    waiter.join(timeout=1)
+    slots.release()
+
+    assert not waiter.is_alive()
+    assert len(errors) == 1
+    assert isinstance(errors[0], interactive_stream.CodexRunCancelled)

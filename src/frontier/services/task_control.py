@@ -1,27 +1,170 @@
 from __future__ import annotations
 
+import threading
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
+from dataclasses import dataclass
+from datetime import date
+from functools import wraps
+
 from sqlalchemy.orm import Session
 from sqlalchemy.sql import select, update
 
-from ..interactive_stream import cancel_codex_run
-from ..models import ArchitectureDocument, Conversation, Message, TaskRun, utcnow
+from ..interactive_stream import cancel_codex_run, forget_codex_thread
+from ..models import ArchitectureDocument, Brief, Conversation, Message, TaskRun, utcnow
 from .architecture_scene import release_agent_lock_for_task
 
 ACTIVE_TASK_STATUSES = {"queued", "running"}
+_TASK_CLAIM_LOCK = threading.RLock()
+
+
+@dataclass(frozen=True)
+class TaskClaim:
+    task: TaskRun | None
+    created: bool
+    published_brief_id: str | None = None
+    conversation_conflict: bool = False
+
+
+@contextmanager
+def task_claim_transaction(session: Session) -> Iterator[None]:
+    """Serialize task claims and commit their durable state as one transaction.
+
+    SQLite cannot express the JSON-backed conversation/daily claim as a useful
+    unique constraint. Frontier is a single service process, so this lock closes
+    the check-then-insert race while the database transaction keeps all related
+    rows (message, task, document lock) atomic.
+    """
+    with _TASK_CLAIM_LOCK:
+        session.expire_all()
+        try:
+            yield
+            session.commit()
+        except BaseException:
+            session.rollback()
+            raise
+
+
+def serialized_task_claim[**P, R](function: Callable[P, R]) -> Callable[P, R]:
+    """Keep an entire synchronous endpoint preparation phase inside one claim."""
+
+    @wraps(function)
+    def wrapped(*args: P.args, **kwargs: P.kwargs) -> R:
+        session = kwargs.get("session")
+        if not isinstance(session, Session):
+            session = next((value for value in args if isinstance(value, Session)), None)
+        if not isinstance(session, Session):
+            raise TypeError("serialized_task_claim requires a SQLAlchemy Session")
+        with task_claim_transaction(session):
+            return function(*args, **kwargs)
+
+    return wrapped
 
 
 def active_task_for_conversation(session: Session, conversation_id: str) -> TaskRun | None:
-    tasks = session.scalars(
-        select(TaskRun).where(TaskRun.status.in_(ACTIVE_TASK_STATUSES))
-    ).all()
-    return next(
-        (
-            task
-            for task in tasks
-            if (task.payload_json or {}).get("conversation_id") == conversation_id
-        ),
-        None,
+    return session.scalar(
+        select(TaskRun)
+        .where(
+            TaskRun.status.in_(ACTIVE_TASK_STATUSES),
+            TaskRun.payload_json["conversation_id"].as_string() == conversation_id,
+        )
+        .order_by(TaskRun.created_at.asc(), TaskRun.id.asc())
+        .limit(1)
     )
+
+
+def retry_task_for(session: Session, task_id: str) -> TaskRun | None:
+    """Return the durable successor for an idempotent retry request."""
+    return session.scalar(
+        select(TaskRun)
+        .where(TaskRun.payload_json["retry_of"].as_string() == task_id)
+        .order_by(TaskRun.created_at.asc(), TaskRun.id.asc())
+        .limit(1)
+    )
+
+
+def _daily_claim(
+    session: Session,
+    target_date: date,
+    *,
+    payload: dict,
+) -> TaskClaim:
+    published = session.scalar(
+        select(Brief).where(
+            Brief.brief_date == target_date,
+            Brief.status == "published",
+        )
+    )
+    if published is not None:
+        task = session.get(TaskRun, published.task_id) if published.task_id else None
+        return TaskClaim(task=task, created=False, published_brief_id=published.id)
+
+    target = target_date.isoformat()
+    active = session.scalar(
+        select(TaskRun)
+        .where(
+            TaskRun.kind == "daily_brief",
+            TaskRun.payload_json["date"].as_string() == target,
+            TaskRun.status.in_(ACTIVE_TASK_STATUSES),
+        )
+        .order_by(TaskRun.created_at.asc(), TaskRun.id.asc())
+        .limit(1)
+    )
+    if active is not None:
+        return TaskClaim(task=active, created=False)
+
+    task = TaskRun(kind="daily_brief", payload_json={**payload, "date": target})
+    session.add(task)
+    session.flush()
+    return TaskClaim(task=task, created=True)
+
+
+def get_or_create_daily_task(
+    session: Session,
+    target_date: date,
+    *,
+    payload: dict | None = None,
+) -> TaskClaim:
+    """Atomically claim one active daily run unless that brief is published."""
+    with task_claim_transaction(session):
+        return _daily_claim(session, target_date, payload=payload or {})
+
+
+def get_or_create_retry_task(session: Session, old: TaskRun) -> TaskClaim:
+    """Create one retry successor, respecting conversation and daily claims."""
+    with task_claim_transaction(session):
+        current = session.get(TaskRun, old.id)
+        if current is None:
+            return TaskClaim(task=None, created=False)
+        existing = retry_task_for(session, current.id)
+        if existing is not None:
+            return TaskClaim(task=existing, created=False)
+
+        payload = {**(current.payload_json or {}), "retry_of": current.id}
+        if current.kind == "daily_brief":
+            raw_date = payload.get("date")
+            if not isinstance(raw_date, str):
+                raise ValueError("daily_brief requires an ISO date")
+            return _daily_claim(
+                session,
+                date.fromisoformat(raw_date),
+                payload=payload,
+            )
+
+        conversation_id = payload.get("conversation_id")
+        if isinstance(conversation_id, str):
+            active = active_task_for_conversation(session, conversation_id)
+            if active is not None:
+                return TaskClaim(
+                    task=active,
+                    created=False,
+                    conversation_conflict=True,
+                )
+
+        task = TaskRun(kind=current.kind, payload_json=payload)
+        session.add(task)
+        session.flush()
+        return TaskClaim(task=task, created=True)
 
 
 def cancelled_activities(values: object) -> list[dict]:
@@ -49,6 +192,7 @@ def cancel_task_run(session: Session, task: TaskRun) -> bool | None:
     response = str(result.get("response") or "")
     activities = cancelled_activities(result.get("activities"))
     conversation_id = task.payload_json.get("conversation_id")
+    abandoned_thread_id: str | None = None
 
     if isinstance(conversation_id, str):
         messages = session.scalars(
@@ -92,6 +236,7 @@ def cancel_task_run(session: Session, task: TaskRun) -> bool | None:
         if conversation:
             # A cancelled prompt may already be inside the Codex thread. Force the
             # next turn to rebuild from history, where this turn is explicitly skipped.
+            abandoned_thread_id = conversation.codex_session_id
             conversation.codex_session_id = None
 
     result_json = {
@@ -115,11 +260,17 @@ def cancel_task_run(session: Session, task: TaskRun) -> bool | None:
         session.refresh(task)
         return None
     if task.kind == "architecture_generation":
-        document = session.get(ArchitectureDocument, task.payload_json.get("paper_id"))
+        document = session.scalar(
+            select(ArchitectureDocument).where(
+                ArchitectureDocument.generation_task_id == task.id
+            )
+        )
         if document:
             document.status = "ready" if document.scene_json else "missing"
             document.error = None
             document.generation_task_id = None
     release_agent_lock_for_task(session, task.id)
     session.commit()
-    return cancel_codex_run(task.id)
+    process_stopped = cancel_codex_run(task.id)
+    forget_codex_thread(abandoned_thread_id)
+    return process_stopped
