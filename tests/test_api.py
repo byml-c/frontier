@@ -187,14 +187,21 @@ def test_health_and_defaults(client: TestClient) -> None:
     settings = {item["key"]: item["value_json"] for item in client.get("/api/settings").json()}
     assert settings["abstract_limit"] == 50
     assert settings["fulltext_limit"] == 19
-    assert settings["brief_limit"] == 5
+    assert settings["brief_limit"] == 8
     assert settings["featured_limit"] == 4
     assert (
         client.put(
             "/api/settings",
-            json={"brief_limit": 5, "featured_limit": 4},
+            json={"brief_limit": 10, "featured_limit": 4},
         ).status_code
         == 200
+    )
+    assert (
+        client.put(
+            "/api/settings",
+            json={"brief_limit": 11, "featured_limit": 4},
+        ).status_code
+        == 422
     )
     assert (
         client.put(
@@ -202,6 +209,13 @@ def test_health_and_defaults(client: TestClient) -> None:
             json={"brief_limit": 3, "featured_limit": 3},
         ).status_code
         == 422
+    )
+    assert (
+        client.put(
+            "/api/settings",
+            json={"brief_limit": 8, "featured_limit": 4},
+        ).status_code
+        == 200
     )
 
 
@@ -918,7 +932,7 @@ def test_brief_publish_drops_papers_that_started_reading_after_ranking(
     assert [item["paper"]["id"] for item in published.json()["items"]] == [eligible["id"]]
 
 
-def test_brief_accepts_only_top_five_and_prewarms_first_four_featured_papers(
+def test_brief_accepts_top_ten_and_prewarms_first_four_featured_papers(
     client: TestClient,
     monkeypatch,
 ) -> None:
@@ -929,7 +943,10 @@ def test_brief_accepts_only_top_five_and_prewarms_first_four_featured_papers(
     )
     monkeypatch.setattr(
         "frontier.api.briefs.get_setting",
-        lambda _session, key, default: 6 if key == "featured_limit" else default,
+        lambda _session, key, default: {
+            "brief_limit": 10,
+            "featured_limit": 6,
+        }.get(key, default),
     )
     brief = client.post(
         "/api/briefs",
@@ -946,11 +963,20 @@ def test_brief_accepts_only_top_five_and_prewarms_first_four_featured_papers(
             ).status_code
             == 200
         )
-    related = create_paper(client, "Related paper without text prewarm")
+    for index in range(5, 10):
+        related = create_paper(client, f"Related paper without text prewarm {index}")
+        assert (
+            client.post(
+                f"/api/briefs/{brief['id']}/items",
+                json={"paper_id": related["id"], "rank": index + 1, "tier": "related"},
+            ).status_code
+            == 200
+        )
+    overflow = create_paper(client, "Paper beyond the ten-item limit")
     assert (
         client.post(
             f"/api/briefs/{brief['id']}/items",
-            json={"paper_id": related["id"], "rank": 6, "tier": "related"},
+            json={"paper_id": overflow["id"], "rank": 11, "tier": "related"},
         ).status_code
         == 409
     )

@@ -11,13 +11,18 @@ from sqlalchemy.orm import Session
 
 from ..models import AppSetting, OperationLog
 
+BRIEF_LIMIT_DEFAULT = 8
+BRIEF_LIMIT_MAX = 10
+FEATURED_LIMIT_DEFAULT = 4
+BRIEF_LIMIT_DEFAULT_MIGRATION_ACTION = "setting.default.brief_limit.8"
+
 DEFAULT_SETTINGS: dict[str, Any] = {
     "daily_hour": 5,
     "daily_minute": 0,
     "abstract_limit": 50,
     "fulltext_limit": 19,
-    "brief_limit": 5,
-    "featured_limit": 4,
+    "brief_limit": BRIEF_LIMIT_DEFAULT,
+    "featured_limit": FEATURED_LIMIT_DEFAULT,
     "candidate_lookback_days": 14,
     "initial_interest_domains": [
         "VLA",
@@ -97,8 +102,22 @@ def ensure_default_settings(session: Session) -> None:
         if key not in existing:
             session.add(AppSetting(key=key, value_json=value))
     brief_limit = session.get(AppSetting, "brief_limit")
-    if brief_limit and int(brief_limit.value_json) > 5:
-        brief_limit.value_json = 5
+    default_migrated = session.scalar(
+        select(OperationLog.id)
+        .where(OperationLog.action == BRIEF_LIMIT_DEFAULT_MIGRATION_ACTION)
+        .limit(1)
+    )
+    if not default_migrated:
+        previous_value = int(brief_limit.value_json) if brief_limit else None
+        if brief_limit and previous_value == 5:
+            brief_limit.value_json = BRIEF_LIMIT_DEFAULT
+        log_operation(
+            session,
+            action=BRIEF_LIMIT_DEFAULT_MIGRATION_ACTION,
+            detail={"previous_value": previous_value, "default_value": BRIEF_LIMIT_DEFAULT},
+        )
+    if brief_limit and int(brief_limit.value_json) > BRIEF_LIMIT_MAX:
+        brief_limit.value_json = BRIEF_LIMIT_MAX
     session.commit()
 
 

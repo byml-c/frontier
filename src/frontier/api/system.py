@@ -21,7 +21,13 @@ from ..models import AppSetting, Conversation, Memory, OperationLog, Paper, Task
 from ..schemas import MemoryCreate, MemoryUpdate, SettingUpdate, TaskCreate
 from ..services.backup import create_local_git_backup
 from ..services.bootstrap import import_bibtex
-from ..services.common import log_operation, model_dict
+from ..services.common import (
+    BRIEF_LIMIT_DEFAULT,
+    BRIEF_LIMIT_MAX,
+    FEATURED_LIMIT_DEFAULT,
+    log_operation,
+    model_dict,
+)
 from ..services.ingest import create_or_update_paper, search_arxiv
 from ..services.interest_evidence import DERIVED_INTEREST_PROFILE_ID
 from ..services.paper_agent_context import paper_agent_context_sync_required
@@ -42,7 +48,7 @@ NUMERIC_SETTING_RANGES = {
     "daily_minute": (0, 59),
     "abstract_limit": (1, 50),
     "fulltext_limit": (1, 19),
-    "brief_limit": (1, 5),
+    "brief_limit": (1, BRIEF_LIMIT_MAX),
     "featured_limit": (1, 4),
     "candidate_lookback_days": (1, 90),
 }
@@ -63,7 +69,9 @@ def _validate_setting_value(key: str, value: object) -> None:
 
 
 def _validate_setting_relationships(values: dict[str, object]) -> None:
-    if int(values.get("featured_limit", 4)) >= int(values.get("brief_limit", 5)):
+    if int(values.get("featured_limit", FEATURED_LIMIT_DEFAULT)) >= int(
+        values.get("brief_limit", BRIEF_LIMIT_DEFAULT)
+    ):
         raise HTTPException(status_code=422, detail="featured_limit must be below brief_limit")
 
 

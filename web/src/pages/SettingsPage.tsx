@@ -34,7 +34,7 @@ const LABELS: Record<string, { label: string; help: string }> = {
   daily_minute: { label: "日报启动分钟", help: "保存后重新加载运行计划" },
   abstract_limit: { label: "摘要阅读上限", help: "每期最多阅读的摘要数量" },
   fulltext_limit: { label: "全文阅读上限", help: "进入推荐判断前完整阅读的论文数量" },
-  brief_limit: { label: "简报论文上限", help: "每期自动推荐的论文总数，最多 5 篇" },
+  brief_limit: { label: "简报论文上限", help: "每期自动推荐的论文总数，默认 8 篇，最多 10 篇" },
   featured_limit: { label: "重点推荐上限", help: "重点推荐数量必须小于简报总量" },
   candidate_lookback_days: { label: "候选时间窗口", help: "时间衰减参与排序，不作为硬性截止" },
   log_level: { label: "日志级别", help: "控制服务器记录的详细程度" },

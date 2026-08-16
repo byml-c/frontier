@@ -10,7 +10,14 @@ from sqlalchemy.orm import Session
 from ..database import get_session
 from ..models import Brief, BriefItem, Paper, PaperNode, PaperTag, ResearchNode, Tag
 from ..schemas import BriefCreate, BriefItemCreate
-from ..services.common import get_setting, log_operation, model_dict
+from ..services.common import (
+    BRIEF_LIMIT_DEFAULT,
+    BRIEF_LIMIT_MAX,
+    FEATURED_LIMIT_DEFAULT,
+    get_setting,
+    log_operation,
+    model_dict,
+)
 from ..services.completion_summary import (
     brief_completion_summary,
     completion_summary_structured,
@@ -256,7 +263,10 @@ def add_brief_item(
             )
         ).all()
     )
-    limit = min(5, int(get_setting(session, "brief_limit", 5)))
+    limit = min(
+        BRIEF_LIMIT_MAX,
+        int(get_setting(session, "brief_limit", BRIEF_LIMIT_DEFAULT)),
+    )
     if current_count >= limit:
         raise HTTPException(status_code=409, detail=f"Brief item limit reached ({limit})")
     featured_count = len(
@@ -264,7 +274,9 @@ def add_brief_item(
             select(BriefItem.id).where(BriefItem.brief_id == brief_id, BriefItem.tier == "featured")
         ).all()
     )
-    featured_limit = int(get_setting(session, "featured_limit", 4))
+    featured_limit = int(
+        get_setting(session, "featured_limit", FEATURED_LIMIT_DEFAULT)
+    )
     if payload.tier == "featured" and featured_count >= featured_limit:
         raise HTTPException(
             status_code=409, detail=f"Featured item limit reached ({featured_limit})"
@@ -306,7 +318,10 @@ def publish_brief(
     if not rows:
         raise HTTPException(status_code=409, detail="Cannot publish a brief without unread papers")
     recommendation_count = sum(item.tier != "manual" for item, _paper in rows)
-    limit = min(5, int(get_setting(session, "brief_limit", 5)))
+    limit = min(
+        BRIEF_LIMIT_MAX,
+        int(get_setting(session, "brief_limit", BRIEF_LIMIT_DEFAULT)),
+    )
     if recommendation_count > limit:
         raise HTTPException(
             status_code=409,

@@ -274,7 +274,8 @@ calibration is weak, raise the evidence threshold independently. The graph descr
 questions and accumulated evidence; it is not by itself proof that the user likes a topic.
 Collect arXiv candidates using the calibrated interests and relevant graph questions. Respect the current
 limits returned by `frontier setting list`: abstracts, full texts, total brief items, and featured
-items. Rank all viable candidates first, then generate only the top five non-manual recommendations.
+items. Rank all viable candidates first, then generate no more than the configured total number of
+non-manual recommendations.
 Before ranking or adding a paper, inspect its existing record and exclude every paper whose
 status is not `candidate`; papers in `reading`, `feedback_pending`, `completed`, or `ignored` status
 must never appear in the daily recommendations. Read full PDF text for final candidates and update
