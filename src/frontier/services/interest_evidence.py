@@ -22,7 +22,7 @@ from ..models import (
 from .common import model_dict
 from .completion_summary import completion_summary_structured
 
-INTEREST_CONTEXT_SCHEMA_VERSION = 1
+INTEREST_CONTEXT_SCHEMA_VERSION = 2
 DERIVED_INTEREST_PROFILE_ID = "derived-interest-profile-v1"
 READING_PROVENANCE_KEY = "reading_provenance"
 FEEDBACK_PROVENANCE_KEY = "feedback_provenance"
@@ -381,11 +381,6 @@ def build_interest_context(session: Session, *, recent_limit: int = 20) -> dict[
     topic_count = len(topics)
     topics = topics[:100]
 
-    daily_recommended_ids = {
-        item.paper_id
-        for item, brief in by_item.values()
-        if item.tier != "manual" and brief.status == "published"
-    }
     attributed_feedback = [
         (
             paper,
@@ -444,14 +439,13 @@ def build_interest_context(session: Session, *, recent_limit: int = 20) -> dict[
             research_errors.append(research_error)
 
     calibration = {
-        "unique_daily_recommendations": len(daily_recommended_ids),
+        "sample_policy": "confirmed_or_explicitly_ignored_only",
         "evaluated_daily_recommendations": len(daily_feedback),
         "completed_daily_recommendations": len(completed_recommended),
         "ignored_daily_recommendations": len(ignored_recommended),
         "interest_hits": interest_hits,
         "quality_hits": quality_hits,
         "joint_hits": joint_hits,
-        "feedback_coverage": _rate(len(daily_feedback), len(daily_recommended_ids)),
         "interest_hit_rate": _rate(interest_hits, len(daily_feedback)),
         # Ignore is explicit weak negative interest but does not label scientific quality.
         "quality_hit_rate": _rate(quality_hits, len(completed_recommended)),
@@ -658,6 +652,7 @@ def build_interest_context(session: Session, *, recent_limit: int = 20) -> dict[
                 "feedback_digest": previous_digest,
             }
     source_payload = {
+        "schema_version": INTEREST_CONTEXT_SCHEMA_VERSION,
         "feedback_digest": feedback_digest,
         "semantic_profile": (
             {

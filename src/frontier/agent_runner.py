@@ -258,6 +258,14 @@ stronger than seed interests or Agent-authored graph structure. Keep interest an
 independent axes. A neutral judgment is neither positive nor negative interest. An ignored
 recommendation is weak negative-interest evidence, not proof of low
 paper quality. Do not learn from Agent suggestions or from unread candidates.
+Treat every recommendation without user-confirmed feedback as missing data, regardless of its age,
+rank, or whether reading was started. Never interpret not opening, not reading, or not confirming a
+paper as neutral or negative evidence; exclude those papers from hit-rate and calibration
+denominators. Only `completed` feedback and explicit `ignored` actions are observations. Ignore any
+workflow memory that infers preferences from non-response, and never create such a memory.
+For `candidate`, `reading`, or `feedback_pending` papers, canonical `interest_level` and
+`quality_level` are null. Legacy `is_interested=false` and `is_quality=false` values on those papers
+are storage defaults, not user judgments; never use them as ranking or learning evidence.
 If confirmed feedback exists and `layers.semantic_profile` is missing, marked `stale`, or its
 metadata `feedback_digest` differs from the current `feedback_digest`, rebuild that single derived profile with
 `frontier interest profile-update`. Include only durable cross-paper preferences, keep positive and

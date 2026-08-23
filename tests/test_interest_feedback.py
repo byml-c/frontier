@@ -153,10 +153,7 @@ def test_confirmed_feedback_is_attributed_and_reused_by_daily_context(
     assert topic["neutral_quality"] == 1
     assert topic["interest_affinity"] == 0.3333
     calibration = context["calibration"]
-    assert (
-        calibration["unique_daily_recommendations"]
-        == before["unique_daily_recommendations"] + 1
-    )
+    assert calibration["sample_policy"] == "confirmed_or_explicitly_ignored_only"
     assert (
         calibration["evaluated_daily_recommendations"]
         == before["evaluated_daily_recommendations"] + 1
@@ -523,13 +520,78 @@ def test_unattributed_feedback_learns_without_polluting_daily_metrics(
     signal = next(item for item in context["recent_feedback"] if item["paper_id"] == paper["id"])
     assert signal["attribution"]["kind"] == "unattributed"
     assert (
-        context["calibration"]["unique_daily_recommendations"]
-        == before["unique_daily_recommendations"]
+        context["calibration"]["evaluated_daily_recommendations"]
+        == before["evaluated_daily_recommendations"]
     )
     assert any(
         item["name"] == tag["name"]
         for item in context["layers"]["confirmed_topic_profile"]["topics"]
     )
+
+
+def test_unconfirmed_daily_recommendations_are_missing_data_not_feedback(
+    client: TestClient,
+) -> None:
+    before = client.get("/api/interests/context").json()
+    untouched = _paper(client, "Published but untouched recommendation", relevance=0.9, research=0.9)
+    reading = _paper(client, "Reading without confirmed feedback", relevance=0.9, research=0.9)
+    pending = _paper(client, "Pending without confirmed feedback", relevance=0.9, research=0.9)
+    brief = _published_brief(client, [untouched, reading, pending], day_offset=27)
+    items = {item["paper"]["id"]: item for item in brief["items"]}
+
+    assert (
+        client.post(
+            f"/api/papers/{reading['id']}/start-reading",
+            json={"source_brief_item_id": items[reading["id"]]["id"]},
+        ).status_code
+        == 200
+    )
+    assert (
+        client.post(
+            f"/api/papers/{pending['id']}/start-reading",
+            json={"source_brief_item_id": items[pending["id"]]["id"]},
+        ).status_code
+        == 200
+    )
+    assert (
+        client.post(
+            f"/api/papers/{pending['id']}/finish",
+            json={"completion_summary_structured": _summary("用户尚未确认态度。")},
+        ).status_code
+        == 200
+    )
+
+    context = client.get("/api/interests/context").json()
+    excluded_ids = {untouched["id"], reading["id"], pending["id"]}
+    assert context["calibration"] == before["calibration"]
+    assert context["feedback_digest"] == before["feedback_digest"]
+    assert context["source_digest"] == before["source_digest"]
+    assert (
+        context["layers"]["confirmed_topic_profile"]
+        == before["layers"]["confirmed_topic_profile"]
+    )
+    assert context["layers"]["semantic_profile"] == before["layers"]["semantic_profile"]
+    assert not excluded_ids & {
+        item["paper_id"] for item in context["recent_feedback"]
+    }
+
+
+def test_interest_context_schema_version_invalidates_source_digest(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import frontier.services.interest_evidence as evidence_service
+
+    before = client.get("/api/interests/context").json()
+    monkeypatch.setattr(
+        evidence_service,
+        "INTEREST_CONTEXT_SCHEMA_VERSION",
+        before["schema_version"] + 1,
+    )
+    after = client.get("/api/interests/context").json()
+
+    assert after["feedback_digest"] == before["feedback_digest"]
+    assert after["source_digest"] != before["source_digest"]
 
 
 def test_explicit_manual_source_wins_over_historical_daily_recommendation(
