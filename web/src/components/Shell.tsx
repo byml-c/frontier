@@ -17,6 +17,7 @@ import { templateSurfaces } from "../theme";
 import { AgentPanel } from "./AgentPanel";
 import { type PageHeaderContent, usePageHeaderContent } from "./PageHeaderContext";
 import { PageHeaderProvider } from "./PageHeaderProvider";
+import { PaperTitle } from "./PaperTitle";
 
 type NavChild = { to: string; label: string; active: (path: string, search: string) => boolean };
 type NavItem = { to: string; label: string; icon: typeof DescriptionRounded; active?: (path: string) => boolean; children?: NavChild[] };
@@ -101,14 +102,14 @@ function ShellLayout() {
         {pageHeader && (compactHeader ? <Box component="section" sx={{ py: .75, borderTop: 1, borderColor: "divider" }}>
           <Stack direction="row" alignItems="center" spacing={1} sx={{ minHeight: 36 }}>
             <Box sx={{ flex: 1, minWidth: 0, overflow: "hidden" }}>
-              <Typography noWrap sx={{ overflow: "hidden", textOverflow: "ellipsis", fontSize: "1.05rem", lineHeight: 1.35, fontWeight: 650 }}>{pageHeader.title}</Typography>
+              <Typography noWrap sx={{ overflow: "hidden", textOverflow: "ellipsis", fontSize: "1.05rem", lineHeight: 1.35, fontWeight: 650 }}><PaperTitle title={pageHeader.title} /></Typography>
             </Box>
             {pageHeader.actions && <Stack direction="row" spacing={.5} sx={{ flexShrink: 0 }}>{pageHeader.actions}</Stack>}
           </Stack>
         </Box> : <Box component="section" sx={{ minHeight: 56, py: 1, borderTop: 1, borderColor: "divider", display: "grid", gridTemplateColumns: "minmax(0, 1fr) auto minmax(0, 1fr)", alignItems: "center", columnGap: 1.5 }}>
           <Box sx={{ minWidth: 0, overflow: "hidden" }}>
             {pageHeader.eyebrow && <Typography variant="caption" color="text.secondary" noWrap display="block" sx={{ mb: .15 }}>{pageHeader.eyebrow}</Typography>}
-            <Typography noWrap sx={{ minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", fontSize: "1.05rem", lineHeight: 1.35, fontWeight: 650 }}>{pageHeader.title}</Typography>
+            <Typography noWrap sx={{ minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", fontSize: "1.05rem", lineHeight: 1.35, fontWeight: 650 }}><PaperTitle title={pageHeader.title} /></Typography>
           </Box>
           <Box sx={{ justifySelf: "center", minWidth: 0 }}>{pageHeader.tabs}</Box>
           {pageHeader.actions && <Stack direction="row" spacing={1} sx={{ justifySelf: "end", minWidth: 0 }}>{pageHeader.actions}</Stack>}

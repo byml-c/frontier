@@ -9,14 +9,10 @@ import { api, formatDate } from "../api";
 import { CompletionSummarySections } from "../components/CompletionSummarySections";
 import { DailyCalendar } from "../components/DailyCalendar";
 import { MarkdownMessage } from "../components/MarkdownMessage";
+import { PaperTitle } from "../components/PaperTitle";
 import { DailyDiscussion } from "../components/DailyDiscussion";
 import { Empty, ErrorState, Loading } from "../components/States";
 import type { DailyPayload, DailySelection } from "../types";
-
-function shortPaperTitle(title: string) {
-  const normalized = title.replace(/\s+/g, " ").trim();
-  return normalized.length > 24 ? `${normalized.slice(0, 24)}…` : normalized;
-}
 
 export function DailyPage() {
   const [searchParams, setSearchParams] = useSearchParams();
@@ -51,7 +47,7 @@ export function DailyPage() {
         allowScrollButtonsMobile
         aria-label="每日精选论文"
         sx={{ maxWidth: "100%", minWidth: 0, "& .MuiTab-root": { minWidth: 0, maxWidth: { xs: 210, sm: 280 }, px: { xs: 1.5, sm: 2.5 } } }}
-      >{selections.map((selection, index) => <Tab key={selection.paper.id} value={selection.paper.id} label={`${index + 1} · ${shortPaperTitle(selection.paper.title)}`} />)}</Tabs></Box>}
+      >{selections.map((selection, index) => <Tab key={selection.paper.id} value={selection.paper.id} label={<Box component="span" sx={{ display: "block", maxWidth: "100%", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{index + 1} · <PaperTitle title={selection.paper.title} /></Box>} />)}</Tabs></Box>}
       <DailyPaperCard selection={activeSelection} />
       <DailyDiscussion key={activeSelection.paper.id} paperId={activeSelection.paper.id} />
     </>}
@@ -64,7 +60,7 @@ function DailyPaperCard({ selection }: { selection: DailySelection }) {
   const authors = paper.authors?.map((author) => author.name).filter(Boolean).join(", ");
   return <Card><CardContent sx={{ p: { xs: 2.25, sm: 3.5 } }}>
     <Stack direction="row" justifyContent="space-between" alignItems="flex-start" spacing={2}><Stack direction="row" flexWrap="wrap" gap={.75}><Chip size="small" color="primary" label="每日精选" />{paper.tags.map((tag) => <Chip size="small" variant="outlined" label={tag.name} key={tag.id} sx={{ color: tag.color || undefined }} />)}</Stack>{sourceUrl && <Button component="a" href={sourceUrl} target="_blank" rel="noreferrer" endIcon={<ArrowOutwardRounded />} sx={{ flexShrink: 0 }}>{paper.arxiv_id ? "arXiv" : "原文"}</Button>}</Stack>
-    <Typography variant="h1" sx={{ mt: 2, fontSize: { xs: "1.55rem", sm: "2rem" }, lineHeight: 1.25 }}>{paper.title}</Typography>
+    <Typography variant="h1" sx={{ mt: 2, fontSize: { xs: "1.55rem", sm: "2rem" }, lineHeight: 1.25 }}><PaperTitle title={paper.title} /></Typography>
     <Typography color="text.secondary" sx={{ mt: 1 }}>{paper.first_author || "作者信息待确认"}{paper.corresponding_author ? ` · 通讯作者 ${paper.corresponding_author}` : ""}{paper.primary_affiliation ? ` · ${paper.primary_affiliation}` : ""} · {paper.source.toUpperCase()} · {formatDate(paper.published_at)}</Typography>
     {authors && <Typography variant="body2" color="text.secondary" sx={{ mt: .75, display: "-webkit-box", WebkitLineClamp: 3, WebkitBoxOrient: "vertical", overflow: "hidden" }}>{authors}</Typography>}
     <Divider sx={{ my: 2.5 }} />

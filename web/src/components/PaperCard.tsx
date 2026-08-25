@@ -30,6 +30,7 @@ import type { Paper } from "../types";
 import { Modal } from "./Modal";
 import { MarkdownMessage } from "./MarkdownMessage";
 import { PaperMetadataDialog } from "./PaperMetadataDialog";
+import { PaperTitle } from "./PaperTitle";
 
 export function PaperCard({ paper, rank, featured = false, briefItemId }: { paper: Paper; rank?: number; featured?: boolean; briefItemId?: string }) {
   const navigate = useNavigate();
@@ -49,7 +50,7 @@ export function PaperCard({ paper, rank, featured = false, briefItemId }: { pape
       </Stack>
       {paper.analysis_status && ["queued", "processing"].includes(paper.analysis_status) && <Alert severity="info" icon={<CircularProgress size={18} />} sx={{ mb: 1.25, py: .25 }}>正在读取全文并整理信息。</Alert>}
       {paper.analysis_status === "failed" && <Alert severity="error" sx={{ mb: 1.25, py: .25 }}>处理失败：{paper.analysis_error || "请在任务页查看原因"}</Alert>}
-      <Typography variant="h3" component="h2">{paper.title}</Typography>
+      <Typography variant="h3" component="h2"><PaperTitle title={paper.title} /></Typography>
       <Typography variant="body2" color="text.secondary" sx={{ mt: .5 }}>{paper.first_author || "作者信息待确认"}{paper.corresponding_author ? ` · 通讯作者 ${paper.corresponding_author}` : ""}{paper.primary_affiliation ? ` · ${paper.primary_affiliation}` : ""}</Typography>
       <Box color="text.secondary" sx={{ mt: 1, fontSize: ".875rem" }}><MarkdownMessage content={paper.summary || paper.abstract || "简介正在整理中。"} /></Box>
       <Divider sx={{ my: 1.25 }} />

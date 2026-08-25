@@ -36,6 +36,7 @@ import { Modal } from "../components/Modal";
 import { MobileConfirmAction } from "../components/MobileConfirmAction";
 import { PageHeader } from "../components/PageHeader";
 import { PaperMetadataDialog } from "../components/PaperMetadataDialog";
+import { PaperTitle } from "../components/PaperTitle";
 import { Empty, ErrorState, Loading } from "../components/States";
 import { ExpandablePaperText } from "../components/ExpandablePaperText";
 import type { DailyPayload, Paper, Tag } from "../types";
@@ -61,7 +62,8 @@ export function LibraryPage() {
   const [ingestOpen, setIngestOpen] = useState(false);
   const [metadataId, setMetadataId] = useState<string | null>(null);
   const [cancelPaper, setCancelPaper] = useState<Paper | null>(null);
-  const [dailyNotice, setDailyNotice] = useState("");
+  const [dailyNoticeTitle, setDailyNoticeTitle] = useState("");
+  const [dailyNoticeError, setDailyNoticeError] = useState("");
 
   const scopeFilter = scope === "quality"
     ? "&quality=true"
@@ -93,10 +95,14 @@ export function LibraryPage() {
       body: JSON.stringify({ paper_id: paper.id }),
     }),
     onSuccess: (_, paper) => {
-      setDailyNotice(`已将《${paper.title}》设为今日精选`);
+      setDailyNoticeError("");
+      setDailyNoticeTitle(paper.title);
       queryClient.invalidateQueries({ queryKey: ["daily"] });
     },
-    onError: (error) => setDailyNotice(`设置失败：${error.message}`),
+    onError: (error) => {
+      setDailyNoticeTitle("");
+      setDailyNoticeError(`设置失败：${error.message}`);
+    },
   });
 
   function changeTab(next: LibraryTab) {
@@ -205,7 +211,12 @@ export function LibraryPage() {
           </Stack>
         </Stack>
       </Modal>
-      <Snackbar open={Boolean(dailyNotice)} autoHideDuration={3200} onClose={() => setDailyNotice("")} message={dailyNotice} />
+      <Snackbar
+        open={Boolean(dailyNoticeTitle || dailyNoticeError)}
+        autoHideDuration={3200}
+        onClose={() => { setDailyNoticeTitle(""); setDailyNoticeError(""); }}
+        message={dailyNoticeError || <Box component="span">已将《<PaperTitle title={dailyNoticeTitle} />》设为今日精选</Box>}
+      />
     </Container>
   );
 }
@@ -310,7 +321,7 @@ function PaperCard({
       <CardContent
         sx={{ pt: 1.25, borderRadius: 1 }}
       >
-        <Typography variant="h3">{paper.title}</Typography>
+        <Typography variant="h3"><PaperTitle title={paper.title} /></Typography>
         <Typography variant="body2" color="text.secondary" sx={{ mt: 0.5 }}>
           {paper.first_author || "作者信息待确认"}{paper.primary_affiliation ? ` · ${paper.primary_affiliation}` : ""} · {paper.source}
         </Typography>
