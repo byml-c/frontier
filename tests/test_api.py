@@ -3,7 +3,6 @@ from __future__ import annotations
 import asyncio
 from datetime import UTC, date, datetime, timedelta
 from itertools import pairwise
-from zoneinfo import ZoneInfo
 
 import pymupdf
 import pytest
@@ -939,7 +938,13 @@ def test_daily_brief_excludes_prior_reading_but_stays_stable_after_publish(
         == 200
     )
 
-    today = datetime.now(ZoneInfo("Asia/Shanghai")).date().isoformat()
+    # Daily briefs follow Frontier's configured research-day rollover, which can
+    # still be the previous calendar date before the 05:00 scheduler boundary.
+    from frontier.database import SessionLocal
+    from frontier.services.research_day import current_research_date
+
+    with SessionLocal() as session:
+        today = current_research_date(session).isoformat()
     brief = client.post(
         "/api/briefs",
         json={"brief_date": today, "title": "Unread-only daily brief"},

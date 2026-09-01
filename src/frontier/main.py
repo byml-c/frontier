@@ -10,7 +10,18 @@ from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
-from .api import architectures, auth, briefs, conversations, daily, graph, interests, papers, system
+from .api import (
+    architectures,
+    auth,
+    briefs,
+    conversations,
+    daily,
+    graph,
+    interests,
+    papers,
+    podcasts,
+    system,
+)
 from .auth import request_is_internal, request_is_trusted
 from .config import settings
 from .database import SessionLocal, create_tables
@@ -124,6 +135,7 @@ app.include_router(papers.tags_router)
 app.include_router(architectures.router)
 app.include_router(graph.router)
 app.include_router(briefs.router)
+app.include_router(podcasts.router)
 app.include_router(interests.router)
 app.include_router(conversations.router)
 

@@ -25,6 +25,10 @@ Web 默认只公开 `/daily` 每日精选页。其他页面首次访问时需要
 写入长期 HttpOnly 信任 Cookie。公网部署应修改默认密码；启用 HTTPS 后同时设置
 `FRONTIER_TRUSTED_COOKIE_SECURE=true`。
 
+日报页面支持单人论文播客。在 `.env` 中填写
+`FRONTIER_ALIYUN_TTS_API_KEY` 并重启服务后，新发布的日报会自动生成逐篇文字稿与阿里云
+Qwen3-TTS 音频；已有日报可在页面中点击“生成播客”。
+
 访问 `http://127.0.0.1:8000`。OpenAPI 文档位于 `/docs`。
 
 文本模式默认只读取轻量的 arXiv HTML，不会启动 Docling。arXiv 未提供 HTML

@@ -31,6 +31,11 @@ from ..services.ingest import create_or_update_paper, search_arxiv
 from ..services.interest_evidence import DERIVED_INTEREST_PROFILE_ID
 from ..services.paper_agent_context import paper_agent_context_sync_required
 from ..services.paper_conversations import get_or_create_paper_conversation
+from ..services.podcast_generation import (
+    PODCAST_TASK_KIND,
+    PodcastGenerationError,
+    get_or_create_podcast_task,
+)
 from ..services.research_day import current_research_date
 from ..services.service_checks import check_service
 from ..services.task_control import (
@@ -604,6 +609,28 @@ def retry_task(
             status_code=409,
             detail="请从论文架构页重新生成，以便先获取最新 revision 和编辑锁",
         )
+    if old.kind == PODCAST_TASK_KIND:
+        brief_id = (old.payload_json or {}).get("brief_id")
+        if not isinstance(brief_id, str):
+            raise HTTPException(status_code=422, detail="播客任务缺少 brief_id")
+        try:
+            claim = get_or_create_podcast_task(session, brief_id)
+        except PodcastGenerationError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        assert claim.task is not None
+        if claim.created:
+            claim.task.payload_json = {
+                **(claim.task.payload_json or {}),
+                "retry_of": old.id,
+            }
+            session.commit()
+        if claim.task.status == "queued":
+            background_tasks.add_task(submit_task, claim.task.id)
+        return {
+            "id": claim.task.id,
+            "status": claim.task.status,
+            "retry_of": old.id,
+        }
     if old.kind != "translate" and not settings.enable_codex_runs:
         raise HTTPException(status_code=503, detail="Agent 运行已在服务器设置中停用")
     try:

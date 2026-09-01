@@ -11,6 +11,7 @@ from ..models import ArchitectureDocument, Brief, Message, TaskRun, utcnow
 from .architecture_scene import release_agent_lock_for_task
 from .common import log_operation
 from .manual_recommendations import set_manual_analysis_state
+from .podcast_generation import mark_podcast_task_failed
 
 ACTIVE_TASK_STATUSES = {"queued", "running"}
 
@@ -195,6 +196,8 @@ def recover_interrupted_tasks(session: Session, started_before: datetime) -> int
             set_manual_analysis_state(session, task, "failed", error=error)
         if task.kind == "architecture_generation":
             _recover_architecture(session, task, error)
+        elif task.kind == "podcast_episode_render":
+            mark_podcast_task_failed(session, task, error)
         else:
             release_agent_lock_for_task(session, task.id)
 

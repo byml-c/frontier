@@ -47,6 +47,7 @@ from ..schemas import (
     PaperAgentContextSyncRequest,
     PaperCreate,
     PaperMetadataUpdate,
+    PaperNarrationCommit,
     PaperUpdate,
     ReadingProgressUpdate,
     StartReading,
@@ -105,7 +106,16 @@ from ..services.paper_agent_context import (
     build_paper_agent_context,
     sync_paper_agent_context,
 )
-from ..services.task_control import ACTIVE_TASK_STATUSES
+from ..services.podcast_content import (
+    PodcastContentError,
+    PodcastContentNotFoundError,
+    PodcastContentRevisionError,
+    PodcastContentSourceError,
+    PodcastContentValidationError,
+    commit_paper_narration,
+    narration_payload,
+)
+from ..services.task_control import ACTIVE_TASK_STATUSES, serialized_task_claim
 from ..services.task_dispatcher import submit_task
 from ..services.translation_provider import stream_translation_prompt
 
@@ -118,6 +128,32 @@ def _paper_or_404(session: Session, paper_id: str) -> Paper:
     if not paper:
         raise HTTPException(status_code=404, detail="Paper not found")
     return paper
+
+
+def _podcast_content_error(exc: PodcastContentError) -> HTTPException:
+    if isinstance(exc, PodcastContentNotFoundError):
+        return HTTPException(status_code=404, detail=str(exc))
+    if isinstance(exc, PodcastContentRevisionError):
+        return HTTPException(
+            status_code=409,
+            detail={
+                "message": "文字稿已更新，请读取最新版本后重试",
+                "expected_revision": exc.expected,
+                "actual_revision": exc.actual,
+            },
+        )
+    if isinstance(exc, PodcastContentSourceError):
+        return HTTPException(
+            status_code=409,
+            detail={
+                "message": "论文来源内容已变化，请基于最新内容重新生成文字稿",
+                "expected_source_digest": exc.expected,
+                "actual_source_digest": exc.actual,
+            },
+        )
+    if isinstance(exc, PodcastContentValidationError):
+        return HTTPException(status_code=422, detail=str(exc))
+    return HTTPException(status_code=400, detail=str(exc))
 
 
 def _serialize_paper(session: Session, paper: Paper, *, detail: bool = False) -> dict:
@@ -595,6 +631,42 @@ async def add_pdf(
 @router.get("/{paper_id}")
 def get_paper(paper_id: str, session: Annotated[Session, Depends(get_session)]) -> dict:
     return _serialize_paper(session, _paper_or_404(session, paper_id), detail=True)
+
+
+@router.get("/{paper_id}/narration")
+def get_paper_narration(
+    paper_id: str,
+    session: Annotated[Session, Depends(get_session)],
+    language: str = Query(default="zh-CN", min_length=2, max_length=35),
+) -> dict:
+    try:
+        return narration_payload(session, paper_id, language=language)
+    except PodcastContentError as exc:
+        raise _podcast_content_error(exc) from exc
+
+
+@router.post("/{paper_id}/narration/commit")
+@serialized_task_claim
+def save_paper_narration(
+    paper_id: str,
+    payload: PaperNarrationCommit,
+    session: Annotated[Session, Depends(get_session)],
+) -> dict:
+    try:
+        item, changed = commit_paper_narration(session, paper_id, payload)
+        if changed:
+            log_operation(
+                session,
+                actor="agent" if payload.task_id else "user",
+                action="paper_narration.committed",
+                entity_type="paper_narration",
+                entity_id=item.id,
+                task_id=payload.task_id,
+                detail={"paper_id": paper_id, "revision": item.revision},
+            )
+        return narration_payload(session, paper_id, language=payload.language)
+    except PodcastContentError as exc:
+        raise _podcast_content_error(exc) from exc
 
 
 @router.get("/{paper_id}/agent-context")

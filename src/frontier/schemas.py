@@ -327,6 +327,117 @@ class BriefItemCreate(BaseModel):
     tier: str = "related"
 
 
+NarrationStatus = Literal["draft", "generating", "ready", "failed"]
+PodcastStatus = Literal[
+    "draft", "generating", "scripted", "rendering", "ready", "failed"
+]
+
+
+class PaperNarrationCommit(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    expected_revision: int = Field(ge=0)
+    language: str = Field(default="zh-CN", min_length=2, max_length=35)
+    status: NarrationStatus = "ready"
+    script_markdown: str | None = None
+    speech_text: str | None = None
+    sections: list[dict[str, Any]] = Field(default_factory=list)
+    citations: list[dict[str, Any]] = Field(default_factory=list)
+    pronunciations: list[dict[str, Any]] = Field(default_factory=list)
+    source_digest: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
+    source_pdf_version: str | None = Field(default=None, max_length=128)
+    task_id: str | None = Field(default=None, max_length=36)
+    error: str | None = None
+
+    @model_validator(mode="after")
+    def validate_state(self) -> Self:
+        if self.status == "ready" and (
+            not (self.script_markdown or "").strip()
+            or not (self.speech_text or "").strip()
+        ):
+            raise ValueError("ready narration requires script_markdown and speech_text")
+        if self.status == "failed" and not (self.error or "").strip():
+            raise ValueError("failed narration requires error")
+        if self.status != "failed" and self.error is not None:
+            raise ValueError("error is only valid for failed narration")
+        return self
+
+
+class PodcastEpisodeCommit(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    expected_revision: int = Field(ge=0)
+    language: str = Field(default="zh-CN", min_length=2, max_length=35)
+    status: PodcastStatus = "scripted"
+    title: str = Field(min_length=1, max_length=255)
+    script_text: str | None = None
+    speech_text: str | None = None
+    manifest: dict[str, Any] = Field(default_factory=dict)
+    source_digest: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
+    provider: str | None = Field(default=None, max_length=50)
+    model: str | None = Field(default=None, max_length=100)
+    voice: str | None = Field(default=None, max_length=100)
+    audio_path: str | None = None
+    audio_content_hash: str | None = Field(
+        default=None, pattern=r"^(?:sha256:)?[0-9a-f]{64}$"
+    )
+    duration_ms: int | None = Field(default=None, ge=0)
+    size_bytes: int | None = Field(default=None, ge=0)
+    task_id: str | None = Field(default=None, max_length=36)
+    error: str | None = None
+
+    @model_validator(mode="after")
+    def validate_state(self) -> Self:
+        if self.status in {"scripted", "rendering", "ready"} and (
+            not (self.script_text or "").strip()
+            or not (self.speech_text or "").strip()
+        ):
+            raise ValueError(
+                f"{self.status} episode requires script_text and speech_text"
+            )
+        if self.status == "ready" and (
+            not self.audio_path
+            or not self.audio_content_hash
+            or self.duration_ms is None
+            or self.size_bytes is None
+        ):
+            raise ValueError(
+                "ready episode requires audio_path, audio_content_hash, duration_ms and size_bytes"
+            )
+        if self.status == "failed" and not (self.error or "").strip():
+            raise ValueError("failed episode requires error")
+        if self.status != "failed" and self.error is not None:
+            raise ValueError("error is only valid for failed episode")
+        return self
+
+
+class PodcastEpisodeStatusUpdate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    expected_revision: int = Field(ge=1)
+    status: PodcastStatus
+    manifest: dict[str, Any] | None = None
+    provider: str | None = Field(default=None, max_length=50)
+    model: str | None = Field(default=None, max_length=100)
+    voice: str | None = Field(default=None, max_length=100)
+    audio_path: str | None = None
+    audio_content_hash: str | None = Field(
+        default=None, pattern=r"^(?:sha256:)?[0-9a-f]{64}$"
+    )
+    duration_ms: int | None = Field(default=None, ge=0)
+    size_bytes: int | None = Field(default=None, ge=0)
+    task_id: str | None = Field(default=None, max_length=36)
+    error: str | None = None
+
+    @model_validator(mode="after")
+    def validate_state(self) -> Self:
+        if self.status == "failed" and not (self.error or "").strip():
+            raise ValueError("failed episode requires error")
+        if self.status != "failed" and self.error is not None:
+            raise ValueError("error is only valid for failed episode")
+        return self
+
+
 class MemoryCreate(BaseModel):
     kind: str
     title: str

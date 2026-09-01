@@ -7,9 +7,15 @@ from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query
 from sqlalchemy import or_, select
 from sqlalchemy.orm import Session
 
+from ..config import settings
 from ..database import get_session
 from ..models import Brief, BriefItem, Paper, PaperNode, PaperTag, ResearchNode, Tag
-from ..schemas import BriefCreate, BriefItemCreate
+from ..schemas import (
+    BriefCreate,
+    BriefItemCreate,
+    PodcastEpisodeCommit,
+    PodcastEpisodeStatusUpdate,
+)
 from ..services.common import (
     BRIEF_LIMIT_DEFAULT,
     BRIEF_LIMIT_MAX,
@@ -33,6 +39,23 @@ from ..services.manual_recommendations import (
     current_analysis_state,
     is_daily_recommendation_eligible,
 )
+from ..services.podcast_content import (
+    PodcastContentError,
+    PodcastContentNotFoundError,
+    PodcastContentRevisionError,
+    PodcastContentSourceError,
+    PodcastContentValidationError,
+    commit_podcast_episode,
+    episode_payload,
+    update_podcast_episode_status,
+)
+from ..services.podcast_generation import (
+    PodcastGenerationError,
+    get_or_create_podcast_task,
+    queue_podcast_for_brief,
+)
+from ..services.task_control import serialized_task_claim
+from ..services.task_dispatcher import submit_task
 
 router = APIRouter(prefix="/api/briefs", tags=["briefs"])
 
@@ -42,6 +65,32 @@ def _brief_or_404(session: Session, brief_id: str) -> Brief:
     if not item:
         raise HTTPException(status_code=404, detail="Brief not found")
     return item
+
+
+def _podcast_content_error(exc: PodcastContentError) -> HTTPException:
+    if isinstance(exc, PodcastContentNotFoundError):
+        return HTTPException(status_code=404, detail=str(exc))
+    if isinstance(exc, PodcastContentRevisionError):
+        return HTTPException(
+            status_code=409,
+            detail={
+                "message": "播客已更新，请读取最新版本后重试",
+                "expected_revision": exc.expected,
+                "actual_revision": exc.actual,
+            },
+        )
+    if isinstance(exc, PodcastContentSourceError):
+        return HTTPException(
+            status_code=409,
+            detail={
+                "message": "简报或文字稿已变化，请重新生成播客",
+                "expected_source_digest": exc.expected,
+                "actual_source_digest": exc.actual,
+            },
+        )
+    if isinstance(exc, PodcastContentValidationError):
+        return HTTPException(status_code=422, detail=str(exc))
+    return HTTPException(status_code=400, detail=str(exc))
 
 
 def _paper_snapshot(session: Session, paper: Paper) -> dict:
@@ -228,6 +277,94 @@ def get_brief(brief_id: str, session: Annotated[Session, Depends(get_session)]) 
     return _serialize_brief(session, _brief_or_404(session, brief_id))
 
 
+@router.get("/{brief_id}/podcast")
+def get_brief_podcast(
+    brief_id: str,
+    session: Annotated[Session, Depends(get_session)],
+    language: str = Query(default="zh-CN", min_length=2, max_length=35),
+) -> dict:
+    try:
+        return episode_payload(session, brief_id, language=language)
+    except PodcastContentError as exc:
+        raise _podcast_content_error(exc) from exc
+
+
+@router.post("/{brief_id}/podcast/generate")
+def generate_brief_podcast(
+    brief_id: str,
+    background_tasks: BackgroundTasks,
+    session: Annotated[Session, Depends(get_session)],
+) -> dict:
+    try:
+        claim = get_or_create_podcast_task(session, brief_id)
+    except PodcastGenerationError as exc:
+        status_code = 404 if str(exc) == "简报不存在" else 409
+        raise HTTPException(status_code=status_code, detail=str(exc)) from exc
+    assert claim.task is not None
+    if claim.task.status == "queued":
+        background_tasks.add_task(submit_task, claim.task.id)
+    return {
+        "id": claim.task.id,
+        "task_id": claim.task.id,
+        "status": claim.task.status,
+    }
+
+
+@router.post("/{brief_id}/podcast/commit")
+@serialized_task_claim
+def save_brief_podcast(
+    brief_id: str,
+    payload: PodcastEpisodeCommit,
+    session: Annotated[Session, Depends(get_session)],
+) -> dict:
+    try:
+        item, changed = commit_podcast_episode(session, brief_id, payload)
+        if changed:
+            log_operation(
+                session,
+                actor="agent" if payload.task_id else "user",
+                action="podcast_episode.committed",
+                entity_type="podcast_episode",
+                entity_id=item.id,
+                task_id=payload.task_id,
+                detail={"brief_id": brief_id, "revision": item.revision},
+            )
+        return episode_payload(session, brief_id, language=payload.language)
+    except PodcastContentError as exc:
+        raise _podcast_content_error(exc) from exc
+
+
+@router.patch("/{brief_id}/podcast/status")
+@serialized_task_claim
+def set_brief_podcast_status(
+    brief_id: str,
+    payload: PodcastEpisodeStatusUpdate,
+    session: Annotated[Session, Depends(get_session)],
+    language: str = Query(default="zh-CN", min_length=2, max_length=35),
+) -> dict:
+    try:
+        item, changed = update_podcast_episode_status(
+            session, brief_id, payload, language=language
+        )
+        if changed:
+            log_operation(
+                session,
+                actor="agent" if payload.task_id else "system",
+                action="podcast_episode.status_updated",
+                entity_type="podcast_episode",
+                entity_id=item.id,
+                task_id=payload.task_id,
+                detail={
+                    "brief_id": brief_id,
+                    "revision": item.revision,
+                    "status": item.status,
+                },
+            )
+        return episode_payload(session, brief_id, language=language)
+    except PodcastContentError as exc:
+        raise _podcast_content_error(exc) from exc
+
+
 @router.post("/{brief_id}/items")
 def add_brief_item(
     brief_id: str,
@@ -365,4 +502,6 @@ def publish_brief(
     result = _serialize_brief(session, brief)
     if featured_paper_ids:
         background_tasks.add_task(queue_document_conversions, featured_paper_ids)
+    if (settings.aliyun_tts_api_key or "").strip():
+        background_tasks.add_task(queue_podcast_for_brief, brief.id)
     return result

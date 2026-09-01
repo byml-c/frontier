@@ -72,6 +72,20 @@ class Settings(BaseSettings):
     paper_text_max_chars: int = Field(default=20_000_000, ge=1)
     translation_env_file: Path = PROJECT_ROOT / "translation.env"
     translation_timeout_seconds: int = Field(default=120, ge=1)
+    aliyun_tts_api_key: str | None = None
+    aliyun_tts_endpoint: str = (
+        "https://dashscope.aliyuncs.com/api/v1/services/aigc/"
+        "multimodal-generation/generation"
+    )
+    aliyun_tts_model: str = "qwen3-tts-instruct-flash"
+    aliyun_tts_voice: str = "Cherry"
+    aliyun_tts_instructions: str = "请用自然、清晰、克制的中文播客旁白语气朗读。"
+    aliyun_tts_timeout_seconds: float = Field(default=120, gt=0)
+    aliyun_tts_max_retries: int = Field(default=2, ge=0, le=8)
+    # Qwen3-TTS accepts at most 600 characters per non-streaming request. Keep
+    # one character of headroom so later payload decoration cannot cross it.
+    aliyun_tts_chunk_max_chars: int = Field(default=500, ge=50, le=599)
+    aliyun_tts_audio_max_bytes: int = Field(default=32 * 1024**2, ge=1)
     enable_scheduler: bool = True
     enable_codex_runs: bool = True
     access_password: str = "byml-frontier"
@@ -127,6 +141,10 @@ class Settings(BaseSettings):
     def export_dir(self) -> Path:
         return self.data_dir / "exports"
 
+    @property
+    def audio_dir(self) -> Path:
+        return self.data_dir / "audio"
+
     def ensure_directories(self) -> None:
         for path in (
             self.data_dir,
@@ -137,6 +155,7 @@ class Settings(BaseSettings):
             self.document_dir,
             self.architecture_dir,
             self.export_dir,
+            self.audio_dir,
         ):
             path.mkdir(parents=True, exist_ok=True)
 

@@ -555,15 +555,21 @@ def run_task(task_id: str) -> None:
         if not task or task.status != "queued":
             return
         is_translation = bool(task and task.kind == "translate")
+        is_podcast_render = bool(task and task.kind == "podcast_episode_render")
         uses_app_server = bool(
             task and (task.payload_json or {}).get("conversation_id")
         )
         remaining_seconds = _remaining_task_seconds(
             task, settings.agent_task_timeout_seconds
         )
-        if not is_translation and remaining_seconds <= 0:
+        if not is_translation and not is_podcast_render and remaining_seconds <= 0:
             _fail_expired_queued_task(session, task)
             return
+    if is_podcast_render:
+        from .services.podcast_generation import run_podcast_render_task
+
+        run_podcast_render_task(task_id)
+        return
     if is_translation:
         _run_translation_task(task_id)
         return

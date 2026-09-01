@@ -74,4 +74,13 @@ def test_deployment_profile_is_fully_defined_by_env_example(tmp_path: Path) -> N
     )
 
     assert result.returncode == 0, result.stderr
-    assert "已补充 33 个缺失配置" in result.stdout
+    managed_keys = [
+        line.strip()
+        for line in (PROJECT_ROOT / "deploy" / "frontier-2c2g-env.keys")
+        .read_text(encoding="utf-8")
+        .splitlines()
+        if line.strip() and not line.lstrip().startswith("#")
+    ]
+    assert f"已补充 {len(managed_keys)} 个缺失配置" in result.stdout
+    synced = env_file.read_text(encoding="utf-8")
+    assert all(f"{key}=" in synced for key in managed_keys)

@@ -269,6 +269,10 @@ def cancel_task_run(session: Session, task: TaskRun) -> bool | None:
             document.status = "ready" if document.scene_json else "missing"
             document.error = None
             document.generation_task_id = None
+    elif task.kind == "podcast_episode_render":
+        from .podcast_generation import mark_podcast_task_failed
+
+        mark_podcast_task_failed(session, task, "播客生成已取消")
     release_agent_lock_for_task(session, task.id)
     session.commit()
     process_stopped = cancel_codex_run(task.id)

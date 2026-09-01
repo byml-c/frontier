@@ -107,6 +107,26 @@ export type Brief = {
   items: BriefItem[];
 };
 
+export type PodcastStatus = "missing" | "queued" | "generating" | "processing" | "rendering" | "ready" | "failed";
+
+export type PodcastEpisode = {
+  id: string | null;
+  brief_id: string;
+  status: PodcastStatus | string;
+  title?: string | null;
+  script_text?: string | null;
+  audio_url?: string | null;
+  duration_ms?: number | null;
+  error?: string | null;
+  revision: number;
+};
+
+export type PodcastGenerationResult = {
+  id?: string;
+  task_id?: string;
+  status?: string;
+};
+
 export type ResearchNode = {
   id: string;
   name: string;

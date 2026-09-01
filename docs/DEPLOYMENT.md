@@ -31,6 +31,15 @@ Frontier 本机 API 会通过 `NO_PROXY` 保持直连。修改后需要重启 `f
 不要把 Codex API key 写进项目 `.env`；继续使用该用户已有的 Codex 配置。划词翻译的独立模型只写入 `translation.env`：
 
 `FRONTIER_CODEX_PROFILE` 只用于显式选择 `$CODEX_HOME/<name>.config.toml`。
+
+### 阿里云论文播客
+
+在 `.env` 中填写 `FRONTIER_ALIYUN_TTS_API_KEY` 后重启服务。默认使用北京地域的
+`qwen3-tts-instruct-flash` 与 `Cherry` 单人音色；endpoint、model、voice、朗读指令、超时、
+重试次数和分块长度均可通过同名前缀配置覆盖。密钥只由 Server 的播客渲染任务读取，
+不会传给 Codex 子进程。日报发布后会自动排队生成，也可在日报页面或通过
+`uv run frontier podcast generate BRIEF_ID` 手动生成。音频保存在
+`FRONTIER_DATA_DIR/audio/podcasts`，应与 SQLite 一并纳入运行数据备份策略。
 默认配置已经可用时应保持未设置；它不是 provider 名称，也不会自动创建
 `[model_providers.<id>]`。
 

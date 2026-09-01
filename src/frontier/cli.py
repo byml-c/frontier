@@ -27,6 +27,8 @@ setting_app = typer.Typer(no_args_is_help=True)
 source_app = typer.Typer(no_args_is_help=True)
 bootstrap_app = typer.Typer(no_args_is_help=True)
 architecture_app = typer.Typer(no_args_is_help=True)
+narration_app = typer.Typer(no_args_is_help=True)
+podcast_app = typer.Typer(no_args_is_help=True)
 
 app.add_typer(paper_app, name="paper")
 app.add_typer(graph_app, name="graph")
@@ -38,6 +40,8 @@ app.add_typer(setting_app, name="setting")
 app.add_typer(source_app, name="source")
 app.add_typer(bootstrap_app, name="bootstrap")
 app.add_typer(architecture_app, name="architecture")
+app.add_typer(narration_app, name="narration")
+app.add_typer(podcast_app, name="podcast")
 
 
 def emit(value: Any) -> None:
@@ -524,6 +528,77 @@ def brief_add_paper(brief_id: str, paper_id: str, rank: int, tier: str = "relate
 @brief_app.command("publish")
 def brief_publish(brief_id: str) -> None:
     emit(client.request("POST", f"/api/briefs/{brief_id}/publish"))
+
+
+@narration_app.command("get")
+def narration_get(paper_id: str, language: str = "zh-CN") -> None:
+    emit(
+        client.request(
+            "GET",
+            f"/api/papers/{paper_id}/narration",
+            params={"language": language},
+        )
+    )
+
+
+@narration_app.command("commit")
+def narration_commit(
+    paper_id: str,
+    data: str = typer.Option(..., help="JSON string or @file"),
+) -> None:
+    emit(
+        client.request(
+            "POST",
+            f"/api/papers/{paper_id}/narration/commit",
+            json=parse_json(data),
+        )
+    )
+
+
+@podcast_app.command("get")
+def podcast_get(brief_id: str, language: str = "zh-CN") -> None:
+    emit(
+        client.request(
+            "GET",
+            f"/api/briefs/{brief_id}/podcast",
+            params={"language": language},
+        )
+    )
+
+
+@podcast_app.command("generate")
+def podcast_generate(brief_id: str) -> None:
+    emit(client.request("POST", f"/api/briefs/{brief_id}/podcast/generate"))
+
+
+@podcast_app.command("commit")
+def podcast_commit(
+    brief_id: str,
+    data: str = typer.Option(..., help="JSON string or @file"),
+) -> None:
+    emit(
+        client.request(
+            "POST",
+            f"/api/briefs/{brief_id}/podcast/commit",
+            json=parse_json(data),
+        )
+    )
+
+
+@podcast_app.command("status")
+def podcast_status(
+    brief_id: str,
+    data: str = typer.Option(..., help="JSON string or @file"),
+    language: str = "zh-CN",
+) -> None:
+    emit(
+        client.request(
+            "PATCH",
+            f"/api/briefs/{brief_id}/podcast/status",
+            params={"language": language},
+            json=parse_json(data),
+        )
+    )
 
 
 @memory_app.command("list")

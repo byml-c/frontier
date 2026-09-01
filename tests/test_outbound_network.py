@@ -32,3 +32,14 @@ def test_local_frontier_requests_bypass_shared_proxy(monkeypatch) -> None:
 
     assert outbound_proxy_for("http://127.0.0.1:12101/api/papers") is None
     assert external_httpx_kwargs("http://localhost:12101/api/health") == {}
+
+
+def test_agent_environment_does_not_forward_tts_api_key(monkeypatch) -> None:
+    monkeypatch.setattr(settings, "outbound_proxy", None)
+
+    environment = agent_environment(
+        {"FRONTIER_ALIYUN_TTS_API_KEY": "secret-value", "KEEP_ME": "yes"}
+    )
+
+    assert "FRONTIER_ALIYUN_TTS_API_KEY" not in environment
+    assert environment["KEEP_ME"] == "yes"

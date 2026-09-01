@@ -107,6 +107,21 @@ uv run frontier brief publish BRIEF_ID
 
 Published briefs are immutable. `featured` and total item counts are enforced by Server settings.
 
+## Paper narrations and daily podcast
+
+```bash
+uv run frontier narration get PAPER_ID
+uv run frontier podcast get BRIEF_ID
+uv run frontier podcast generate BRIEF_ID
+```
+
+Publishing a brief automatically queues its single-speaker Chinese podcast when
+`FRONTIER_ALIYUN_TTS_API_KEY` is configured. `podcast generate` is the explicit generation and
+retry entry point. The render task first persists one source-grounded narration per paper, then
+combines them into the episode script and Alibaba Cloud audio. Use the low-level `narration commit`,
+`podcast commit`, and `podcast status` commands only for controlled Agent/service workflows; inspect
+their JSON fields with `--help` and the matching `get` command before committing a revision.
+
 ## Memory, settings, tasks, and backup
 
 ```bash

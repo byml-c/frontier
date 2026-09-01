@@ -99,6 +99,7 @@ def _fail_undispatched_task(task_id: str, *, error: str) -> None:
     from ..models import TaskRun, utcnow
     from .architecture_scene import mark_architecture_generation_failed
     from .manual_recommendations import set_manual_analysis_state
+    from .podcast_generation import mark_podcast_task_failed
 
     with SessionLocal() as session:
         task = session.get(TaskRun, task_id)
@@ -116,6 +117,9 @@ def _fail_undispatched_task(task_id: str, *, error: str) -> None:
             mark_architecture_generation_failed(session, task_id, error)
         elif task.kind in {"manual_paper_analysis", "paper_metadata_analysis"}:
             set_manual_analysis_state(session, task, "failed", error=error)
+            session.commit()
+        elif task.kind == "podcast_episode_render":
+            mark_podcast_task_failed(session, task, error)
             session.commit()
         else:
             session.commit()

@@ -222,6 +222,64 @@ class BriefItem(Base, TimestampMixin):
     snapshot_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
 
 
+class PaperNarration(Base, TimestampMixin):
+    """Versioned, language-specific spoken script for one paper."""
+
+    __tablename__ = "paper_narrations"
+    __table_args__ = (
+        UniqueConstraint("paper_id", "language", name="uq_paper_narration_language"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    paper_id: Mapped[str] = mapped_column(
+        ForeignKey("papers.id", ondelete="CASCADE"), index=True
+    )
+    language: Mapped[str] = mapped_column(String(35), default="zh-CN")
+    status: Mapped[str] = mapped_column(String(32), default="draft", index=True)
+    revision: Mapped[int] = mapped_column(Integer, default=1)
+    script_markdown: Mapped[str | None] = mapped_column(Text)
+    speech_text: Mapped[str | None] = mapped_column(Text)
+    sections_json: Mapped[list[dict[str, Any]]] = mapped_column(JSON, default=list)
+    citations_json: Mapped[list[dict[str, Any]]] = mapped_column(JSON, default=list)
+    pronunciations_json: Mapped[list[dict[str, Any]]] = mapped_column(JSON, default=list)
+    source_digest: Mapped[str] = mapped_column(String(80), index=True)
+    source_pdf_version: Mapped[str | None] = mapped_column(String(128))
+    content_hash: Mapped[str | None] = mapped_column(String(80), index=True)
+    generation_task_id: Mapped[str | None] = mapped_column(String(36), index=True)
+    error: Mapped[str | None] = mapped_column(Text)
+
+
+class PodcastEpisode(Base, TimestampMixin):
+    """Versioned daily podcast script and its rendered audio metadata."""
+
+    __tablename__ = "podcast_episodes"
+    __table_args__ = (UniqueConstraint("brief_id", name="uq_podcast_episode_brief"),)
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    brief_id: Mapped[str] = mapped_column(
+        ForeignKey("briefs.id", ondelete="CASCADE"), index=True
+    )
+    language: Mapped[str] = mapped_column(String(35), default="zh-CN")
+    status: Mapped[str] = mapped_column(String(32), default="draft", index=True)
+    revision: Mapped[int] = mapped_column(Integer, default=1)
+    title: Mapped[str | None] = mapped_column(String(255))
+    script_text: Mapped[str | None] = mapped_column(Text)
+    speech_text: Mapped[str | None] = mapped_column(Text)
+    manifest_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    source_digest: Mapped[str] = mapped_column(String(80), index=True)
+    content_hash: Mapped[str | None] = mapped_column(String(80), index=True)
+    provider: Mapped[str | None] = mapped_column(String(50))
+    model: Mapped[str | None] = mapped_column(String(100))
+    voice: Mapped[str | None] = mapped_column(String(100))
+    audio_path: Mapped[str | None] = mapped_column(Text)
+    audio_content_hash: Mapped[str | None] = mapped_column(String(80), index=True)
+    duration_ms: Mapped[int | None] = mapped_column(Integer)
+    size_bytes: Mapped[int | None] = mapped_column(Integer)
+    generation_task_id: Mapped[str | None] = mapped_column(String(36), index=True)
+    published_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    error: Mapped[str | None] = mapped_column(Text)
+
+
 class DailySelection(Base, TimestampMixin):
     __tablename__ = "daily_selections"
 

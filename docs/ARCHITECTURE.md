@@ -55,6 +55,7 @@ Browser ──HTTP/NDJSON stream──> FastAPI Server ──SQLite / data files
 - 划词翻译以论文、页码、归一化文本和目标语言生成稳定缓存键，结果保存在 SQLite；选区坐标不参与键生成，缓存命中时不再调用 Agent。
 - 词语上下文从浏览器已经渲染的 PDF 文本层截取并随翻译请求发送；Server 不在首个流事件前下载或抽取整篇 PDF。
 - Web 手动摄入通过显式 `recommend=true` 与 Agent 的批量采集区分；Server 原子地创建当日 `manual` BriefItem 和 `manual_paper_analysis` 任务。`manual` 项不参与日报额度统计，并在简报中动态读取当前论文分析，避免处理完成后仍显示旧占位快照。
+- 已发布日报可生成单人论文播客。Server 从已持久化的论文分析字段确定性地产生逐篇文字稿，保存 `PaperNarration`，再组合为 `PodcastEpisode`；`podcast_episode_render` 直接调用阿里云 Qwen3-TTS，不占用 Codex Agent 执行槽。音频全部成功后才原子发布，TTS 失败不会回滚日报。
 
 ## 实时交互
 
@@ -73,6 +74,7 @@ Browser ──HTTP/NDJSON stream──> FastAPI Server ──SQLite / data files
 - `finish_reading`：汇总阅读材料并生成待确认反馈；
 - `graph_maintenance`：在用户确认精读后关联论文、增量更新节点，也可按用户指令维护节点、边、进展和想法；
 - `global_chat`：处理带当前页面上下文的研究与管理请求。
+- `podcast_episode_render`：生成逐篇中文文字稿，组合单人日报播报并渲染音频；这是 Server 直连 provider 的任务，不启动 Codex。
 
 所有任务都可以从 Server 状态恢复；Agent 记忆是显式检索的增强信息，不是正确运行的前置条件。
 

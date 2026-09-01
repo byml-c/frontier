@@ -39,6 +39,9 @@ def external_httpx_kwargs(url: str | None = None) -> dict[str, Any]:
 def agent_environment(base: Mapping[str, str] | None = None) -> dict[str, str]:
     """Build one outbound-network environment for every Agent invocation."""
     environment = dict(base if base is not None else os.environ)
+    # This credential belongs only to Frontier's direct podcast worker. Paper
+    # analysis agents never need it, so do not expose it to child processes.
+    environment.pop("FRONTIER_ALIYUN_TTS_API_KEY", None)
     environment["FRONTIER_API_BASE_URL"] = settings.api_base_url
     environment["UV_CACHE_DIR"] = str(settings.task_dir / "uv-cache")
     proxy = outbound_proxy_for()
