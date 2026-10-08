@@ -39,6 +39,27 @@ def test_interactive_agent_requires_chinese_public_reasoning(kind: str) -> None:
     assert "Simplified Chinese" in prompt
 
 
+def test_global_chat_requires_verified_explicit_preference_updates() -> None:
+    prompt = build_prompt(
+        TaskRun(
+            id="preference-chat",
+            kind="global_chat",
+            payload_json={"message": "请把具身智能加入我的兴趣偏好，以后多推荐"},
+        )
+    )
+    prompt = " ".join(prompt.split())
+
+    assert "Read `frontier interest context` first" in prompt
+    assert "`interest_profile` memory" in prompt
+    assert "`frontier memory create` or `frontier memory update`" in prompt
+    assert "`source=user_conversation`" in prompt
+    assert "Re-read `frontier interest context` after the mutation" in prompt
+    assert "Do not write the derived `derived-interest-profile-v1` directly" in prompt
+    assert "must not reorder an already published brief" in prompt
+    assert "without explicitly requesting a preference change" in prompt
+    assert "do not mutate the interest profile" in prompt
+
+
 def test_architecture_generation_separates_symbol_model_and_properties() -> None:
     prompt = build_prompt(
         TaskRun(id="architecture-task", kind="architecture_generation", payload_json={"paper_id": "paper-1"})

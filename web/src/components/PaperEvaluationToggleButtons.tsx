@@ -26,23 +26,27 @@ function AgentScore({ value }: { value?: number | null }) {
   );
 }
 
-function RatingToggle<Value extends string>({
+export function PaperChoiceToggle<Value extends string>({
   ariaLabel,
-  disabled,
+  disabled = false,
+  fullWidth = true,
+  attachedLabel = false,
   onChange,
   options,
   value,
 }: {
   ariaLabel: string;
-  disabled: boolean;
+  disabled?: boolean;
+  fullWidth?: boolean;
+  attachedLabel?: boolean;
   onChange: (value: Value) => void;
   options: readonly { value: Value; label: string }[];
-  value: Value;
+  value: Value | false;
 }) {
   return (
     <ToggleButtonGroup
       exclusive
-      fullWidth
+      fullWidth={fullWidth}
       size="small"
       color="primary"
       value={value}
@@ -50,9 +54,11 @@ function RatingToggle<Value extends string>({
       aria-label={ariaLabel}
       onChange={(_, nextValue: Value | null) => { if (nextValue) onChange(nextValue); }}
       sx={{
-        flex: 1,
+        flex: fullWidth ? 1 : undefined,
         minWidth: 0,
-        "& .MuiToggleButtonGroup-firstButton": { borderBottomLeftRadius: 0, borderTopLeftRadius: 0 },
+        ...(attachedLabel ? {
+          "& .MuiToggleButtonGroup-firstButton": { borderBottomLeftRadius: 0, borderTopLeftRadius: 0 },
+        } : {}),
         "& .MuiToggleButton-root": {
           height: 34,
           minWidth: 0,
@@ -85,7 +91,7 @@ function EvaluationMetric<Value extends string>({
   options: readonly { value: Value; label: string }[];
   score?: number | null;
   title: string;
-  value: Value;
+  value: Value | false;
 }) {
   return (
     <Box sx={{ p: 1.25, border: 1, borderColor: "divider", borderRadius: 1.5 }}>
@@ -96,7 +102,8 @@ function EvaluationMetric<Value extends string>({
           <Box sx={{ alignItems: "center", bgcolor: "action.hover", border: 1, borderColor: "divider", borderRadius: "8px 0 0 8px", borderRight: 0, display: "flex", flexShrink: 0, px: .75 }}>
             <Typography variant="caption" color="text.secondary">我的</Typography>
           </Box>
-          <RatingToggle
+          <PaperChoiceToggle
+            attachedLabel
             ariaLabel={ariaLabel}
             value={value}
             options={options}
@@ -117,20 +124,24 @@ export function PaperEvaluationToggleButtons({
   onQualityChange,
   onInterestChange,
   disabled = false,
+  qualityTitle = "研究价值",
+  interestTitle = "个人相关性",
 }: {
   researchScore?: number | null;
   relevanceScore?: number | null;
-  qualityLevel: QualityLevel;
-  interestLevel: InterestLevel;
+  qualityLevel: QualityLevel | false;
+  interestLevel: InterestLevel | false;
   onQualityChange: (value: QualityLevel) => void;
   onInterestChange: (value: InterestLevel) => void;
   disabled?: boolean;
+  qualityTitle?: string;
+  interestTitle?: string;
 }) {
   return (
     <Grid container spacing={1.25}>
       <Grid size={{ xs: 12, md: 6 }}>
         <EvaluationMetric
-          title="研究价值"
+          title={qualityTitle}
           score={researchScore}
           ariaLabel="我的文章质量评价"
           value={qualityLevel}
@@ -141,7 +152,7 @@ export function PaperEvaluationToggleButtons({
       </Grid>
       <Grid size={{ xs: 12, md: 6 }}>
         <EvaluationMetric
-          title="个人相关性"
+          title={interestTitle}
           score={relevanceScore}
           ariaLabel="我的兴趣度评价"
           value={interestLevel}

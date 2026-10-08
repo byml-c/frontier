@@ -22,7 +22,17 @@ from .interactive_stream import (
     stream_codex_prompt,
     unregister_codex_run,
 )
-from .models import ArchitectureDocument, Brief, Conversation, Message, Paper, TaskRun, utcnow
+from .models import (
+    ArchitectureDocument,
+    Brief,
+    Conversation,
+    Message,
+    Paper,
+    TaskRun,
+    TranslationCache,
+    utcnow,
+)
+from .services.abstract_translation import TARGET_LANGUAGE
 from .services.agent_runtime import (
     AgentSlotCancelled,
     AgentSlotTimeout,
@@ -253,15 +263,19 @@ Run the daily paper workflow for {run_date}. Start with
 `frontier interest context --recent-limit 30`; this bounded projection is the canonical handoff from
 paper-reading Agents and user-confirmed feedback. It contains explicit interest priors, confirmed
 positive and negative interest, quality judgments, final user-selected tags, private attitude
-summaries, recommendation attribution, and historical calibration. Treat confirmed feedback as
-stronger than seed interests or Agent-authored graph structure. Keep interest and paper quality as
+summaries, recommendation attribution, and historical calibration. Treat explicit user screening
+feedback and confirmed feedback as strong evidence; Agent scores are weak calibration evidence.
+Keep interest and paper quality as
 independent axes. A neutral judgment is neither positive nor negative interest. An ignored
 recommendation is weak negative-interest evidence, not proof of low
-paper quality. Do not learn from Agent suggestions or from unread candidates.
+paper quality. Do not learn from Agent suggestions or unread candidates unless the user explicitly
+supplied screening labels or a screening comment.
 Treat every recommendation without user-confirmed feedback as missing data, regardless of its age,
 rank, or whether reading was started. Never interpret not opening, not reading, or not confirming a
 paper as neutral or negative evidence; exclude those papers from hit-rate and calibration
-denominators. Only `completed` feedback and explicit `ignored` actions are observations. Ignore any
+denominators. Only `completed` feedback and explicit `ignored` actions are observations in the
+confirmed calibration set; explicit screening feedback is a separate pre-reading evidence stream.
+Only explicit screening feedback, `completed` feedback, and explicit `ignored` actions are observations. Ignore any
 workflow memory that infers preferences from non-response, and never create such a memory.
 For `candidate`, `reading`, or `feedback_pending` papers, canonical `interest_level` and
 `quality_level` are null. Legacy `is_interested=false` and `is_quality=false` values on those papers
@@ -290,14 +304,27 @@ Brier scores. When feedback support is small, avoid overfitting and keep modest 
 exploration. If interest hit rate is weak, tighten personal relevance; if quality hit rate or its
 calibration is weak, raise the evidence threshold independently. The graph describes research
 questions and accumulated evidence; it is not by itself proof that the user likes a topic.
-Collect arXiv candidates using the calibrated interests and relevant graph questions. Respect the current
-limits returned by `frontier setting list`: abstracts, full texts, total brief items, and featured
-items. Rank all viable candidates first, then generate no more than the configured total number of
-non-manual recommendations.
+Collect arXiv candidates using the calibrated interests and relevant graph questions. Preserve the
+existing initial domains and apply them as a hard gate: search with `--no-ingest`, inspect each
+abstract/title/author, and only run `frontier paper add-arxiv` for papers that pass the gate. Papers
+that fail the gate must never enter the database. Respect the current limits returned by
+`frontier setting list`: choose a continuous pool between 20 and 50 papers (never more than the
+configured brief limit), while at most the configured featured limit (normally 10) receive full-text
+analysis and preprocessing. Rank the entire pool first. Store `topic_relevance_score`,
+`author_influence_score`, and independent quality `research_score`; fold author influence into
+relevance modestly without displaying it. Save a concise, information-dense Agent comment for every
+candidate and put all selected candidates in one brief. The comment must explain what the work does
+and its concrete methodological or empirical highlight, such as the proposed mechanism, benchmark,
+real-robot result, or a reported limitation. Never explain or repeat the numerical quality or
+relevance scores in `agent_comment`; scores belong only in their score fields and the ranking.
 Before ranking or adding a paper, inspect its existing record and exclude every paper whose
 status is not `candidate`; papers in `reading`, `feedback_pending`, `completed`, or `ignored` status
-must never appear in the daily recommendations. Read full PDF text for final candidates and update
-their paper analyses. Paper summaries, Agent comments, recommendation reasons, problem, innovation,
+must never appear in the daily recommendations. Screen and score the pool from abstracts and authors;
+read full PDF text only for the ranked top 10 and update their detailed analyses. The other candidates
+need a translated abstract, concise comment, and both scores, not a full-text analysis. If one top-10
+PDF fails, record the failure on that paper and continue with the remaining candidates. Do not publish
+a failure message as a one-paper brief. If fewer than 20 eligible papers exist after broad discovery,
+report the shortage explicitly and do not fabricate extra papers. Paper summaries, Agent comments, recommendation reasons, problem, innovation,
 experiment, limitations, and open_questions fields must be written in Simplified Chinese. Do not attach daily
 or candidate papers to research nodes, create paper-backed node progress, or otherwise treat them
 as accumulated evidence: graph connection is allowed only after the user completes reading and
@@ -322,7 +349,8 @@ This is a stateless catalog/brief analysis run, not the paper's long-lived readi
 create or resume a paper Conversation and do not infer the user's attitude from unrelated history.
 Verify and update author names, first author, corresponding author, primary affiliation, source and
 publication metadata when the evidence supports them; never invent missing roles or affiliations.
-Save a concise Simplified-Chinese one-line summary, one-line Agent comment, problem, innovation,
+Save a concise Simplified-Chinese one-line summary, an information-dense Agent comment describing
+what the work does and its main highlight, problem, innovation,
 experiment evidence, limitations, open_questions, research score, relevance score, recommendation reason, and
 `suggested_tags` with
 `frontier paper update`. Use explicit unavailable/evidence-insufficient wording for fields that cannot
@@ -457,7 +485,18 @@ User message:
 Handle the user's research-management request. Inspect the current page context and relevant
 server state before answering. Use CLI tools for every mutation. Only attach papers to nodes or add
 paper-backed node progress after the paper has completed user-confirmed reading (`completed`). Only
-save a research idea when the user explicitly asks to save it. Current UI context: {context}
+save a research idea when the user explicitly asks to save it. When the user explicitly asks to
+update, strengthen, weaken, add, or remove a research preference, treat that statement as strong
+user evidence. Read `frontier interest context` first, then create or update an explicit
+`interest_profile` memory with `frontier memory create` or `frontier memory update`, using
+`source=user_conversation`. Record the domain, positive or negative direction, desired recommendation
+behavior, scope, and any exclusions in concise Simplified Chinese. Re-read `frontier interest context`
+after the mutation and report exactly what changed. Do not write the derived
+`derived-interest-profile-v1` directly or invent feedback evidence keys; that profile is rebuilt only
+from confirmed paper feedback. A conversational preference update affects the next ranking or daily
+brief and must not reorder an already published brief for the current day. If the user is only asking
+about a field without explicitly requesting a preference change, answer normally and do not mutate
+the interest profile. Current UI context: {context}
 
 User message:
 {message}
@@ -497,6 +536,69 @@ def _run_translation_task(task_id: str) -> None:
                 task.error = str(exc)
                 task.finished_at = utcnow()
                 session.commit()
+
+
+def _run_abstract_translation_batch_task(task_id: str) -> None:
+    """Translate every missing abstract in one brief, retaining partial results."""
+    with SessionLocal() as session:
+        task = session.get(TaskRun, task_id)
+        if not task or task.status != "queued":
+            return
+        task.status = "running"
+        task.started_at = utcnow()
+        items = list((task.payload_json or {}).get("items") or [])
+        session.commit()
+    translated = 0
+    errors: dict[str, str] = {}
+    for item in items:
+        try:
+            content = "".join(
+                stream_translation_prompt(
+                    f"Translate this academic abstract into {TARGET_LANGUAGE}. Return only the translation, preserving technical terms.\n\n{item['text']}",
+                    timeout_seconds=settings.translation_timeout_seconds,
+                )
+            )
+            with SessionLocal() as session:
+                existing = session.scalar(
+                    select(TranslationCache).where(
+                        TranslationCache.selection_key == item["selection_key"]
+                    )
+                )
+                if existing is None:
+                    session.add(
+                        TranslationCache(
+                            selection_key=item["selection_key"],
+                            paper_id=item["paper_id"],
+                            page_number=0,
+                            selected_text=item["text"],
+                            target_language=TARGET_LANGUAGE,
+                            content=content,
+                            position_json={"kind": "abstract"},
+                        )
+                    )
+                else:
+                    existing.content = content
+                session.commit()
+            translated += 1
+        except Exception as exc:  # noqa: BLE001
+            errors[str(item.get("paper_id"))] = str(exc)
+    with SessionLocal() as session:
+        task = session.get(TaskRun, task_id)
+        if not task:
+            return
+        task.status = "completed" if translated or not errors else "failed"
+        task.result_json = {"translated": translated, "failed": len(errors), "errors": errors}
+        task.error = "; ".join(errors.values()) if errors else None
+        task.finished_at = utcnow()
+        brief_id = (task.payload_json or {}).get("brief_id")
+        brief = session.get(Brief, brief_id) if brief_id else None
+        if brief:
+            brief.snapshot_json = {
+                **(brief.snapshot_json or {}),
+                "abstract_translation_status": "failed" if errors and not translated else "ready",
+                "abstract_translation_errors": errors,
+            }
+        session.commit()
 
 
 def _graph_feedback_is_active(session: Session, task: TaskRun) -> bool:
@@ -554,14 +656,10 @@ def run_task(task_id: str) -> None:
         task = session.get(TaskRun, task_id)
         if not task or task.status != "queued":
             return
-        is_translation = bool(task and task.kind == "translate")
+        is_translation = bool(task and task.kind in {"translate", "abstract_translation_batch"})
         is_podcast_render = bool(task and task.kind == "podcast_episode_render")
-        uses_app_server = bool(
-            task and (task.payload_json or {}).get("conversation_id")
-        )
-        remaining_seconds = _remaining_task_seconds(
-            task, settings.agent_task_timeout_seconds
-        )
+        uses_app_server = bool(task and (task.payload_json or {}).get("conversation_id"))
+        remaining_seconds = _remaining_task_seconds(task, settings.agent_task_timeout_seconds)
         if not is_translation and not is_podcast_render and remaining_seconds <= 0:
             _fail_expired_queued_task(session, task)
             return
@@ -569,6 +667,9 @@ def run_task(task_id: str) -> None:
         from .services.podcast_generation import run_podcast_render_task
 
         run_podcast_render_task(task_id)
+        return
+    if is_translation and task and task.kind == "abstract_translation_batch":
+        _run_abstract_translation_batch_task(task_id)
         return
     if is_translation:
         _run_translation_task(task_id)
@@ -658,9 +759,7 @@ def _fail_expired_queued_task(session: Session, task: TaskRun) -> None:
         session.rollback()
         return
     if task.kind == "architecture_generation":
-        document = session.get(
-            ArchitectureDocument, (task.payload_json or {}).get("paper_id")
-        )
+        document = session.get(ArchitectureDocument, (task.payload_json or {}).get("paper_id"))
         if document and document.generation_task_id == task.id:
             document.status = "ready" if document.scene_json else "failed"
             document.error = error
@@ -690,15 +789,11 @@ def _run_app_server_task(task_id: str) -> None:
         task = session.get(TaskRun, task_id)
         if not task or task.status != "queued":
             return
-        remaining_seconds = _remaining_task_seconds(
-            task, settings.agent_task_timeout_seconds
-        )
+        remaining_seconds = _remaining_task_seconds(task, settings.agent_task_timeout_seconds)
         if remaining_seconds <= 0:
             _fail_expired_queued_task(session, task)
             return
-        if task.kind == "graph_maintenance" and not _graph_feedback_is_active(
-            session, task
-        ):
+        if task.kind == "graph_maintenance" and not _graph_feedback_is_active(session, task):
             task.status = "cancelled"
             task.finished_at = utcnow()
             task.result_json = {
@@ -716,9 +811,7 @@ def _run_app_server_task(task_id: str) -> None:
         prompt = build_prompt(task)
         conversation_id = task.payload_json.get("conversation_id")
         conversation = (
-            session.get(Conversation, conversation_id)
-            if isinstance(conversation_id, str)
-            else None
+            session.get(Conversation, conversation_id) if isinstance(conversation_id, str) else None
         )
         session_id = conversation.codex_session_id if conversation else None
         recovery_prompt = (
@@ -804,14 +897,8 @@ def _run_app_server_task(task_id: str) -> None:
             if transition.rowcount != 1:
                 session.rollback()
                 return
-            if (
-                is_architecture
-                and document
-                and document.generation_task_id == task.id
-            ):
-                document.status = (
-                    "ready" if completed or document.scene_json else "failed"
-                )
+            if is_architecture and document and document.generation_task_id == task.id:
+                document.status = "ready" if completed or document.scene_json else "failed"
                 document.error = final_error
                 document.generation_task_id = None
             if is_architecture:
@@ -864,11 +951,7 @@ def _run_app_server_task(task_id: str) -> None:
                     if is_architecture
                     else None
                 )
-                if (
-                    is_architecture
-                    and document
-                    and document.generation_task_id == task.id
-                ):
+                if is_architecture and document and document.generation_task_id == task.id:
                     document.status = "ready" if document.scene_json else "failed"
                     document.error = task.error
                     document.generation_task_id = None
@@ -890,9 +973,7 @@ def _run_codex_task(task_id: str, *, timeout_seconds: float | None = None) -> No
         task = session.get(TaskRun, task_id)
         if not task or task.status != "queued":
             return
-        if task.kind == "graph_maintenance" and not _graph_feedback_is_active(
-            session, task
-        ):
+        if task.kind == "graph_maintenance" and not _graph_feedback_is_active(session, task):
             task.status = "cancelled"
             task.finished_at = utcnow()
             task.result_json = {
@@ -1032,8 +1113,7 @@ def _run_codex_task(task_id: str, *, timeout_seconds: float | None = None) -> No
             if timed_out.is_set():
                 final_status = "failed"
                 final_error = (
-                    "Agent exceeded the configured wall-clock timeout "
-                    f"of {wall_timeout} seconds."
+                    f"Agent exceeded the configured wall-clock timeout of {wall_timeout} seconds."
                 )
             elif return_code != 0:
                 final_status = "failed"
@@ -1047,11 +1127,11 @@ def _run_codex_task(task_id: str, *, timeout_seconds: float | None = None) -> No
                     (paper.summary, paper.agent_comment, paper.recommendation_reason)
                 ):
                     final_status = "failed"
-                    final_error = "Agent finished without saving the required paper analysis fields."
+                    final_error = (
+                        "Agent finished without saving the required paper analysis fields."
+                    )
             elif task.kind == "architecture_generation":
-                document = session.get(
-                    ArchitectureDocument, task.payload_json.get("paper_id")
-                )
+                document = session.get(ArchitectureDocument, task.payload_json.get("paper_id"))
                 base_revision = int(task.payload_json.get("base_revision") or 0)
                 if (
                     document is None
@@ -1083,9 +1163,7 @@ def _run_codex_task(task_id: str, *, timeout_seconds: float | None = None) -> No
                     error=final_error,
                 )
             if task.kind == "architecture_generation":
-                document = session.get(
-                    ArchitectureDocument, task.payload_json.get("paper_id")
-                )
+                document = session.get(ArchitectureDocument, task.payload_json.get("paper_id"))
                 if document and document.generation_task_id == task.id:
                     if final_status == "failed":
                         document.status = "ready" if document.scene_json else "failed"
@@ -1136,9 +1214,7 @@ def _run_codex_task(task_id: str, *, timeout_seconds: float | None = None) -> No
                 if task.kind in {"manual_paper_analysis", "paper_metadata_analysis"}:
                     set_manual_analysis_state(session, task, "failed", error=task.error)
                 if task.kind == "architecture_generation":
-                    document = session.get(
-                        ArchitectureDocument, task.payload_json.get("paper_id")
-                    )
+                    document = session.get(ArchitectureDocument, task.payload_json.get("paper_id"))
                     if document and document.generation_task_id == task.id:
                         document.status = "ready" if document.scene_json else "failed"
                         document.error = task.error

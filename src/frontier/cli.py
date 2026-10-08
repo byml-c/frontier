@@ -530,6 +530,21 @@ def brief_publish(brief_id: str) -> None:
     emit(client.request("POST", f"/api/briefs/{brief_id}/publish"))
 
 
+@brief_app.command("recover-failed")
+def brief_recover_failed(brief_id: str) -> None:
+    """Recover an interrupted daily publication; analyzed briefs are protected."""
+    emit(client.request("POST", f"/api/briefs/{brief_id}/recover-failed"))
+
+
+@brief_app.command("translate")
+def brief_translate(brief_id: str, force: bool = False) -> None:
+    emit(
+        client.request(
+            "POST", f"/api/briefs/{brief_id}/abstract-translations", params={"force": force}
+        )
+    )
+
+
 @narration_app.command("get")
 def narration_get(paper_id: str, language: str = "zh-CN") -> None:
     emit(

@@ -68,12 +68,15 @@ class Paper(Base, TimestampMixin):
     full_analysis: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
     research_score: Mapped[float | None] = mapped_column(Float)
     relevance_score: Mapped[float | None] = mapped_column(Float)
+    topic_relevance_score: Mapped[float | None] = mapped_column(Float)
+    author_influence_score: Mapped[float | None] = mapped_column(Float)
     recommendation_reason: Mapped[str | None] = mapped_column(Text)
     is_interested: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
     is_quality: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
     reading_completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     completion_summary: Mapped[str | None] = mapped_column(Text)
     pending_feedback: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    screening_feedback: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
     metadata_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
 
 

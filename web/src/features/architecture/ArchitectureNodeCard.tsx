@@ -2,7 +2,7 @@ import { Box, Card, InputBase, Stack, Typography } from "@mui/material";
 import type { ReactNode } from "react";
 import { MarkdownMessage } from "../../components/MarkdownMessage";
 import type { ArchitectureNode } from "./types";
-import { ArchitectureMath, ArchitectureRichText } from "./ArchitectureText";
+import { ArchitectureMath, ArchitectureRichText } from "./ArchitectureTextView";
 
 export type ArchitectureNodeDraft = {
   title: string;

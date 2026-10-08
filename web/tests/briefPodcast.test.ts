@@ -6,8 +6,8 @@ const component = readFileSync(new URL("../src/components/BriefPodcast.tsx", imp
 const page = readFileSync(new URL("../src/pages/BriefPage.tsx", import.meta.url), "utf8");
 const api = readFileSync(new URL("../src/api.ts", import.meta.url), "utf8");
 
-test("brief page includes a single-speaker podcast section", () => {
-  assert.match(page, /<BriefPodcast briefId=\{data\.id\}/);
+test("brief page keeps voice playback disabled", () => {
+  assert.doesNotMatch(page, /<BriefPodcast briefId=\{data\.id\}/);
   assert.match(component, /单人播报/);
   assert.match(component, /component="audio"/);
   assert.match(component, /controls/);

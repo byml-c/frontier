@@ -41,12 +41,17 @@ while IFS= read -r raw_key || [[ -n "${raw_key}" ]]; do
     continue
   fi
 
-  mapfile -t example_lines < <(grep -E "^${key}=" "${example_file}" || true)
-  if [[ ${#example_lines[@]} -ne 1 ]]; then
+  example_line=""
+  example_line_count=0
+  while IFS= read -r candidate; do
+    example_line="${candidate}"
+    example_line_count=$((example_line_count + 1))
+  done < <(grep -E "^${key}=" "${example_file}" || true)
+  if [[ ${example_line_count} -ne 1 ]]; then
     echo "错误：${example_file} 必须且只能定义一次 ${key}。" >&2
     exit 1
   fi
-  additions+=("${example_lines[0]}")
+  additions+=("${example_line}")
 done < "${managed_keys_file}"
 
 if [[ ${#additions[@]} -eq 0 ]]; then

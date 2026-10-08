@@ -56,9 +56,9 @@ NUMERIC_SETTING_RANGES = {
     "daily_hour": (0, 23),
     "daily_minute": (0, 59),
     "abstract_limit": (1, 50),
-    "fulltext_limit": (1, 19),
+    "fulltext_limit": (1, 10),
     "brief_limit": (1, BRIEF_LIMIT_MAX),
-    "featured_limit": (1, 4),
+    "featured_limit": (1, 10),
     "candidate_lookback_days": (1, 90),
 }
 

@@ -131,7 +131,7 @@ register(close_translation_provider)
 def stream_translation_prompt(
     prompt: str,
     *,
-    max_tokens: int = 256,
+    max_tokens: int = 4096,
     timeout_seconds: float | None = None,
 ) -> Iterator[str]:
     config = load_translation_provider_config()
@@ -154,6 +154,8 @@ def stream_translation_prompt(
         # a deterministic translation task. Do not send this provider extension to
         # unrelated OpenAI-compatible services that may reject unknown fields.
         payload["enable_thinking"] = False
+    elif "deepseek" in config.model.lower() or "api.deepseek.com" in config.base_url.lower():
+        payload["thinking"] = {"type": "disabled"}
     headers = {
         "Authorization": f"Bearer {config.api_key}",
         "Content-Type": "application/json",
@@ -210,7 +212,10 @@ def _translation_delta(line: str) -> str | None:
         return None
     try:
         event = json.loads(data)
-        delta = event.get("choices", [{}])[0].get("delta", {}).get("content")
+        choice = event.get("choices", [{}])[0]
+        delta = choice.get("delta", {}).get("content")
     except (json.JSONDecodeError, IndexError, AttributeError, TypeError):
         return None
+    if choice.get("finish_reason") == "length":
+        raise TranslationProviderError("译文超过输出长度限制，请缩短文本或增加输出额度后重试")
     return delta if isinstance(delta, str) and delta else None

@@ -11,16 +11,19 @@ from sqlalchemy.orm import Session
 
 from ..models import AppSetting, OperationLog
 
-BRIEF_LIMIT_DEFAULT = 8
-BRIEF_LIMIT_MAX = 10
-FEATURED_LIMIT_DEFAULT = 4
+BRIEF_LIMIT_DEFAULT = 50
+BRIEF_LIMIT_MAX = 50
+FEATURED_LIMIT_DEFAULT = 10
+# Keep the old action name so an existing installation can move through both
+# default changes without rewriting the operation log history.
 BRIEF_LIMIT_DEFAULT_MIGRATION_ACTION = "setting.default.brief_limit.8"
+BRIEF_LIMIT_NEW_DEFAULT_MIGRATION_ACTION = "setting.default.brief_limit.50"
 
 DEFAULT_SETTINGS: dict[str, Any] = {
     "daily_hour": 5,
     "daily_minute": 0,
     "abstract_limit": 50,
-    "fulltext_limit": 19,
+    "fulltext_limit": 10,
     "brief_limit": BRIEF_LIMIT_DEFAULT,
     "featured_limit": FEATURED_LIMIT_DEFAULT,
     "candidate_lookback_days": 14,
@@ -101,19 +104,40 @@ def ensure_default_settings(session: Session) -> None:
     for key, value in DEFAULT_SETTINGS.items():
         if key not in existing:
             session.add(AppSetting(key=key, value_json=value))
+    session.flush()
     brief_limit = session.get(AppSetting, "brief_limit")
-    default_migrated = session.scalar(
+    legacy_default_migrated = session.scalar(
         select(OperationLog.id)
         .where(OperationLog.action == BRIEF_LIMIT_DEFAULT_MIGRATION_ACTION)
         .limit(1)
     )
-    if not default_migrated:
+    if not legacy_default_migrated:
         previous_value = int(brief_limit.value_json) if brief_limit else None
-        if brief_limit and previous_value == 5:
-            brief_limit.value_json = BRIEF_LIMIT_DEFAULT
+        if brief_limit and previous_value in {5, 8}:
+            brief_limit.value_json = 8
         log_operation(
             session,
             action=BRIEF_LIMIT_DEFAULT_MIGRATION_ACTION,
+            detail={"previous_value": previous_value, "default_value": 8},
+        )
+    session.flush()
+    if not session.scalar(
+        select(OperationLog.id)
+        .where(OperationLog.action == BRIEF_LIMIT_NEW_DEFAULT_MIGRATION_ACTION)
+        .limit(1)
+    ):
+        previous_value = int(brief_limit.value_json) if brief_limit else None
+        fulltext_limit = session.get(AppSetting, "fulltext_limit")
+        if fulltext_limit and int(fulltext_limit.value_json) == 19:
+            fulltext_limit.value_json = 10
+        featured_limit = session.get(AppSetting, "featured_limit")
+        if featured_limit and int(featured_limit.value_json) == 4:
+            featured_limit.value_json = FEATURED_LIMIT_DEFAULT
+        if brief_limit and previous_value == 8:
+            brief_limit.value_json = BRIEF_LIMIT_DEFAULT
+        log_operation(
+            session,
+            action=BRIEF_LIMIT_NEW_DEFAULT_MIGRATION_ACTION,
             detail={"previous_value": previous_value, "default_value": BRIEF_LIMIT_DEFAULT},
         )
     if brief_limit and int(brief_limit.value_json) > BRIEF_LIMIT_MAX:

@@ -28,7 +28,7 @@ import {
 import "@xyflow/react/dist/style.css";
 import { forwardRef, useEffect, useImperativeHandle, useMemo, useRef, useState } from "react";
 import { ArchitectureNodeCard } from "./ArchitectureNodeCard";
-import { ArchitectureMath, ArchitectureRichText } from "./ArchitectureText";
+import { ArchitectureMath, ArchitectureRichText } from "./ArchitectureTextView";
 import { architectureCardSize } from "./architectureCardSize";
 import { bundleArchitectureEdges, parallelArchitectureEdgeOffsets, reciprocalArchitectureEdgeAnchors } from "./architectureEdges";
 import { fitExpandedArchitectureBounds } from "./architectureExpandedBounds";

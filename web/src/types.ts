@@ -66,10 +66,18 @@ export type Paper = {
   open_questions?: string | null;
   research_score?: number | null;
   relevance_score?: number | null;
+  topic_relevance_score?: number | null;
+  author_influence_score?: number | null;
   recommendation_reason?: string | null;
   is_interested: boolean;
   interest_level?: InterestLevel | null;
   quality_level?: QualityLevel | null;
+  screening_interest_level?: InterestLevel | null;
+  screening_quality_level?: QualityLevel | null;
+  screening_feedback?: string | null;
+  abstract_translation?: string | null;
+  abstract_translation_status?: "ready" | "queued" | "failed" | "missing" | string | null;
+  abstract_translation_error?: string | null;
   is_quality: boolean;
   completion_summary?: string | null;
   completion_summary_structured?: CompletionSummaryStructured | null;

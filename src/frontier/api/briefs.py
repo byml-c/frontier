@@ -7,15 +7,15 @@ from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query
 from sqlalchemy import or_, select
 from sqlalchemy.orm import Session
 
-from ..config import settings
 from ..database import get_session
-from ..models import Brief, BriefItem, Paper, PaperNode, PaperTag, ResearchNode, Tag
+from ..models import Brief, BriefItem, Paper, PaperNode, PaperTag, ResearchNode, Tag, TaskRun
 from ..schemas import (
     BriefCreate,
     BriefItemCreate,
     PodcastEpisodeCommit,
     PodcastEpisodeStatusUpdate,
 )
+from ..services.abstract_translation import abstract_translation, queue_brief_abstract_translations
 from ..services.common import (
     BRIEF_LIMIT_DEFAULT,
     BRIEF_LIMIT_MAX,
@@ -52,10 +52,17 @@ from ..services.podcast_content import (
 from ..services.podcast_generation import (
     PodcastGenerationError,
     get_or_create_podcast_task,
-    queue_podcast_for_brief,
 )
-from ..services.task_control import serialized_task_claim
+from ..services.task_control import (
+    ACTIVE_TASK_STATUSES,
+    get_or_create_daily_task,
+    serialized_task_claim,
+)
 from ..services.task_dispatcher import submit_task
+from ..services.translation_provider import (
+    TranslationProviderError,
+    load_translation_provider_config,
+)
 
 router = APIRouter(prefix="/api/briefs", tags=["briefs"])
 
@@ -107,14 +114,19 @@ def _paper_snapshot(session: Session, paper: Paper) -> dict:
     ).all()
     metadata = paper.metadata_json or {}
     manual_analysis = current_analysis_state(paper)
+    translation = abstract_translation(session, paper)
     return {
         "id": paper.id,
         "title": paper.title,
+        "abstract": paper.abstract,
+        "authors": paper.authors or [],
+        "arxiv_id": paper.arxiv_id,
         "first_author": paper.first_author,
         "corresponding_author": paper.corresponding_author,
         "primary_affiliation": paper.primary_affiliation,
         "source": paper.source,
         "source_url": paper.source_url,
+        "pdf_url": paper.pdf_url,
         "published_at": paper.published_at.isoformat() if paper.published_at else None,
         "summary": paper.summary,
         "agent_comment": paper.agent_comment,
@@ -125,12 +137,19 @@ def _paper_snapshot(session: Session, paper: Paper) -> dict:
         "open_questions": metadata.get("open_questions"),
         "research_score": paper.research_score,
         "relevance_score": paper.relevance_score,
+        "topic_relevance_score": paper.topic_relevance_score,
+        "author_influence_score": paper.author_influence_score,
         "recommendation_reason": paper.recommendation_reason,
         "nodes": [dict(row._mapping) for row in nodes],
         "tags": [dict(row._mapping) for row in tags],
         "analysis_status": manual_analysis.get("status"),
         "analysis_error": manual_analysis.get("error"),
         "suggested_tags": metadata.get("suggested_tags", []),
+        "screening_quality_level": (paper.screening_feedback or {}).get("quality_level"),
+        "screening_interest_level": (paper.screening_feedback or {}).get("interest_level"),
+        "screening_feedback": (paper.screening_feedback or {}).get("comment"),
+        "abstract_translation": translation.content if translation else None,
+        "abstract_translation_status": "ready" if translation else "missing",
     }
 
 
@@ -148,21 +167,58 @@ def _serialize_brief(session: Session, brief: Brief, *, detail: bool = True) -> 
         .where(BriefItem.brief_id == brief.id)
         .order_by(BriefItem.rank)
     ).all()
+    translations = {paper.id: abstract_translation(session, paper) for _, paper in rows}
+    translation_errors = (brief.snapshot_json or {}).get("abstract_translation_errors", {})
     payload["items"] = [
         {
             **model_dict(item),
             "paper": (
                 {
-                    **(
-                        _paper_snapshot(session, paper)
-                        if item.tier == "manual"
-                        else item.snapshot_json or _paper_snapshot(session, paper)
+                    **_paper_snapshot(session, paper),
+                    **((item.snapshot_json or {}) if item.tier != "manual" else {}),
+                    # Keep editable analysis fields current so a user or Agent can
+                    # correct a brief comment after publication without rewriting
+                    # the historical membership decision.
+                    "summary": paper.summary,
+                    "agent_comment": paper.agent_comment,
+                    "problem": paper.problem,
+                    "innovation": paper.innovation,
+                    "experiment": paper.experiment,
+                    "limitations": paper.limitations,
+                    "open_questions": (paper.metadata_json or {}).get("open_questions"),
+                    "research_score": paper.research_score,
+                    "relevance_score": paper.relevance_score,
+                    "topic_relevance_score": paper.topic_relevance_score,
+                    "author_influence_score": paper.author_influence_score,
+                    "recommendation_reason": paper.recommendation_reason,
+                    "abstract": paper.abstract,
+                    "screening_quality_level": (paper.screening_feedback or {}).get(
+                        "quality_level"
                     ),
+                    "screening_interest_level": (paper.screening_feedback or {}).get(
+                        "interest_level"
+                    ),
+                    "screening_feedback": (paper.screening_feedback or {}).get("comment"),
                     # 阅读结论属于论文的后续状态，不应被冻结在发布时的简报快照中。
                     "completion_summary": brief_completion_summary(paper),
                     "completion_summary_structured": completion_summary_structured(
                         paper, include_user_attitude=False
                     ),
+                    "abstract_translation_status": (
+                        "ready"
+                        if translations[paper.id]
+                        else (
+                            "failed"
+                            if paper.id in translation_errors
+                            else (brief.snapshot_json or {}).get(
+                                "abstract_translation_status", "missing"
+                            )
+                        )
+                    ),
+                    "abstract_translation": (
+                        translations[paper.id].content if translations[paper.id] else None
+                    ),
+                    "abstract_translation_error": translation_errors.get(paper.id),
                 }
             ),
             "current_status": paper.status,
@@ -208,9 +264,7 @@ def create_brief(payload: BriefCreate, session: Annotated[Session, Depends(get_s
     existing = session.scalar(select(Brief).where(Brief.brief_date == payload.brief_date))
     if existing:
         if existing.status != "published":
-            current_digest = (existing.snapshot_json or {}).get(
-                "interest_context_digest_used"
-            )
+            current_digest = (existing.snapshot_json or {}).get("interest_context_digest_used")
             if (
                 payload.interest_context_digest
                 and payload.interest_context_digest != current_digest
@@ -235,13 +289,8 @@ def create_brief(payload: BriefCreate, session: Annotated[Session, Depends(get_s
                 changed = True
             if payload.interest_context_digest:
                 snapshot = dict(existing.snapshot_json or {})
-                if (
-                    snapshot.get("interest_context_digest_used")
-                    != payload.interest_context_digest
-                ):
-                    snapshot["interest_context_digest_used"] = (
-                        payload.interest_context_digest
-                    )
+                if snapshot.get("interest_context_digest_used") != payload.interest_context_digest:
+                    snapshot["interest_context_digest_used"] = payload.interest_context_digest
                     existing.snapshot_json = snapshot
                     changed = True
             if changed:
@@ -275,6 +324,75 @@ def create_brief(payload: BriefCreate, session: Annotated[Session, Depends(get_s
 @router.get("/{brief_id}")
 def get_brief(brief_id: str, session: Annotated[Session, Depends(get_session)]) -> dict:
     return _serialize_brief(session, _brief_or_404(session, brief_id))
+
+
+@router.post("/{brief_id}/recover-failed")
+@serialized_task_claim
+def recover_failed_brief(
+    brief_id: str,
+    background_tasks: BackgroundTasks,
+    session: Annotated[Session, Depends(get_session)],
+) -> dict:
+    """Recover an interrupted, accidentally published brief without losing its audit history."""
+    from ..config import settings
+
+    if not settings.enable_codex_runs:
+        raise HTTPException(status_code=503, detail="Agent 运行已在服务器设置中停用")
+    brief = _brief_or_404(session, brief_id)
+    previous_task = session.get(TaskRun, brief.task_id) if brief.task_id else None
+    if brief.status != "published" or not previous_task or previous_task.status != "failed":
+        raise HTTPException(
+            status_code=409, detail="Only briefs from failed daily tasks can be recovered"
+        )
+    rows = session.execute(
+        select(BriefItem, Paper)
+        .join(Paper, Paper.id == BriefItem.paper_id)
+        .where(BriefItem.brief_id == brief_id)
+    ).all()
+    if any(
+        item.tier != "manual"
+        and (
+            paper.status != "candidate"
+            or paper.research_score is not None
+            or paper.relevance_score is not None
+            or paper.screening_feedback
+        )
+        for item, paper in rows
+    ):
+        raise HTTPException(
+            status_code=409, detail="Brief already contains analysis or user feedback"
+        )
+    if session.scalar(
+        select(TaskRun.id).where(
+            TaskRun.kind == "daily_brief",
+            TaskRun.status.in_(ACTIVE_TASK_STATUSES),
+            TaskRun.payload_json["date"].as_string() == brief.brief_date.isoformat(),
+        )
+    ):
+        raise HTTPException(status_code=409, detail="A daily task is already active for this date")
+    log_operation(
+        session,
+        actor="user",
+        action="brief.failed_publication_recovered",
+        entity_type="brief",
+        entity_id=brief.id,
+        task_id=previous_task.id,
+        detail={"previous_publication": _serialize_brief(session, brief)},
+    )
+    for item, _paper in rows:
+        if item.tier != "manual":
+            session.delete(item)
+    brief.status = "draft"
+    brief.published_at = None
+    brief.introduction = None
+    brief.snapshot_json = {}
+    session.flush()
+    claim = get_or_create_daily_task(session, brief.brief_date)
+    assert claim.task is not None
+    brief.task_id = claim.task.id
+    session.commit()
+    background_tasks.add_task(submit_task, claim.task.id)
+    return {"id": claim.task.id, "status": claim.task.status, "brief_id": brief.id}
 
 
 @router.get("/{brief_id}/podcast")
@@ -343,9 +461,7 @@ def set_brief_podcast_status(
     language: str = Query(default="zh-CN", min_length=2, max_length=35),
 ) -> dict:
     try:
-        item, changed = update_podcast_episode_status(
-            session, brief_id, payload, language=language
-        )
+        item, changed = update_podcast_episode_status(session, brief_id, payload, language=language)
         if changed:
             log_operation(
                 session,
@@ -411,9 +527,7 @@ def add_brief_item(
             select(BriefItem.id).where(BriefItem.brief_id == brief_id, BriefItem.tier == "featured")
         ).all()
     )
-    featured_limit = int(
-        get_setting(session, "featured_limit", FEATURED_LIMIT_DEFAULT)
-    )
+    featured_limit = int(get_setting(session, "featured_limit", FEATURED_LIMIT_DEFAULT))
     if payload.tier == "featured" and featured_count >= featured_limit:
         raise HTTPException(
             status_code=409, detail=f"Featured item limit reached ({featured_limit})"
@@ -448,9 +562,7 @@ def publish_brief(
         if row[0].tier != "manual" and not is_daily_recommendation_eligible(row[1])
     ]
     rows = [
-        row
-        for row in rows
-        if row[0].tier == "manual" or is_daily_recommendation_eligible(row[1])
+        row for row in rows if row[0].tier == "manual" or is_daily_recommendation_eligible(row[1])
     ]
     if not rows:
         raise HTTPException(status_code=409, detail="Cannot publish a brief without unread papers")
@@ -482,9 +594,9 @@ def publish_brief(
     }
     brief.status = "published"
     brief.published_at = datetime.now(UTC)
-    featured_paper_ids = [
-        paper.id for item, paper in rows if item.tier == "featured"
-    ][:4]
+    # Preprocess the ranked top ten even when an older Agent run did not mark the
+    # tier explicitly; the continuous brief list is rank-driven.
+    featured_paper_ids = [paper.id for _item, paper in rows if _item.tier != "manual"][:10]
     log_operation(
         session,
         actor="agent",
@@ -501,7 +613,56 @@ def publish_brief(
     session.commit()
     result = _serialize_brief(session, brief)
     if featured_paper_ids:
-        background_tasks.add_task(queue_document_conversions, featured_paper_ids)
-    if (settings.aliyun_tts_api_key or "").strip():
-        background_tasks.add_task(queue_podcast_for_brief, brief.id)
+        background_tasks.add_task(queue_document_conversions, featured_paper_ids, limit=10)
+    try:
+        load_translation_provider_config()
+    except TranslationProviderError:
+        pass
+    else:
+        translation_task = queue_brief_abstract_translations(session, brief.id)
+        if translation_task:
+            background_tasks.add_task(submit_task, translation_task.id)
     return result
+
+
+@router.post("/{brief_id}/abstract-translations/{paper_id}/retry")
+def retry_abstract_translation(
+    brief_id: str,
+    paper_id: str,
+    background_tasks: BackgroundTasks,
+    session: Annotated[Session, Depends(get_session)],
+) -> dict:
+    _brief_or_404(session, brief_id)
+    if not session.scalar(
+        select(BriefItem.id).where(BriefItem.brief_id == brief_id, BriefItem.paper_id == paper_id)
+    ):
+        raise HTTPException(status_code=404, detail="Paper is not part of this brief")
+    try:
+        load_translation_provider_config()
+    except TranslationProviderError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    task = queue_brief_abstract_translations(session, brief_id, paper_id=paper_id, force=True)
+    if not task:
+        return {"status": "ready"}
+    background_tasks.add_task(submit_task, task.id)
+    return {"id": task.id, "status": task.status}
+
+
+@router.post("/{brief_id}/abstract-translations")
+def translate_brief_abstracts(
+    brief_id: str,
+    background_tasks: BackgroundTasks,
+    session: Annotated[Session, Depends(get_session)],
+    force: bool = False,
+) -> dict:
+    """Queue one batch for every untranslated abstract in the brief."""
+    _brief_or_404(session, brief_id)
+    try:
+        load_translation_provider_config()
+    except TranslationProviderError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    task = queue_brief_abstract_translations(session, brief_id, force=force)
+    if not task:
+        return {"status": "ready"}
+    background_tasks.add_task(submit_task, task.id)
+    return {"id": task.id, "status": task.status}

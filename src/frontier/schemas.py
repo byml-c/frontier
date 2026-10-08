@@ -49,6 +49,8 @@ class PaperUpdate(BaseModel):
     full_analysis: dict[str, Any] | None = None
     research_score: float | None = Field(default=None, ge=0, le=1)
     relevance_score: float | None = Field(default=None, ge=0, le=1)
+    topic_relevance_score: float | None = Field(default=None, ge=0, le=1)
+    author_influence_score: float | None = Field(default=None, ge=0, le=1)
     recommendation_reason: str | None = None
     completion_summary: str | None = None
     pending_feedback: dict[str, Any] | None = None
@@ -120,6 +122,7 @@ class PaperMetadataUpdate(BaseModel):
     recommendation_reason: str | None = None
     interest_level: Literal["ignored", "neutral", "interested"] | None = None
     quality_level: Literal["poor", "normal", "excellent"] | None = None
+    screening_feedback: str | None = Field(default=None, max_length=2000)
     completion_summary_structured: CompletionSummaryStructured | None = None
     metadata_json: dict[str, Any] | None = None
     tag_ids: list[str] | None = None

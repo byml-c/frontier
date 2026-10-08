@@ -45,7 +45,7 @@ import { caretAtPoint, offsetWithin, rangeFromOffsets, textSelectionFromRange, w
 import { compactReaderControlSx, floatingReaderControlSx, readerControlSx, readerSearchFieldSx, readerSelectSx } from "../components/readerToolbarStyles";
 import { ErrorState, Loading } from "../components/States";
 import { TextPaperReader, type TextReaderSelection } from "../components/TextPaperReader";
-import { ArchitectureMath } from "../features/architecture/ArchitectureText";
+import { ArchitectureMath } from "../features/architecture/ArchitectureTextView";
 import { ArchitectureWorkspace, type ArchitectureWorkspaceHandle } from "../features/architecture/ArchitectureWorkspace";
 import { architectureOperationIsActive } from "../features/architecture/types";
 import type { ArchitectureChatCard, ArchitectureCommand, ArchitectureDocument, ArchitectureReaderContext } from "../features/architecture/types";
