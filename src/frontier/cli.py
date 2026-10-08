@@ -536,6 +536,12 @@ def brief_recover_failed(brief_id: str) -> None:
     emit(client.request("POST", f"/api/briefs/{brief_id}/recover-failed"))
 
 
+@brief_app.command("void-and-regenerate")
+def brief_void_and_regenerate(brief_id: str) -> None:
+    """Void a published daily brief and queue a replacement daily run."""
+    emit(client.request("POST", f"/api/briefs/{brief_id}/void-and-regenerate"))
+
+
 @brief_app.command("translate")
 def brief_translate(brief_id: str, force: bool = False) -> None:
     emit(

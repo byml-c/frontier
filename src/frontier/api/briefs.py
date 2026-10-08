@@ -8,7 +8,17 @@ from sqlalchemy import or_, select
 from sqlalchemy.orm import Session
 
 from ..database import get_session
-from ..models import Brief, BriefItem, Paper, PaperNode, PaperTag, ResearchNode, Tag, TaskRun
+from ..models import (
+    Brief,
+    BriefItem,
+    Paper,
+    PaperNode,
+    PaperTag,
+    PodcastEpisode,
+    ResearchNode,
+    Tag,
+    TaskRun,
+)
 from ..schemas import (
     BriefCreate,
     BriefItemCreate,
@@ -326,6 +336,78 @@ def get_brief(brief_id: str, session: Annotated[Session, Depends(get_session)]) 
     return _serialize_brief(session, _brief_or_404(session, brief_id))
 
 
+def _queue_daily_brief_regeneration(
+    *,
+    brief: Brief,
+    previous_task: TaskRun,
+    background_tasks: BackgroundTasks,
+    session: Session,
+    action: str,
+    reason: str,
+) -> dict:
+    rows = session.execute(
+        select(BriefItem, Paper)
+        .join(Paper, Paper.id == BriefItem.paper_id)
+        .where(BriefItem.brief_id == brief.id)
+    ).all()
+    if session.scalar(
+        select(TaskRun.id).where(
+            TaskRun.kind == "daily_brief",
+            TaskRun.status.in_(ACTIVE_TASK_STATUSES),
+            TaskRun.payload_json["date"].as_string() == brief.brief_date.isoformat(),
+        )
+    ):
+        raise HTTPException(status_code=409, detail="A daily task is already active for this date")
+
+    log_operation(
+        session,
+        actor="user",
+        action=action,
+        entity_type="brief",
+        entity_id=brief.id,
+        task_id=previous_task.id,
+        detail={"reason": reason, "previous_publication": _serialize_brief(session, brief)},
+    )
+    for item, _paper in rows:
+        if item.tier != "manual":
+            session.delete(item)
+
+    episode = session.scalar(
+        select(PodcastEpisode).where(PodcastEpisode.brief_id == brief.id)
+    )
+    if episode is not None:
+        episode.status = "voided"
+        episode.revision += 1
+        episode.audio_path = None
+        episode.audio_content_hash = None
+        episode.duration_ms = None
+        episode.size_bytes = None
+        episode.generation_task_id = None
+        episode.published_at = None
+        episode.error = reason
+        log_operation(
+            session,
+            actor="user",
+            action="podcast_episode.voided",
+            entity_type="podcast_episode",
+            entity_id=episode.id,
+            task_id=previous_task.id,
+            detail={"brief_id": brief.id, "reason": reason},
+        )
+
+    brief.status = "draft"
+    brief.published_at = None
+    brief.introduction = None
+    brief.snapshot_json = {}
+    session.flush()
+    claim = get_or_create_daily_task(session, brief.brief_date)
+    assert claim.task is not None
+    brief.task_id = claim.task.id
+    session.commit()
+    background_tasks.add_task(submit_task, claim.task.id)
+    return {"id": claim.task.id, "status": claim.task.status, "brief_id": brief.id}
+
+
 @router.post("/{brief_id}/recover-failed")
 @serialized_task_claim
 def recover_failed_brief(
@@ -362,37 +444,48 @@ def recover_failed_brief(
         raise HTTPException(
             status_code=409, detail="Brief already contains analysis or user feedback"
         )
-    if session.scalar(
-        select(TaskRun.id).where(
-            TaskRun.kind == "daily_brief",
-            TaskRun.status.in_(ACTIVE_TASK_STATUSES),
-            TaskRun.payload_json["date"].as_string() == brief.brief_date.isoformat(),
-        )
-    ):
-        raise HTTPException(status_code=409, detail="A daily task is already active for this date")
-    log_operation(
-        session,
-        actor="user",
+    return _queue_daily_brief_regeneration(
+        brief=brief,
+        previous_task=previous_task,
+        background_tasks=background_tasks,
+        session=session,
         action="brief.failed_publication_recovered",
-        entity_type="brief",
-        entity_id=brief.id,
-        task_id=previous_task.id,
-        detail={"previous_publication": _serialize_brief(session, brief)},
+        reason="恢复意外发布且任务失败的日报",
     )
-    for item, _paper in rows:
-        if item.tier != "manual":
-            session.delete(item)
-    brief.status = "draft"
-    brief.published_at = None
-    brief.introduction = None
-    brief.snapshot_json = {}
-    session.flush()
-    claim = get_or_create_daily_task(session, brief.brief_date)
-    assert claim.task is not None
-    brief.task_id = claim.task.id
-    session.commit()
-    background_tasks.add_task(submit_task, claim.task.id)
-    return {"id": claim.task.id, "status": claim.task.status, "brief_id": brief.id}
+
+
+@router.post("/{brief_id}/void-and-regenerate")
+@serialized_task_claim
+def void_and_regenerate_brief(
+    brief_id: str,
+    background_tasks: BackgroundTasks,
+    session: Annotated[Session, Depends(get_session)],
+) -> dict:
+    """Explicitly void a published daily brief and queue a clean replacement run."""
+    from ..config import settings
+
+    if not settings.enable_codex_runs:
+        raise HTTPException(status_code=503, detail="Agent 运行已在服务器设置中停用")
+    brief = _brief_or_404(session, brief_id)
+    previous_task = session.get(TaskRun, brief.task_id) if brief.task_id else None
+    if (
+        brief.status != "published"
+        or not previous_task
+        or previous_task.kind != "daily_brief"
+        or previous_task.status not in {"completed", "failed"}
+    ):
+        raise HTTPException(
+            status_code=409,
+            detail="Only completed or failed published daily briefs can be voided and regenerated",
+        )
+    return _queue_daily_brief_regeneration(
+        brief=brief,
+        previous_task=previous_task,
+        background_tasks=background_tasks,
+        session=session,
+        action="brief.voided_for_regeneration",
+        reason="用户要求作废已发布日报并重新生成",
+    )
 
 
 @router.get("/{brief_id}/podcast")
