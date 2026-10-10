@@ -18,7 +18,7 @@ def test_old_brief_default_migrates_once_without_overwriting_later_choice() -> N
         session.commit()
 
         ensure_default_settings(session)
-        assert session.get(AppSetting, "brief_limit").value_json == 8
+        assert session.get(AppSetting, "brief_limit").value_json == 50
         assert session.scalar(
             select(OperationLog.id).where(
                 OperationLog.action == BRIEF_LIMIT_DEFAULT_MIGRATION_ACTION

@@ -1,29 +1,37 @@
-import { Box, Grid, Stack, ToggleButton, ToggleButtonGroup, Typography } from "@mui/material";
+import CheckRounded from "@mui/icons-material/CheckRounded";
+import { Box, ButtonBase, Grid, Stack, ToggleButton, ToggleButtonGroup, Tooltip, Typography } from "@mui/material";
 import type { InterestLevel, QualityLevel } from "../types";
 import { INTEREST_OPTIONS, QUALITY_OPTIONS } from "./paperEvaluation";
 
-function AgentScore({ value }: { value?: number | null }) {
+function AgentScore({ value, confirmed, disabled = false, onConfirm }: { value?: number | null; confirmed: boolean; disabled?: boolean; onConfirm?: () => void }) {
   const label = value == null ? "—" : value.toFixed(2);
-  return (
-    <Box
-      aria-label={`Agent 打分 ${label}`}
+  const score = (
+    <ButtonBase
+      aria-label={confirmed ? `已认可 Agent 打分 ${label}` : `认可 Agent 打分 ${label}`}
+      aria-pressed={confirmed}
+      disabled={disabled || value == null || !onConfirm}
+      onClick={onConfirm}
       sx={{
         alignItems: "center",
-        bgcolor: "action.hover",
+        bgcolor: confirmed ? "primary.light" : "action.hover",
         border: 1,
-        borderColor: "divider",
+        borderColor: confirmed ? "primary.main" : "divider",
         borderRadius: 1,
         display: "flex",
         flexShrink: 0,
         gap: .5,
         height: 34,
         px: 1,
+        color: confirmed ? "primary.main" : "text.secondary",
+        "&.Mui-disabled": { color: "text.disabled", opacity: 1 },
       }}
     >
-      <Typography variant="caption" color="text.secondary">Agent</Typography>
+      {confirmed && <CheckRounded sx={{ fontSize: 16 }} />}
+      <Typography variant="caption">Agent</Typography>
       <Typography variant="body2" fontWeight={750} sx={{ fontVariantNumeric: "tabular-nums" }}>{label}</Typography>
-    </Box>
+    </ButtonBase>
   );
+  return <Tooltip title={confirmed ? "已看摘要并认可 Agent 评分（再次点击取消）" : "点击表示已看摘要并认可 Agent 评分"}>{score}</Tooltip>;
 }
 
 export function PaperChoiceToggle<Value extends string>({
@@ -78,8 +86,10 @@ export function PaperChoiceToggle<Value extends string>({
 
 function EvaluationMetric<Value extends string>({
   ariaLabel,
+  agentScoreConfirmed,
   disabled,
   onChange,
+  onAgentScoreConfirm,
   options,
   score,
   title,
@@ -90,6 +100,8 @@ function EvaluationMetric<Value extends string>({
   onChange: (value: Value) => void;
   options: readonly { value: Value; label: string }[];
   score?: number | null;
+  agentScoreConfirmed: boolean;
+  onAgentScoreConfirm?: () => void;
   title: string;
   value: Value | false;
 }) {
@@ -97,7 +109,7 @@ function EvaluationMetric<Value extends string>({
     <Box sx={{ p: 1.25, border: 1, borderColor: "divider", borderRadius: 1.5 }}>
       <Typography variant="subtitle2" fontWeight={750} sx={{ mb: .75 }}>{title}</Typography>
       <Stack direction="row" alignItems="center" spacing={.75}>
-        <AgentScore value={score} />
+        <AgentScore value={score} confirmed={agentScoreConfirmed} disabled={disabled} onConfirm={onAgentScoreConfirm} />
         <Stack direction="row" alignItems="stretch" sx={{ flex: 1, minWidth: 0 }}>
           <Box sx={{ alignItems: "center", bgcolor: "action.hover", border: 1, borderColor: "divider", borderRadius: "8px 0 0 8px", borderRight: 0, display: "flex", flexShrink: 0, px: .75 }}>
             <Typography variant="caption" color="text.secondary">我的</Typography>
@@ -123,6 +135,8 @@ export function PaperEvaluationToggleButtons({
   interestLevel,
   onQualityChange,
   onInterestChange,
+  agentScoreConfirmed = false,
+  onAgentScoreConfirm,
   disabled = false,
   qualityTitle = "研究价值",
   interestTitle = "个人相关性",
@@ -133,6 +147,8 @@ export function PaperEvaluationToggleButtons({
   interestLevel: InterestLevel | false;
   onQualityChange: (value: QualityLevel) => void;
   onInterestChange: (value: InterestLevel) => void;
+  agentScoreConfirmed?: boolean;
+  onAgentScoreConfirm?: () => void;
   disabled?: boolean;
   qualityTitle?: string;
   interestTitle?: string;
@@ -147,6 +163,8 @@ export function PaperEvaluationToggleButtons({
           value={qualityLevel}
           options={QUALITY_OPTIONS}
           disabled={disabled}
+          agentScoreConfirmed={agentScoreConfirmed}
+          onAgentScoreConfirm={onAgentScoreConfirm}
           onChange={onQualityChange}
         />
       </Grid>
@@ -158,6 +176,8 @@ export function PaperEvaluationToggleButtons({
           value={interestLevel}
           options={INTEREST_OPTIONS}
           disabled={disabled}
+          agentScoreConfirmed={agentScoreConfirmed}
+          onAgentScoreConfirm={onAgentScoreConfirm}
           onChange={onInterestChange}
         />
       </Grid>

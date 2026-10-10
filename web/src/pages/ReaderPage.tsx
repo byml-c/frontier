@@ -473,7 +473,7 @@ function renderCitations(content: string, onJump: (page: number) => void, invert
 
 function suggestedInterestLevel(paper: Paper): InterestLevel {
   const candidate = paper.pending_feedback?.suggested_interest_level;
-  if (candidate === "ignored" || candidate === "neutral" || candidate === "interested") {
+  if (candidate === "ignored" || candidate === "low" || candidate === "neutral" || candidate === "high" || candidate === "interested") {
     return candidate;
   }
   return paper.pending_feedback?.suggested_interested ? "interested" : "neutral";
@@ -481,7 +481,7 @@ function suggestedInterestLevel(paper: Paper): InterestLevel {
 
 function suggestedQualityLevel(paper: Paper): QualityLevel {
   const candidate = paper.pending_feedback?.suggested_quality_level;
-  if (candidate === "poor" || candidate === "normal" || candidate === "excellent") {
+  if (candidate === "poor" || candidate === "below_average" || candidate === "normal" || candidate === "good" || candidate === "excellent") {
     return candidate;
   }
   return paper.pending_feedback?.suggested_quality ? "excellent" : "normal";

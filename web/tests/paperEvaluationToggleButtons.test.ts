@@ -10,19 +10,23 @@ const controlSource = readFileSync(new URL("../src/components/PaperEvaluationTog
 const metadataSource = readFileSync(new URL("../src/components/PaperMetadataDialog.tsx", import.meta.url), "utf8");
 const readerSource = readFileSync(new URL("../src/pages/ReaderPage.tsx", import.meta.url), "utf8");
 
-test("quality toggle exposes all three discrete judgments", () => {
+test("quality toggle exposes five discrete judgments", () => {
   assert.deepEqual(QUALITY_OPTIONS, [
-    { value: "poor", label: "较差" },
-    { value: "normal", label: "正常" },
-    { value: "excellent", label: "优质" },
+    { value: "poor", label: "很差" },
+    { value: "below_average", label: "较差" },
+    { value: "normal", label: "一般" },
+    { value: "good", label: "较好" },
+    { value: "excellent", label: "优秀" },
   ]);
 });
 
-test("interest toggle uses related as the neutral state", () => {
+test("interest toggle exposes five levels", () => {
   assert.deepEqual(INTEREST_OPTIONS, [
-    { value: "ignored", label: "忽略" },
-    { value: "neutral", label: "相关" },
-    { value: "interested", label: "感兴趣" },
+    { value: "ignored", label: "不相关" },
+    { value: "low", label: "较不相关" },
+    { value: "neutral", label: "一般" },
+    { value: "high", label: "较相关" },
+    { value: "interested", label: "高度相关" },
   ]);
 });
 
@@ -30,6 +34,7 @@ test("all editable paper ratings use the shared compact toggle control", () => {
   assert.match(controlSource, /<ToggleButtonGroup/);
   assert.match(controlSource, /options\.map/);
   assert.match(controlSource, /value\.toFixed\(2\)/);
+  assert.match(controlSource, /aria-pressed/);
   assert.match(controlSource, />Agent<\/Typography>/);
   assert.match(controlSource, />我的<\/Typography>/);
   assert.match(metadataSource, /<PaperEvaluationToggleButtons/);

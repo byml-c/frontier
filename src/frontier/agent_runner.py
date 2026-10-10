@@ -304,23 +304,68 @@ Brier scores. When feedback support is small, avoid overfitting and keep modest 
 exploration. If interest hit rate is weak, tighten personal relevance; if quality hit rate or its
 calibration is weak, raise the evidence threshold independently. The graph describes research
 questions and accumulated evidence; it is not by itself proof that the user likes a topic.
-Collect arXiv candidates using the calibrated interests and relevant graph questions. Preserve the
-existing initial domains and apply them as a hard gate: search with `--no-ingest`, inspect each
-abstract/title/author, and only run `frontier paper add-arxiv` for papers that pass the gate. Papers
-that fail the gate must never enter the database. Respect the current limits returned by
-`frontier setting list`: choose a continuous pool between 20 and 50 papers (never more than the
-configured brief limit), while at most the configured featured limit (normally 10) receive full-text
+Read `frontier setting list`. Broad discovery domains are `discovery_domains` (normally 3D vision,
+embodied intelligence, and AI agents). These alone define the semantic domain gate. In contrast,
+`initial_interest_domains` (VLA, WAM, etc.), explicit interests, and learned preferences guide interest
+selection and ranking, never the initial retrieval query or the domain gate. General AI agents include
+tool use, planning, multi-agent collaboration, memory, and computer use, not just embodied agents.
+Start discovery with `frontier source arxiv-discover --date {run_date} --offset 0 --page-size 100`.
+This read-only tool scans the configured broad arXiv categories over the recent candidate_lookback_days
+(default 3), then applies a high-recall server-side prefilter to obvious vision, robotics, embodied,
+or agent-related metadata. It scans at most discovery_scan_limit raw records (default 300) and returns
+at most discovery_prefilter_limit records (default 120) to you. Inspect every returned item; the
+prefilter is only an efficiency filter, not proof of domain membership. It deliberately does not use
+VLA, WAM, or other narrow interest keywords. If `scan_capped` is true, record that coverage is bounded
+by the raw scan limit; do not claim to have covered the full category set. The Server deduplicates by
+version-independent arXiv ID, normalized DOI, and normalized title, and excludes ALL existing library
+papers (including candidate) before returning the list. Do not rescan or refill from the library merely
+to reach 100; use the returned new-paper batch only. Pagination happens inside the Server, so call this
+command once per daily run, except when retrying a failed request. A null next_offset ends discovery;
+it does not mean the entire arXiv window was covered. Set candidate-pool discovery_complete from the
+returned coverage_complete and explain scan_capped/prefilter_capped or shortages in notes.
+Retry a failed discovery request without changing the date or offset. Never silently substitute narrow
+keyword searches for broad discovery; keyword search is only supplemental lookup or verification.
+Inspect each title, abstract and authors for semantic membership in a broad domain. Categories are
+recall sources, not proof of domain membership. Papers that fail the gate must never enter the database.
+For domain matches, run `frontier paper add-arxiv`; ingestion still deduplicates races with other
+requests. Ingest eligible domain matches before interest shortlisting, even if they
+will not be chosen today, so lower-interest domain papers remain available for future discovery.
+Then narrow domain-qualified unread papers to about `abstract_limit` candidates (default 100, normally
+80-120) using personal interest. This setting is the POST-screening candidate target, not a cap on
+raw search results or how many abstracts you may inspect for domain screening. Prefer explicit user
+preferences, but reserve about 15% of this shortlist for promising or uncertain work elsewhere in the
+broad domains; VLA/WAM keyword absence must never by itself eliminate a paper. Author influence may
+modestly improve interest, but never bypass the broad domain gate. Do not fill shortages with off-domain
+or already-read papers. Keep shortlist IDs and progress in task-scoped scratch files as needed.
+Save this intermediate pool with `frontier task candidate-pool {task.id} --data @data/tasks/{task.id}/candidate-pool.json`.
+The JSON contains `paper_ids`, `discovery_complete`, and `notes` explaining shortages or incomplete
+coverage. Read `frontier task get {task.id}` to verify persistence. Choose the final brief only from
+this saved pool. Create the brief with `task_id={task.id}` so the Server can validate pool membership.
+Score quality and relevance independently, rank these candidates, then choose a
+continuous final brief between 20 and 50 papers (never more than the
+configured brief limit), while at most min(fulltext_limit, featured_limit, 10) receive full-text
 analysis and preprocessing. Rank the entire pool first. Store `topic_relevance_score`,
 `author_influence_score`, and independent quality `research_score`; fold author influence into
-relevance modestly without displaying it. Save a concise, information-dense Agent comment for every
-candidate and put all selected candidates in one brief. The comment must explain what the work does
+relevance modestly without displaying it. For every paper that enters the final 20–50, correct the
+bibliographic block before saving the recommendation. Treat the automatically parsed first author,
+first affiliation, and corresponding author as untrusted hints. Use the ordered author list, explicit
+affiliation markers, and corresponding-author footnotes from the source; when abstract metadata is
+insufficient, inspect only the first PDF/HTML page for this extraction. Do not infer a corresponding
+author from seniority or author position. Save `first_author`, `primary_affiliation`, and
+`corresponding_author` with `frontier paper update`, plus a concise Simplified Chinese
+`research_group_summary` describing the institution and the core lab/team's completed research focus.
+If a field cannot be verified, leave it null and say so in the summary. Include
+`metadata_json.agent_bibliography` with `source: "agent"`, a `confidence` of `high`, `medium`, or
+`low`, and a short `evidence` note. A user-edited bibliographic field is protected and must not be
+overwritten. Save a concise, information-dense Agent comment for every
+final brief item; do not put the entire 100-paper intermediate pool in the brief. The comment must explain what the work does
 and its concrete methodological or empirical highlight, such as the proposed mechanism, benchmark,
 real-robot result, or a reported limitation. Never explain or repeat the numerical quality or
 relevance scores in `agent_comment`; scores belong only in their score fields and the ranking.
 Before ranking or adding a paper, inspect its existing record and exclude every paper whose
 status is not `candidate`; papers in `reading`, `feedback_pending`, `completed`, or `ignored` status
 must never appear in the daily recommendations. Screen and score the pool from abstracts and authors;
-read full PDF text only for the ranked top 10 and update their detailed analyses. The other candidates
+read full PDF text only for that configured leading subset and update their detailed analyses. The other candidates
 need a translated abstract, concise comment, and both scores, not a full-text analysis. If one top-10
 PDF fails, record the failure on that paper and continue with the remaining candidates. Do not publish
 a failure message as a one-paper brief. If fewer than 20 eligible papers exist after broad discovery,
@@ -416,8 +461,9 @@ Chinese. Save `completion_summary_structured` with exactly these fields: `proble
 claim in the first five fields must cite a page as [[page:N]]. Derive `user_attitude` only from the
 user's annotations, notes, and conversation; state that evidence is insufficient instead of
 inventing an attitude. Save suggested tags and the structured summary with `frontier paper finish`.
-Also save `suggested_interest_level` as exactly one of `ignored`, `neutral`, or `interested`.
-Save `suggested_quality_level` independently as exactly one of `poor`, `normal`, or `excellent`.
+Also save `suggested_interest_level` as exactly one of `ignored`, `low`, `neutral`, `high`, or
+`interested`. Save `suggested_quality_level` independently as exactly one of `poor`,
+`below_average`, `normal`, `good`, or `excellent`.
 Read the active research nodes and save concise `suggested_nodes` candidates. Each candidate must
 contain `name`, `core_question`, a paper-specific `reason`, optional `domain`, and `node_id` when it
 matches an existing node exactly. Propose a new node only when its core research question is genuinely

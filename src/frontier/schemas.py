@@ -32,6 +32,7 @@ class PaperUpdate(BaseModel):
     first_author: str | None = None
     corresponding_author: str | None = None
     primary_affiliation: str | None = None
+    research_group_summary: str | None = Field(default=None, max_length=2_000)
     source: str | None = None
     source_url: str | None = None
     pdf_url: str | None = None
@@ -107,6 +108,7 @@ class PaperMetadataUpdate(BaseModel):
     first_author: str | None = None
     corresponding_author: str | None = None
     primary_affiliation: str | None = None
+    research_group_summary: str | None = Field(default=None, max_length=2_000)
     source: str | None = None
     source_url: str | None = None
     pdf_url: str | None = None
@@ -120,9 +122,10 @@ class PaperMetadataUpdate(BaseModel):
     limitations: str | None = None
     open_questions: str | None = None
     recommendation_reason: str | None = None
-    interest_level: Literal["ignored", "neutral", "interested"] | None = None
-    quality_level: Literal["poor", "normal", "excellent"] | None = None
+    interest_level: Literal["ignored", "low", "neutral", "high", "interested"] | None = None
+    quality_level: Literal["poor", "below_average", "normal", "good", "excellent"] | None = None
     screening_feedback: str | None = Field(default=None, max_length=2000)
+    agent_score_confirmed: bool | None = None
     completion_summary_structured: CompletionSummaryStructured | None = None
     metadata_json: dict[str, Any] | None = None
     tag_ids: list[str] | None = None
@@ -143,9 +146,9 @@ class FinishReading(BaseModel):
 
     summary: str | None = None
     completion_summary_structured: CompletionSummaryStructured | None = None
-    suggested_interest_level: Literal["ignored", "neutral", "interested"] | None = None
+    suggested_interest_level: Literal["ignored", "low", "neutral", "high", "interested"] | None = None
     suggested_interested: bool | None = None
-    suggested_quality_level: Literal["poor", "normal", "excellent"] | None = None
+    suggested_quality_level: Literal["poor", "below_average", "normal", "good", "excellent"] | None = None
     suggested_quality: bool | None = None
     suggested_create_node: bool | None = None
     suggested_tags: list[str] = Field(default_factory=list)
@@ -182,10 +185,10 @@ class NewConfirmedNode(BaseModel):
 
 
 class ConfirmFeedback(BaseModel):
-    interest_level: Literal["ignored", "neutral", "interested"] | None = None
+    interest_level: Literal["ignored", "low", "neutral", "high", "interested"] | None = None
     # Backward-compatible input for existing CLI/API clients.
     interested: bool | None = None
-    quality_level: Literal["poor", "normal", "excellent"] | None = None
+    quality_level: Literal["poor", "below_average", "normal", "good", "excellent"] | None = None
     # Backward-compatible input for existing CLI/API clients.
     quality: bool | None = None
     create_node: bool = False
@@ -205,7 +208,7 @@ class ConfirmFeedback(BaseModel):
         if (
             self.interest_level is not None
             and self.interested is not None
-            and self.interested != (self.interest_level == "interested")
+            and self.interested != (self.interest_level in {"high", "interested"})
         ):
             raise ValueError("interested conflicts with interest_level")
         if self.quality_level is None and self.quality is None:
@@ -213,7 +216,7 @@ class ConfirmFeedback(BaseModel):
         if (
             self.quality_level is not None
             and self.quality is not None
-            and self.quality != (self.quality_level == "excellent")
+            and self.quality != (self.quality_level in {"good", "excellent"})
         ):
             raise ValueError("quality conflicts with quality_level")
         node_ids = [item.node_id for item in self.node_links]
@@ -225,13 +228,13 @@ class ConfirmFeedback(BaseModel):
         return self
 
     @property
-    def resolved_interest_level(self) -> Literal["ignored", "neutral", "interested"]:
+    def resolved_interest_level(self) -> Literal["ignored", "low", "neutral", "high", "interested"]:
         if self.interest_level is not None:
             return self.interest_level
         return "interested" if self.interested else "neutral"
 
     @property
-    def resolved_quality_level(self) -> Literal["poor", "normal", "excellent"]:
+    def resolved_quality_level(self) -> Literal["poor", "below_average", "normal", "good", "excellent"]:
         if self.quality_level is not None:
             return self.quality_level
         return "excellent" if self.quality else "normal"
@@ -331,9 +334,7 @@ class BriefItemCreate(BaseModel):
 
 
 NarrationStatus = Literal["draft", "generating", "ready", "failed"]
-PodcastStatus = Literal[
-    "draft", "generating", "scripted", "rendering", "ready", "failed"
-]
+PodcastStatus = Literal["draft", "generating", "scripted", "rendering", "ready", "failed"]
 
 
 class PaperNarrationCommit(BaseModel):
@@ -355,8 +356,7 @@ class PaperNarrationCommit(BaseModel):
     @model_validator(mode="after")
     def validate_state(self) -> Self:
         if self.status == "ready" and (
-            not (self.script_markdown or "").strip()
-            or not (self.speech_text or "").strip()
+            not (self.script_markdown or "").strip() or not (self.speech_text or "").strip()
         ):
             raise ValueError("ready narration requires script_markdown and speech_text")
         if self.status == "failed" and not (self.error or "").strip():
@@ -381,9 +381,7 @@ class PodcastEpisodeCommit(BaseModel):
     model: str | None = Field(default=None, max_length=100)
     voice: str | None = Field(default=None, max_length=100)
     audio_path: str | None = None
-    audio_content_hash: str | None = Field(
-        default=None, pattern=r"^(?:sha256:)?[0-9a-f]{64}$"
-    )
+    audio_content_hash: str | None = Field(default=None, pattern=r"^(?:sha256:)?[0-9a-f]{64}$")
     duration_ms: int | None = Field(default=None, ge=0)
     size_bytes: int | None = Field(default=None, ge=0)
     task_id: str | None = Field(default=None, max_length=36)
@@ -392,12 +390,9 @@ class PodcastEpisodeCommit(BaseModel):
     @model_validator(mode="after")
     def validate_state(self) -> Self:
         if self.status in {"scripted", "rendering", "ready"} and (
-            not (self.script_text or "").strip()
-            or not (self.speech_text or "").strip()
+            not (self.script_text or "").strip() or not (self.speech_text or "").strip()
         ):
-            raise ValueError(
-                f"{self.status} episode requires script_text and speech_text"
-            )
+            raise ValueError(f"{self.status} episode requires script_text and speech_text")
         if self.status == "ready" and (
             not self.audio_path
             or not self.audio_content_hash
@@ -424,9 +419,7 @@ class PodcastEpisodeStatusUpdate(BaseModel):
     model: str | None = Field(default=None, max_length=100)
     voice: str | None = Field(default=None, max_length=100)
     audio_path: str | None = None
-    audio_content_hash: str | None = Field(
-        default=None, pattern=r"^(?:sha256:)?[0-9a-f]{64}$"
-    )
+    audio_content_hash: str | None = Field(default=None, pattern=r"^(?:sha256:)?[0-9a-f]{64}$")
     duration_ms: int | None = Field(default=None, ge=0)
     size_bytes: int | None = Field(default=None, ge=0)
     task_id: str | None = Field(default=None, max_length=36)
@@ -448,6 +441,12 @@ class MemoryCreate(BaseModel):
     source: str | None = None
     active: bool = True
     metadata_json: dict[str, Any] = Field(default_factory=dict)
+
+
+class CandidatePoolUpdate(BaseModel):
+    paper_ids: list[str] = Field(max_length=600)
+    discovery_complete: bool
+    notes: str = Field(default="", max_length=4_000)
 
 
 class MemoryUpdate(BaseModel):

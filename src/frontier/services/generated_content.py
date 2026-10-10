@@ -15,6 +15,7 @@ PAPER_ANALYSIS_PROSE_FIELDS = frozenset(
         "open_questions",
         "recommendation_reason",
         "completion_summary",
+        "research_group_summary",
     }
 )
 

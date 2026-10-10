@@ -7,8 +7,8 @@ export type NodeRef = {
 
 export type Tag = { id: string; name: string; color?: string | null };
 
-export type InterestLevel = "ignored" | "neutral" | "interested";
-export type QualityLevel = "poor" | "normal" | "excellent";
+export type InterestLevel = "ignored" | "low" | "neutral" | "high" | "interested";
+export type QualityLevel = "poor" | "below_average" | "normal" | "good" | "excellent";
 
 export type SuggestedNode = {
   node_id?: string | null;
@@ -50,6 +50,7 @@ export type Paper = {
   first_author?: string | null;
   corresponding_author?: string | null;
   primary_affiliation?: string | null;
+  research_group_summary?: string | null;
   source: string;
   source_url?: string | null;
   pdf_url?: string | null;
@@ -75,6 +76,7 @@ export type Paper = {
   screening_interest_level?: InterestLevel | null;
   screening_quality_level?: QualityLevel | null;
   screening_feedback?: string | null;
+  agent_score_confirmed?: boolean;
   abstract_translation?: string | null;
   abstract_translation_status?: "ready" | "queued" | "failed" | "missing" | string | null;
   abstract_translation_error?: string | null;
@@ -189,6 +191,7 @@ export type PublicDailyPaper = {
   first_author?: string | null;
   corresponding_author?: string | null;
   primary_affiliation?: string | null;
+  research_group_summary?: string | null;
   source: string;
   source_url?: string | null;
   arxiv_id?: string | null;

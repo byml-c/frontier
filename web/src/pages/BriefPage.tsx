@@ -38,7 +38,7 @@ export function BriefPage() {
   const visible = ordered.filter((item) => {
     if (view === "top") return item.rank > 0 && item.rank <= 10;
     if (view === "pending") return item.rank > 10;
-    if (view === "rated") return Boolean(item.paper.screening_feedback || item.paper.screening_quality_level || item.paper.screening_interest_level);
+    if (view === "rated") return Boolean(item.paper.agent_score_confirmed || item.paper.screening_feedback || item.paper.screening_quality_level || item.paper.screening_interest_level);
     return true;
   });
 
@@ -50,7 +50,7 @@ export function BriefPage() {
         <Tab value="all" label={`全部 ${data.items.length}`} />
         <Tab value="top" label="前 10 篇" />
         <Tab value="pending" label="其余候选" />
-        <Tab value="rated" label={`已评分 ${ordered.filter((item) => item.paper.screening_feedback || item.paper.screening_quality_level || item.paper.screening_interest_level).length}`} />
+        <Tab value="rated" label={`已评分 ${ordered.filter((item) => item.paper.agent_score_confirmed || item.paper.screening_feedback || item.paper.screening_quality_level || item.paper.screening_interest_level).length}`} />
       </Tabs>
     </Stack>
     {!visible.length && <Empty title={view === "rated" ? "还没有评分记录" : "暂无论文"} body={view === "rated" ? "点击论文下方的质量或相关度标签，记录你的偏好。" : "切换其他分类继续阅读。"} />}

@@ -24,6 +24,7 @@ def _paper(client: TestClient) -> dict:
             "authors": [{"name": "Ada", "email": "private@example.edu"}],
             "first_author": "Ada",
             "primary_affiliation": "Frontier Lab",
+            "metadata_json": {"research_group_summary": "Frontier Lab 主要完成具身操作研究。"},
             "summary": "公开简介",
             "agent_comment": "公开评语",
             "problem": "研究问题",
@@ -77,6 +78,11 @@ def test_daily_selection_exposes_only_read_only_share_data(client: TestClient) -
     target = date(2026, 8, 14).isoformat()
     selected = client.put(f"/api/daily/{target}", json={"paper_id": paper["id"]})
     assert selected.status_code == 200
+    daily_payload = client.get(f"/api/daily?target_date={target}")
+    assert daily_payload.status_code == 200
+    assert daily_payload.json()["selection"]["paper"]["research_group_summary"] == (
+        "Frontier Lab 主要完成具身操作研究。"
+    )
 
     response = client.get("/api/daily", params={"target_date": target})
     assert response.status_code == 200
@@ -157,9 +163,7 @@ def test_daily_selection_retries_a_stale_rank_without_poisoning_session(
         papers.append(response.json()["paper"])
     first, second = papers
     target = "2026-08-18"
-    assert client.put(
-        f"/api/daily/{target}", json={"paper_id": first["id"]}
-    ).status_code == 200
+    assert client.put(f"/api/daily/{target}", json={"paper_id": first["id"]}).status_code == 200
 
     actual_next_rank = daily_selection_service._next_daily_rank
     calls = 0
@@ -203,9 +207,7 @@ def test_daily_selection_returns_conflict_after_bounded_rank_retries(
         papers.append(response.json()["paper"])
     first, second = papers
     target = "2026-08-19"
-    assert client.put(
-        f"/api/daily/{target}", json={"paper_id": first["id"]}
-    ).status_code == 200
+    assert client.put(f"/api/daily/{target}", json={"paper_id": first["id"]}).status_code == 200
 
     monkeypatch.setattr(daily_selection_service, "_next_daily_rank", lambda *_args: 1)
     conflicted = client.put(f"/api/daily/{target}", json={"paper_id": second["id"]})
@@ -236,9 +238,7 @@ def test_daily_discussions_are_independent_for_papers_on_the_same_day(
     first, second = papers
     target = "2026-08-17"
     for paper in (first, second):
-        assert client.put(
-            f"/api/daily/{target}", json={"paper_id": paper["id"]}
-        ).status_code == 200
+        assert client.put(f"/api/daily/{target}", json={"paper_id": paper["id"]}).status_code == 200
 
     first_review = client.post(
         f"/api/daily/papers/{first['id']}/reviews",
@@ -299,16 +299,15 @@ def test_private_api_requires_a_trusted_device_while_daily_stays_public(
         assert client.get("/api/daily").status_code == 200
         assert client.get("/api/settings").status_code == 401
         assert client.get("/openapi.json").status_code == 401
-        assert client.put(
-            "/api/daily/2026-08-14", json={"paper_id": "missing"}
-        ).status_code == 401
-        assert client.get(
-            "/api/settings", headers={INTERNAL_TOKEN_HEADER: internal_api_token()}
-        ).status_code == 200
-        assert client.post("/api/auth/login", json={"password": "wrong"}).status_code == 401
-        login = client.post(
-            "/api/auth/login", json={"password": "test-frontier-password"}
+        assert client.put("/api/daily/2026-08-14", json={"paper_id": "missing"}).status_code == 401
+        assert (
+            client.get(
+                "/api/settings", headers={INTERNAL_TOKEN_HEADER: internal_api_token()}
+            ).status_code
+            == 200
         )
+        assert client.post("/api/auth/login", json={"password": "wrong"}).status_code == 401
+        login = client.post("/api/auth/login", json={"password": "test-frontier-password"})
         assert login.status_code == 200
         assert login.json()["trusted"] is True
         assert client.get("/api/settings").status_code == 200
@@ -349,14 +348,11 @@ def test_daily_legacy_fallback_never_uses_private_completion_summary(
     )
     assert finished.status_code == 200, finished.text
     target = date(2026, 8, 12).isoformat()
-    assert (
-        client.put(f"/api/daily/{target}", json={"paper_id": paper["id"]}).status_code
-        == 200
-    )
+    assert client.put(f"/api/daily/{target}", json={"paper_id": paper["id"]}).status_code == 200
 
-    public_paper = client.get(
-        "/api/daily", params={"target_date": target}
-    ).json()["selection"]["paper"]
+    public_paper = client.get("/api/daily", params={"target_date": target}).json()["selection"][
+        "paper"
+    ]
 
     assert "completion_summary" not in public_paper
     assert private_marker not in str(public_paper)
@@ -372,9 +368,7 @@ def test_daily_legacy_fallback_never_uses_private_completion_summary(
 def test_daily_discussion_is_bound_to_the_paper_across_dates(client: TestClient) -> None:
     paper = _paper(client)
     for target in ("2026-08-14", "2026-08-15"):
-        assert client.put(
-            f"/api/daily/{target}", json={"paper_id": paper["id"]}
-        ).status_code == 200
+        assert client.put(f"/api/daily/{target}", json={"paper_id": paper["id"]}).status_code == 200
 
     initial_discussion = client.get(f"/api/daily/papers/{paper['id']}/reviews").json()
     assert initial_discussion["can_rotate_identity"] is True
@@ -427,7 +421,10 @@ def test_daily_discussion_is_bound_to_the_paper_across_dates(client: TestClient)
     assert body["average_score"] == 4.0
     assert body["reviews"][0]["initial_score"] == 5
     assert body["reviews"][0]["replies"][0]["content"].endswith("同意。")
-    assert client.post(
-        f"/api/daily/papers/{paper['id']}/reviews",
-        json={"score": 7, "confidence": 4, "content": "invalid"},
-    ).status_code == 422
+    assert (
+        client.post(
+            f"/api/daily/papers/{paper['id']}/reviews",
+            json={"score": 7, "confidence": 4, "content": "invalid"},
+        ).status_code
+        == 422
+    )

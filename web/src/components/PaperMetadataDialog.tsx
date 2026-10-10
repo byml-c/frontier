@@ -35,6 +35,7 @@ type MetadataForm = {
   first_author: string;
   corresponding_author: string;
   primary_affiliation: string;
+  research_group_summary: string;
   source: string;
   source_url: string;
   pdf_url: string;
@@ -58,6 +59,7 @@ const emptyForm: MetadataForm = {
   first_author: "",
   corresponding_author: "",
   primary_affiliation: "",
+  research_group_summary: "",
   source: "",
   source_url: "",
   pdf_url: "",
@@ -83,6 +85,7 @@ function paperToForm(paper: Paper): MetadataForm {
     first_author: paper.first_author || "",
     corresponding_author: paper.corresponding_author || "",
     primary_affiliation: paper.primary_affiliation || "",
+    research_group_summary: paper.research_group_summary || "",
     source: paper.source || "",
     source_url: paper.source_url || "",
     pdf_url: paper.pdf_url || "",
@@ -170,6 +173,7 @@ export function PaperMetadataDialog({
           first_author: form.first_author.trim() || null,
           corresponding_author: form.corresponding_author.trim() || null,
           primary_affiliation: form.primary_affiliation.trim() || null,
+          research_group_summary: form.research_group_summary.trim() || null,
           source: form.source.trim(),
           source_url: form.source_url.trim() || null,
           pdf_url: form.pdf_url.trim() || null,
@@ -373,6 +377,7 @@ export function PaperMetadataDialog({
                       <Grid size={{ xs: 12, sm: 4 }}>{field("corresponding_author", "通讯作者")}</Grid>
                       <Grid size={{ xs: 12, sm: 4 }}>{field("primary_affiliation", "第一单位")}</Grid>
                       <Grid size={12}>{field("authors", "全部作者（用逗号分隔）", { multiline: true, minRows: 3 })}</Grid>
+                      <Grid size={12}>{field("research_group_summary", "单位与核心课题组（Agent 归纳）", { multiline: true, minRows: 2 })}</Grid>
                     </Grid>
                     <Divider />
                     <Typography variant="h3">出版信息</Typography>

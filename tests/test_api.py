@@ -274,10 +274,10 @@ def test_arxiv_abs_metadata_parses_all_authors_without_atom_api() -> None:
 def test_health_and_defaults(client: TestClient) -> None:
     assert client.get("/api/health").json()["status"] == "ok"
     settings = {item["key"]: item["value_json"] for item in client.get("/api/settings").json()}
-    assert settings["abstract_limit"] == 50
-    assert settings["fulltext_limit"] == 19
-    assert settings["brief_limit"] == 8
-    assert settings["featured_limit"] == 4
+    assert settings["abstract_limit"] == 100
+    assert settings["fulltext_limit"] == 10
+    assert settings["brief_limit"] == 50
+    assert settings["featured_limit"] == 10
     assert (
         client.put(
             "/api/settings",
@@ -288,7 +288,7 @@ def test_health_and_defaults(client: TestClient) -> None:
     assert (
         client.put(
             "/api/settings",
-            json={"brief_limit": 11, "featured_limit": 4},
+            json={"brief_limit": 51, "featured_limit": 4},
         ).status_code
         == 422
     )
@@ -302,7 +302,7 @@ def test_health_and_defaults(client: TestClient) -> None:
     assert (
         client.put(
             "/api/settings",
-            json={"brief_limit": 8, "featured_limit": 4},
+            json={"brief_limit": 50, "featured_limit": 10},
         ).status_code
         == 200
     )
@@ -534,7 +534,7 @@ def test_confirm_feedback_saves_user_edited_structured_summary(
     assert "确认时修改的用户态度" in body["completion_summary"]
 
 
-def test_quality_level_is_three_state_and_can_be_revised_with_interest(
+def test_quality_level_is_five_state_and_can_be_revised_with_interest(
     client: TestClient,
 ) -> None:
     paper = create_paper(client, "Three-state user evaluation")
@@ -563,6 +563,33 @@ def test_quality_level_is_three_state_and_can_be_revised_with_interest(
     assert provenance["revision"] == 2
     assert provenance["quality_level"] == "excellent"
     assert provenance["evidence_key"] == f"paper:{paper['id']}:feedback:2"
+
+
+def test_screening_supports_five_levels_and_agent_score_confirmation(
+    client: TestClient,
+) -> None:
+    paper = create_paper(client, "Five-level screening evaluation")
+
+    confirmed = client.patch(
+        f"/api/papers/{paper['id']}/metadata",
+        json={
+            "interest_level": "high",
+            "quality_level": "good",
+            "agent_score_confirmed": True,
+        },
+    )
+    assert confirmed.status_code == 200, confirmed.text
+    body = confirmed.json()
+    assert body["screening_interest_level"] == "high"
+    assert body["screening_quality_level"] == "good"
+    assert body["agent_score_confirmed"] is True
+
+    revoked = client.patch(
+        f"/api/papers/{paper['id']}/metadata",
+        json={"agent_score_confirmed": False},
+    )
+    assert revoked.status_code == 200, revoked.text
+    assert revoked.json()["agent_score_confirmed"] is False
 
 
 def test_structured_completion_summary_requires_every_non_blank_section(
@@ -769,9 +796,7 @@ def test_subgraph_uses_node_budget_and_exposes_boundary_nodes(client: TestClient
         )
         assert response.status_code == 200
 
-    response = client.get(
-        f"/api/graph/subgraph?focus_id={nodes[0]['id']}&limit=3"
-    )
+    response = client.get(f"/api/graph/subgraph?focus_id={nodes[0]['id']}&limit=3")
 
     assert response.status_code == 200
     payload = response.json()
@@ -780,9 +805,7 @@ def test_subgraph_uses_node_budget_and_exposes_boundary_nodes(client: TestClient
         nodes[1]["id"],
         nodes[2]["id"],
     }
-    boundary = next(
-        node for node in payload["boundary_nodes"] if node["id"] == nodes[3]["id"]
-    )
+    boundary = next(node for node in payload["boundary_nodes"] if node["id"] == nodes[3]["id"])
     assert boundary["connects_to"] == [nodes[2]["id"]]
     assert payload["has_more"] is True
 
@@ -905,12 +928,11 @@ def test_graph_and_brief_snapshot(client: TestClient) -> None:
     )
     historical = client.get(f"/api/briefs/{brief['id']}").json()
     historical_paper = historical["items"][0]["paper"]
-    assert historical_paper["completion_summary_structured"][
-        "innovation"
-    ] == "Reading complete after publication."
-    assert "Reading complete after publication." in historical_paper[
-        "completion_summary"
-    ]
+    assert (
+        historical_paper["completion_summary_structured"]["innovation"]
+        == "Reading complete after publication."
+    )
+    assert "Reading complete after publication." in historical_paper["completion_summary"]
     assert "用户态度" not in historical_paper["completion_summary"]
     assert (
         client.post(
@@ -1027,20 +1049,21 @@ def test_brief_publish_drops_papers_that_started_reading_after_ranking(
     assert [item["paper"]["id"] for item in published.json()["items"]] == [eligible["id"]]
 
 
-def test_brief_accepts_top_ten_and_prewarms_first_four_featured_papers(
+def test_brief_accepts_configured_limit_and_prewarms_configured_leading_papers(
     client: TestClient,
     monkeypatch,
 ) -> None:
     queued_batches: list[list[str]] = []
     monkeypatch.setattr(
         "frontier.api.briefs.queue_document_conversions",
-        lambda paper_ids: queued_batches.append(list(paper_ids)),
+        lambda paper_ids, *, limit: queued_batches.append(list(paper_ids)[:limit]),
     )
     monkeypatch.setattr(
         "frontier.api.briefs.get_setting",
         lambda _session, key, default: {
             "brief_limit": 10,
             "featured_limit": 6,
+            "fulltext_limit": 4,
         }.get(key, default),
     )
     brief = client.post(

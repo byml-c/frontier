@@ -33,6 +33,7 @@ import { PaperChoiceToggle, PaperEvaluationToggleButtons } from "./PaperEvaluati
 import { MarkdownMessage } from "./MarkdownMessage";
 import { PaperMetadataDialog } from "./PaperMetadataDialog";
 import { PaperTitle } from "./PaperTitle";
+import { PaperAuthorSummary } from "./PaperAuthorSummary";
 
 const ABSTRACT_LANGUAGES = [
   { value: "zh", label: "中文" },
@@ -66,12 +67,14 @@ export function PaperCard({
   const [interest, setInterest] = useState<InterestLevel | false>(
     paper.interest_level || paper.screening_interest_level || false,
   );
+  const [agentScoreConfirmed, setAgentScoreConfirmed] = useState(Boolean(paper.agent_score_confirmed));
   const saveScreening = useMutation({
-    mutationFn: (body: { quality_level?: QualityLevel; interest_level?: InterestLevel; screening_feedback?: string }) =>
+    mutationFn: (body: { quality_level?: QualityLevel; interest_level?: InterestLevel; screening_feedback?: string; agent_score_confirmed?: boolean }) =>
       api<Paper>(`/api/papers/${paper.id}/metadata`, { ...jsonBody(body), method: "PATCH" }),
     onError: () => {
       setQuality(paper.quality_level || paper.screening_quality_level || false);
       setInterest(paper.interest_level || paper.screening_interest_level || false);
+      setAgentScoreConfirmed(Boolean(paper.agent_score_confirmed));
     },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["brief"] });
@@ -95,6 +98,11 @@ export function PaperCard({
       ...(next.interest ? { interest_level: next.interest } : {}),
     });
   };
+  const updateAgentScoreConfirmation = () => {
+    const next = !agentScoreConfirmed;
+    setAgentScoreConfirmed(next);
+    saveScreening.mutate({ agent_score_confirmed: next });
+  };
   const translated = paper.abstract_translation;
   const abstract = language === "zh"
     ? translated || (paper.abstract_translation_status === "failed" ? "摘要翻译失败，可点击重试，或切换英文阅读。" : paper.abstract_translation_status === "missing" ? "摘要尚未翻译，可先切换英文阅读。" : "正在翻译摘要。")
@@ -116,10 +124,9 @@ export function PaperCard({
         {paper.analysis_status === "failed" && <Alert severity="error" sx={{ mb: 1.25, py: .25 }}>处理失败：{paper.analysis_error || "请在任务页查看原因"}</Alert>}
         <Typography variant="h3" component="h2"><PaperTitle title={paper.title} /></Typography>
         <Typography variant="body2" color="text.secondary" sx={{ mt: .5 }}>
-          {paper.first_author || paper.authors?.[0]?.name || "作者信息待确认"}
-          {paper.corresponding_author ? ` · 通讯作者 ${paper.corresponding_author}` : ""}
-          {paper.primary_affiliation ? ` · ${paper.primary_affiliation}` : ""}
+          {[paper.first_author || paper.authors?.[0]?.name, paper.primary_affiliation, paper.corresponding_author].filter(Boolean).join(" · ") || "作者信息待确认"}
         </Typography>
+        <PaperAuthorSummary paper={paper} />
 
         <Stack direction="row" alignItems="center" spacing={1} sx={{ mt: 1.5 }}>
           <Typography variant="subtitle2">摘要</Typography>
@@ -155,6 +162,8 @@ export function PaperCard({
               qualityTitle="质量"
               interestTitle="相关度"
               disabled={saveScreening.isPending}
+              agentScoreConfirmed={agentScoreConfirmed}
+              onAgentScoreConfirm={updateAgentScoreConfirmation}
               onQualityChange={(value) => updateMetric({ quality: value })}
               onInterestChange={(value) => updateMetric({ interest: value })}
             />

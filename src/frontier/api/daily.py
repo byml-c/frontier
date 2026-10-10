@@ -29,7 +29,7 @@ from ..models import (
     ResearchNode,
     Tag,
 )
-from ..services.common import log_operation, model_dict
+from ..services.common import RESEARCH_GROUP_SUMMARY_KEY, log_operation, model_dict
 from ..services.completion_summary import (
     completion_summary_structured,
 )
@@ -86,6 +86,7 @@ def _public_paper(session: Session, paper: Paper) -> dict:
         "first_author": paper.first_author,
         "corresponding_author": paper.corresponding_author,
         "primary_affiliation": paper.primary_affiliation,
+        "research_group_summary": (paper.metadata_json or {}).get(RESEARCH_GROUP_SUMMARY_KEY),
         "source": paper.source,
         "source_url": paper.source_url,
         "arxiv_id": paper.arxiv_id,
@@ -147,9 +148,7 @@ def _serialize_reply(reply: DailyReply, viewer_id: str) -> dict:
 
 def _serialize_review(session: Session, review: DailyReview, viewer_id: str) -> dict:
     replies = session.scalars(
-        select(DailyReply)
-        .where(DailyReply.review_id == review.id)
-        .order_by(DailyReply.created_at)
+        select(DailyReply).where(DailyReply.review_id == review.id).order_by(DailyReply.created_at)
     ).all()
     initial_score = session.scalar(
         select(DailyReviewRevision.previous_score)

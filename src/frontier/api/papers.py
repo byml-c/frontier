@@ -62,7 +62,14 @@ from ..services.author_metadata import (
     preserve_author_details_for_unchanged_names,
     record_manual_bibliographic_changes,
 )
-from ..services.common import compact_search_key, log_operation, model_dict, normalize_title
+from ..services.common import (
+    AGENT_BIBLIOGRAPHY_KEY,
+    RESEARCH_GROUP_SUMMARY_KEY,
+    compact_search_key,
+    log_operation,
+    model_dict,
+    normalize_title,
+)
 from ..services.completion_summary import (
     COMPLETION_SUMMARY_METADATA_KEY,
     completion_summary_structured,
@@ -193,7 +200,9 @@ def _serialize_paper(session: Session, paper: Paper, *, detail: bool = False) ->
     payload["screening_interest_level"] = screening.get("interest_level")
     payload["screening_quality_level"] = screening.get("quality_level")
     payload["screening_feedback"] = screening.get("comment")
+    payload["agent_score_confirmed"] = screening.get("agent_score_confirmed", False)
     payload["open_questions"] = metadata.get("open_questions")
+    payload["research_group_summary"] = metadata.get(RESEARCH_GROUP_SUMMARY_KEY)
     if not detail:
         payload.pop("full_analysis", None)
         payload.pop("metadata_json", None)
@@ -698,6 +707,8 @@ def update_paper(
     paper = _paper_or_404(session, paper_id)
     changes = payload.model_dump(exclude_unset=True)
     suggested_tags = changes.pop("suggested_tags", None)
+    research_group_summary = changes.pop("research_group_summary", None)
+    update_research_group_summary = "research_group_summary" in payload.model_fields_set
     open_questions = changes.pop("open_questions", None)
     update_open_questions = "open_questions" in payload.model_fields_set
     protected_fields = manual_bibliographic_fields(session, paper)
@@ -722,10 +733,18 @@ def update_paper(
                     "screening_feedback",
                     "personal_comment",
                     "open_questions",
+                    RESEARCH_GROUP_SUMMARY_KEY,
                 )
                 if key in current_metadata
             },
         }
+        if (
+            AGENT_BIBLIOGRAPHY_KEY not in changes["metadata_json"]
+            and AGENT_BIBLIOGRAPHY_KEY in current_metadata
+        ):
+            changes["metadata_json"][AGENT_BIBLIOGRAPHY_KEY] = current_metadata[
+                AGENT_BIBLIOGRAPHY_KEY
+            ]
     if "title" in changes:
         changes["normalized_title"] = normalize_title(changes["title"])
     for key, value in changes.items():
@@ -736,6 +755,15 @@ def update_paper(
             "open_questions": open_questions.strip()
             if isinstance(open_questions, str) and open_questions.strip()
             else None,
+        }
+    if update_research_group_summary:
+        paper.metadata_json = {
+            **(paper.metadata_json or {}),
+            RESEARCH_GROUP_SUMMARY_KEY: (
+                research_group_summary.strip()
+                if isinstance(research_group_summary, str) and research_group_summary.strip()
+                else None
+            ),
         }
     if suggested_tags is not None:
         paper.metadata_json = {**(paper.metadata_json or {}), "suggested_tags": suggested_tags}
@@ -763,10 +791,14 @@ def update_paper_metadata(
     new_tags = changes.pop("new_tags", [])
     structured = changes.pop("completion_summary_structured", None)
     open_questions = changes.pop("open_questions", None)
+    research_group_summary = changes.pop("research_group_summary", None)
+    update_research_group_summary = "research_group_summary" in payload.model_fields_set
     update_open_questions = "open_questions" in payload.model_fields_set
     interest_level = changes.pop("interest_level", None)
     quality_level = changes.pop("quality_level", None)
     screening_feedback = changes.pop("screening_feedback", None)
+    agent_score_confirmed = changes.pop("agent_score_confirmed", None)
+    update_agent_score_confirmation = "agent_score_confirmed" in payload.model_fields_set
     original_values = {field: getattr(paper, field) for field in BIBLIOGRAPHIC_FIELDS}
     if "authors" in changes and changes["authors"] is not None:
         changes["authors"] = preserve_author_details_for_unchanged_names(
@@ -791,10 +823,18 @@ def update_paper_metadata(
                     "screening_feedback",
                     "personal_comment",
                     "open_questions",
+                    RESEARCH_GROUP_SUMMARY_KEY,
                 )
                 if key in current_metadata
             },
         }
+        if (
+            AGENT_BIBLIOGRAPHY_KEY not in changes["metadata_json"]
+            and AGENT_BIBLIOGRAPHY_KEY in current_metadata
+        ):
+            changes["metadata_json"][AGENT_BIBLIOGRAPHY_KEY] = current_metadata[
+                AGENT_BIBLIOGRAPHY_KEY
+            ]
     if changes.get("title"):
         changes["normalized_title"] = normalize_title(changes["title"])
     for key, value in changes.items():
@@ -809,9 +849,23 @@ def update_paper_metadata(
             if isinstance(open_questions, str) and open_questions.strip()
             else None,
         }
+    if update_research_group_summary:
+        paper.metadata_json = {
+            **(paper.metadata_json or {}),
+            RESEARCH_GROUP_SUMMARY_KEY: (
+                research_group_summary.strip()
+                if isinstance(research_group_summary, str) and research_group_summary.strip()
+                else None
+            ),
+        }
     if tag_ids is not None:
         _replace_paper_tags(session, paper.id, tag_ids, new_tags)
-    if interest_level is not None or quality_level is not None or screening_feedback is not None:
+    if (
+        interest_level is not None
+        or quality_level is not None
+        or screening_feedback is not None
+        or update_agent_score_confirmation
+    ):
         if paper.status != "completed":
             current_screening = dict(paper.screening_feedback or {})
             if interest_level is not None:
@@ -820,6 +874,8 @@ def update_paper_metadata(
                 current_screening["quality_level"] = quality_level
             if screening_feedback is not None:
                 current_screening["comment"] = screening_feedback.strip() or None
+            if update_agent_score_confirmation:
+                current_screening["agent_score_confirmed"] = bool(agent_score_confirmed)
             current_screening["updated_at"] = datetime.now(UTC).isoformat()
             current_screening["revision"] = int(current_screening.get("revision") or 0) + 1
             current_screening["evidence_key"] = (
@@ -827,9 +883,12 @@ def update_paper_metadata(
             )
             paper.screening_feedback = current_screening
         else:
-            if screening_feedback is not None:
+            if screening_feedback is not None or update_agent_score_confirmation:
                 current_screening = dict(paper.screening_feedback or {})
-                current_screening["comment"] = screening_feedback.strip() or None
+                if screening_feedback is not None:
+                    current_screening["comment"] = screening_feedback.strip() or None
+                if update_agent_score_confirmation:
+                    current_screening["agent_score_confirmed"] = bool(agent_score_confirmed)
                 current_screening["updated_at"] = datetime.now(UTC).isoformat()
                 current_screening["revision"] = int(current_screening.get("revision") or 0) + 1
                 current_screening["evidence_key"] = (
@@ -841,8 +900,8 @@ def update_paper_metadata(
         ):
             resolved_interest = interest_level or paper_interest_level(paper) or "neutral"
             resolved_quality = quality_level or paper_quality_level(paper) or "normal"
-            paper.is_interested = resolved_interest == "interested"
-            paper.is_quality = resolved_quality == "excellent"
+            paper.is_interested = resolved_interest in {"high", "interested"}
+            paper.is_quality = resolved_quality in {"good", "excellent"}
             current_provenance = (paper.metadata_json or {}).get(FEEDBACK_PROVENANCE_KEY)
             provenance = dict(current_provenance) if isinstance(current_provenance, dict) else {}
             revision = int(provenance.get("revision") or 0) + 1
@@ -874,7 +933,11 @@ def update_paper_metadata(
             "fields": sorted(changes),
             "manually_changed_bibliographic_fields": sorted(manually_changed),
             "tags_updated": tag_ids is not None,
-            "evaluation_updated": interest_level is not None or quality_level is not None,
+            "evaluation_updated": (
+                interest_level is not None
+                or quality_level is not None
+                or update_agent_score_confirmation
+            ),
         },
     )
     session.commit()
@@ -1197,8 +1260,8 @@ def confirm_feedback(
     paper.status = "completed"
     interest_level = payload.resolved_interest_level
     quality_level = payload.resolved_quality_level
-    paper.is_interested = interest_level == "interested"
-    paper.is_quality = quality_level == "excellent"
+    paper.is_interested = interest_level in {"high", "interested"}
+    paper.is_quality = quality_level in {"good", "excellent"}
     paper.reading_completed_at = datetime.now(UTC)
     paper.pending_feedback = {}
     if payload.completion_summary_structured is not None:

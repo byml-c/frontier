@@ -158,6 +158,7 @@ def test_confirmed_feedback_is_attributed_and_reused_by_daily_context(
         calibration["evaluated_daily_recommendations"]
         == before["evaluated_daily_recommendations"] + 1
     )
+
     assert calibration["interest_hits"] == before["interest_hits"] + 1
     assert calibration["quality_hits"] == before["quality_hits"]
     before_relevance_count = before["relevance_prediction_sample_count"]
@@ -205,6 +206,26 @@ def test_confirmed_feedback_is_attributed_and_reused_by_daily_context(
     assert conflicting.status_code == 409
 
 
+def test_agent_score_confirmation_is_preserved_as_screening_evidence(
+    client: TestClient,
+) -> None:
+    paper = _paper(client, "Agent score confirmation", relevance=0.84, research=0.72)
+    response = client.patch(
+        f"/api/papers/{paper['id']}/metadata",
+        json={"agent_score_confirmed": True},
+    )
+    assert response.status_code == 200, response.text
+
+    context = client.get("/api/interests/context").json()
+    signal = next(item for item in context["screening_feedback"] if item["paper_id"] == paper["id"])
+    assert signal["agent_score_confirmed"] is True
+    assert signal["agent_scores"] == {
+        "topic_relevance": None,
+        "author_influence": None,
+        "quality": 0.72,
+    }
+
+
 def test_negative_interest_quality_and_ignore_are_calibrated_independently(
     client: TestClient,
 ) -> None:
@@ -212,12 +233,8 @@ def test_negative_interest_quality_and_ignore_are_calibrated_independently(
     completed = _paper(client, "Quality but irrelevant paper", relevance=0.9, research=0.9)
     ignored = _paper(client, "Ignored recommendation paper", relevance=0.7, research=0.7)
     brief = _published_brief(client, [completed, ignored], day_offset=2)
-    completed_item = next(
-        item for item in brief["items"] if item["paper"]["id"] == completed["id"]
-    )
-    ignored_item = next(
-        item for item in brief["items"] if item["paper"]["id"] == ignored["id"]
-    )
+    completed_item = next(item for item in brief["items"] if item["paper"]["id"] == completed["id"])
+    ignored_item = next(item for item in brief["items"] if item["paper"]["id"] == ignored["id"])
     assert (
         client.post(
             f"/api/papers/{completed['id']}/start-reading",
@@ -287,9 +304,7 @@ def test_neutral_interest_is_not_negative_feedback(client: TestClient) -> None:
     )
     assert topic["neutral_interest"] == 1
     assert topic["negative_interest"] == 0
-    signal = next(
-        item for item in context["recent_feedback"] if item["paper_id"] == paper["id"]
-    )
+    signal = next(item for item in context["recent_feedback"] if item["paper_id"] == paper["id"])
     assert signal["labels"]["interest"] == "neutral"
 
 
@@ -344,9 +359,7 @@ def test_finish_suggests_nodes_and_confirm_atomically_mounts_them(
             }
         ],
     }
-    confirmed = client.post(
-        f"/api/papers/{paper['id']}/confirm-feedback", json=payload
-    )
+    confirmed = client.post(f"/api/papers/{paper['id']}/confirm-feedback", json=payload)
     assert confirmed.status_code == 200, confirmed.text
     body = confirmed.json()
     assert {node["name"] for node in body["nodes"]} == {
@@ -368,9 +381,7 @@ def test_finish_suggests_nodes_and_confirm_atomically_mounts_them(
         assert len(progress) == 1
         assert "创新内容" in progress[0]["content"]
 
-    repeated = client.post(
-        f"/api/papers/{paper['id']}/confirm-feedback", json=payload
-    )
+    repeated = client.post(f"/api/papers/{paper['id']}/confirm-feedback", json=payload)
     assert repeated.status_code == 200, repeated.text
     assert len(repeated.json()["nodes"]) == 2
 
@@ -379,19 +390,20 @@ def test_finish_suggests_nodes_and_confirm_atomically_mounts_them(
         json={"name": "Renamed Existing Robotics"},
     )
     assert renamed.status_code == 200, renamed.text
-    repeated_after_rename = client.post(
-        f"/api/papers/{paper['id']}/confirm-feedback", json=payload
-    )
+    repeated_after_rename = client.post(f"/api/papers/{paper['id']}/confirm-feedback", json=payload)
     assert repeated_after_rename.status_code == 200, repeated_after_rename.text
 
 
 def test_v2_neutral_feedback_cannot_be_replayed_as_ignored(client: TestClient) -> None:
     paper = _paper(client, "Legacy neutral feedback", relevance=0.5, research=0.5)
     summary = _summary("旧版一般反馈不能被误认成忽略。")
-    assert client.post(
-        f"/api/papers/{paper['id']}/finish",
-        json={"completion_summary_structured": summary},
-    ).status_code == 200
+    assert (
+        client.post(
+            f"/api/papers/{paper['id']}/finish",
+            json={"completion_summary_structured": summary},
+        ).status_code
+        == 200
+    )
     confirmed = client.post(
         f"/api/papers/{paper['id']}/confirm-feedback",
         json={
@@ -533,7 +545,9 @@ def test_unconfirmed_daily_recommendations_are_missing_data_not_feedback(
     client: TestClient,
 ) -> None:
     before = client.get("/api/interests/context").json()
-    untouched = _paper(client, "Published but untouched recommendation", relevance=0.9, research=0.9)
+    untouched = _paper(
+        client, "Published but untouched recommendation", relevance=0.9, research=0.9
+    )
     reading = _paper(client, "Reading without confirmed feedback", relevance=0.9, research=0.9)
     pending = _paper(client, "Pending without confirmed feedback", relevance=0.9, research=0.9)
     brief = _published_brief(client, [untouched, reading, pending], day_offset=27)
@@ -567,13 +581,10 @@ def test_unconfirmed_daily_recommendations_are_missing_data_not_feedback(
     assert context["feedback_digest"] == before["feedback_digest"]
     assert context["source_digest"] == before["source_digest"]
     assert (
-        context["layers"]["confirmed_topic_profile"]
-        == before["layers"]["confirmed_topic_profile"]
+        context["layers"]["confirmed_topic_profile"] == before["layers"]["confirmed_topic_profile"]
     )
     assert context["layers"]["semantic_profile"] == before["layers"]["semantic_profile"]
-    assert not excluded_ids & {
-        item["paper_id"] for item in context["recent_feedback"]
-    }
+    assert not excluded_ids & {item["paper_id"] for item in context["recent_feedback"]}
 
 
 def test_interest_context_schema_version_invalidates_source_digest(
@@ -637,16 +648,12 @@ def test_explicit_manual_source_wins_over_historical_daily_recommendation(
         json={
             "interested": True,
             "quality": True,
-            "completion_summary_structured": _summary(
-                "用户主动精读，而非响应日报推荐。"
-            ),
+            "completion_summary_structured": _summary("用户主动精读，而非响应日报推荐。"),
         },
     )
     assert confirmed.status_code == 200, confirmed.text
     context = client.get("/api/interests/context").json()
-    signal = next(
-        item for item in context["recent_feedback"] if item["paper_id"] == paper["id"]
-    )
+    signal = next(item for item in context["recent_feedback"] if item["paper_id"] == paper["id"])
     assert signal["attribution"]["kind"] == "manual"
     assert signal["attribution"]["resolution"] == "explicit"
     assert (
@@ -677,9 +684,7 @@ def test_ambiguous_legacy_daily_source_is_excluded_from_calibration(
     )
     assert confirmed.status_code == 200, confirmed.text
     context = client.get("/api/interests/context").json()
-    signal = next(
-        item for item in context["recent_feedback"] if item["paper_id"] == paper["id"]
-    )
+    signal = next(item for item in context["recent_feedback"] if item["paper_id"] == paper["id"])
     assert signal["attribution"]["kind"] == "unattributed"
     assert signal["attribution"]["resolution"] == "ambiguous"
     assert (
@@ -790,10 +795,7 @@ def test_ignored_manual_source_survives_source_less_rereading(client: TestClient
     assert ignored.status_code == 200, ignored.text
     started = client.post(f"/api/papers/{paper['id']}/start-reading", json={})
     assert started.status_code == 200, started.text
-    assert (
-        started.json()["metadata_json"]["reading_provenance"]["brief_item_id"]
-        == item["id"]
-    )
+    assert started.json()["metadata_json"]["reading_provenance"]["brief_item_id"] == item["id"]
     summary = _summary("重新精读后确认，仍保留原始手动来源。")
     assert (
         client.post(
@@ -916,9 +918,9 @@ def test_cancel_retracts_profile_and_removes_paper_backed_graph_state(
             payload_json={
                 "context": {
                     "paper_id": paper["id"],
-                    "feedback_evidence_key": confirmed["metadata_json"][
-                        "feedback_provenance"
-                    ]["evidence_key"],
+                    "feedback_evidence_key": confirmed["metadata_json"]["feedback_provenance"][
+                        "evidence_key"
+                    ],
                 }
             },
         )
@@ -982,10 +984,7 @@ def test_reused_draft_brief_refreshes_task_and_context_digest(client: TestClient
     )
     assert refreshed.status_code == 200, refreshed.text
     assert refreshed.json()["task_id"] == second_task
-    assert (
-        refreshed.json()["snapshot_json"]["interest_context_digest_used"]
-        == "second-digest"
-    )
+    assert refreshed.json()["snapshot_json"]["interest_context_digest_used"] == "second-digest"
     paper = _paper(client, "Ranked draft context paper", relevance=0.5, research=0.5)
     item = client.post(
         f"/api/briefs/{refreshed.json()['id']}/items",
@@ -1017,9 +1016,7 @@ def test_semantic_profile_is_single_cas_cache_with_evidence_references(
         attitude="用户长期偏好跨平台、带真实机器人证据的方法。",
     )
     context = client.get("/api/interests/context").json()
-    evidence = next(
-        item for item in context["recent_feedback"] if item["paper_id"] == paper["id"]
-    )
+    evidence = next(item for item in context["recent_feedback"] if item["paper_id"] == paper["id"])
     payload = {
         "feedback_digest": context["feedback_digest"],
         "content": "偏好跨平台且包含真实机器人证据的方法。",
@@ -1076,9 +1073,7 @@ def test_semantic_profile_is_single_cas_cache_with_evidence_references(
     after_cancel = client.get("/api/interests/context").json()
     assert after_cancel["layers"]["semantic_profile"]["stale"] is True
     assert after_cancel["layers"]["semantic_profile"]["content"] is None
-    assert "semantic_preferences" not in after_cancel["layers"]["semantic_profile"][
-        "metadata"
-    ]
+    assert "semantic_preferences" not in after_cancel["layers"]["semantic_profile"]["metadata"]
 
 
 def test_interest_context_cli_and_daily_prompt(monkeypatch) -> None:

@@ -6,11 +6,12 @@ import json
 import multiprocessing
 import os
 import socket
+import threading
 import uuid
 from datetime import datetime
 from html.parser import HTMLParser
 from pathlib import Path
-from time import monotonic
+from time import monotonic, sleep
 from urllib.parse import urljoin, urlparse
 
 import feedparser
@@ -28,6 +29,8 @@ from .outbound_network import external_httpx_kwargs
 
 USER_AGENT = "FrontierResearch/0.1 (personal research assistant)"
 ARXIV_API = "https://export.arxiv.org/api/query"
+_ARXIV_QUERY_LOCK = threading.Lock()
+_arxiv_last_query_at = 0.0
 _PDF_DOWNLOAD_TOTAL_TIMEOUT_SECONDS = 90.0
 _PDF_DOWNLOAD_IO_TIMEOUT_SECONDS = 5.0
 _PDF_TEXT_EXTRACTION_TIMEOUT_SECONDS = 75.0
@@ -174,12 +177,28 @@ def create_or_update_paper(
 
 
 def search_arxiv(query: str, max_results: int = 50) -> list[PaperCreate]:
+    return search_arxiv_page(query, max_results=max_results)["items"]
+
+
+def search_arxiv_page(
+    query: str, *, max_results: int = 100, start: int = 0
+) -> dict:
+    """Read one metadata page without ingestion, retaining upstream pagination."""
+    global _arxiv_last_query_at
     max_results = max(1, min(max_results, 100))
+    if start < 0:
+        raise ValueError("arXiv start must be nonnegative")
+    # arXiv requests a three-second interval between consecutive API calls.
+    with _ARXIV_QUERY_LOCK:
+        delay = 3.0 - (monotonic() - _arxiv_last_query_at)
+        if delay > 0:
+            sleep(delay)
+        _arxiv_last_query_at = monotonic()
     response = httpx.get(
         ARXIV_API,
         params={
             "search_query": query,
-            "start": 0,
+            "start": start,
             "max_results": max_results,
             "sortBy": "submittedDate",
             "sortOrder": "descending",
@@ -191,8 +210,12 @@ def search_arxiv(query: str, max_results: int = 50) -> list[PaperCreate]:
     )
     response.raise_for_status()
     feed = feedparser.parse(response.text)
+    if feed.get("bozo") or feed.get("version") != "atom10":
+        raise ValueError("arXiv returned a malformed Atom feed")
     results: list[PaperCreate] = []
     for entry in feed.entries:
+        if "/api/errors" in entry.get("id", ""):
+            raise ValueError(f"arXiv API error: {entry.get('summary', 'unknown error')}")
         parsed = parse_arxiv_id(entry.id)
         arxiv_id, version = parsed if parsed else (None, None)
         links = {link.get("type"): link.get("href") for link in entry.get("links", [])}
@@ -218,7 +241,16 @@ def search_arxiv(query: str, max_results: int = 50) -> list[PaperCreate]:
                 },
             )
         )
-    return results
+    total = feed.feed.get("opensearch_totalresults")
+    reported_start = feed.feed.get("opensearch_startindex")
+    if reported_start is not None and int(reported_start) != start:
+        raise ValueError("arXiv returned a different page offset")
+    total = int(total) if total is not None else None
+    if total is not None and total < 0:
+        raise ValueError("arXiv returned a negative totalResults")
+    if total is not None and start < total and not results:
+        raise ValueError("arXiv returned an empty page before the end; retry this offset")
+    return {"items": results, "total_results": total, "start": start}
 
 
 def _citation_author_name(value: str) -> str:

@@ -16,7 +16,7 @@ from ..config import settings
 from ..database import SessionLocal, get_session
 from ..interactive_stream import encode_stream_event, stream_codex_prompt
 from ..models import AppSetting, Conversation, Memory, OperationLog, Paper, TaskRun, utcnow
-from ..schemas import MemoryCreate, MemoryUpdate, SettingUpdate, TaskCreate
+from ..schemas import CandidatePoolUpdate, MemoryCreate, MemoryUpdate, SettingUpdate, TaskCreate
 from ..services.architecture_scene import release_agent_lock_for_task
 from ..services.backup import create_local_git_backup
 from ..services.bootstrap import import_bibtex
@@ -24,9 +24,11 @@ from ..services.common import (
     BRIEF_LIMIT_DEFAULT,
     BRIEF_LIMIT_MAX,
     FEATURED_LIMIT_DEFAULT,
+    get_setting,
     log_operation,
     model_dict,
 )
+from ..services.discovery import discover_arxiv_page, valid_string_list
 from ..services.ingest import create_or_update_paper, search_arxiv
 from ..services.interest_evidence import DERIVED_INTEREST_PROFILE_ID
 from ..services.paper_agent_context import paper_agent_context_sync_required
@@ -55,15 +57,21 @@ router = APIRouter(prefix="/api", tags=["system"])
 NUMERIC_SETTING_RANGES = {
     "daily_hour": (0, 23),
     "daily_minute": (0, 59),
-    "abstract_limit": (1, 50),
+    "abstract_limit": (1, 500),
     "fulltext_limit": (1, 10),
     "brief_limit": (1, BRIEF_LIMIT_MAX),
     "featured_limit": (1, 10),
     "candidate_lookback_days": (1, 90),
+    "discovery_scan_limit": (100, 2_000),
+    "discovery_prefilter_limit": (50, 200),
 }
 
 
 def _validate_setting_value(key: str, value: object) -> None:
+    if key in {"discovery_domains", "discovery_arxiv_categories", "initial_interest_domains"} and not valid_string_list(
+        value, categories=key == "discovery_arxiv_categories"
+    ):
+        raise HTTPException(status_code=422, detail=f"{key} must be a nonempty unique string list")
     if key in NUMERIC_SETTING_RANGES:
         if isinstance(value, bool) or not isinstance(value, int):
             raise HTTPException(status_code=422, detail=f"{key} must be an integer")
@@ -713,6 +721,54 @@ def arxiv_search(
         merged += int(not was_created)
     session.commit()
     return {"paper_ids": paper_ids, "count": len(results), "created": created, "merged": merged}
+
+
+@router.get("/sources/arxiv/discover")
+def arxiv_discover(
+    session: Annotated[Session, Depends(get_session)],
+    through_date: date | None = None,
+    offset: int = Query(default=0, ge=0),
+    page_size: int = Query(default=100, ge=1, le=100),
+) -> dict:
+    try:
+        return discover_arxiv_page(
+            session, through_date=through_date or current_research_date(session),
+            offset=offset, page_size=page_size,
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"arXiv discovery failed: {exc}") from exc
+
+
+@router.put("/tasks/{task_id}/candidate-pool")
+@serialized_task_claim
+def save_candidate_pool(
+    task_id: str,
+    payload: CandidatePoolUpdate,
+    session: Annotated[Session, Depends(get_session)],
+) -> dict:
+    task = session.get(TaskRun, task_id)
+    if not task:
+        raise HTTPException(status_code=404, detail="Task not found")
+    if task.kind != "daily_brief" or task.status not in ACTIVE_TASK_STATUSES:
+        raise HTTPException(status_code=409, detail="Candidate pool requires an active daily task")
+    if len(set(payload.paper_ids)) != len(payload.paper_ids):
+        raise HTTPException(status_code=422, detail="Candidate pool contains duplicate papers")
+    target = int(get_setting(session, "abstract_limit", 100))
+    if len(payload.paper_ids) > (target * 6 + 4) // 5:
+        raise HTTPException(status_code=422, detail="Candidate pool exceeds 120% of the target")
+    if (len(payload.paper_ids) < target * 0.8 or not payload.discovery_complete) and not payload.notes.strip():
+        raise HTTPException(status_code=422, detail="Explain candidate shortage or incomplete coverage")
+    papers = list(session.scalars(select(Paper).where(Paper.id.in_(payload.paper_ids))))
+    if len(papers) != len(payload.paper_ids) or any(paper.status != "candidate" for paper in papers):
+        raise HTTPException(status_code=422, detail="Candidate pool requires existing unread papers")
+    pool = {**payload.model_dump(), "target": target, "saved_at": utcnow().isoformat()}
+    task.payload_json = {**(task.payload_json or {}), "candidate_pool": pool}
+    log_operation(
+        session, actor="agent", action="discovery.candidate_pool_saved", task_id=task.id,
+        detail={"count": len(papers), **{k: v for k, v in pool.items() if k != "paper_ids"}},
+    )
+    session.flush()
+    return pool
 
 
 @router.post("/backup")

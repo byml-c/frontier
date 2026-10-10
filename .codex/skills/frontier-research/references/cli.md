@@ -69,11 +69,25 @@ UI event through the paper conversation stream; it does not mutate the Scene.
 ## arXiv
 
 ```bash
-uv run frontier source arxiv-search 'cat:cs.RO AND (all:"vision language action" OR all:VLA)' --max-results 50
+uv run frontier source arxiv-discover --date 2026-10-10 --offset 0 --page-size 100
+uv run frontier task candidate-pool TASK_ID --data @data/tasks/TASK_ID/candidate-pool.json
 uv run frontier source arxiv-search 'ti:"exact paper title" AND au:"author surname"' --max-results 10 --no-ingest
 ```
 
-Search calls ingest by default. Split large topic sets into focused queries, then rely on Server de-duplication.
+Daily discovery retrieves category/date pages internally, without narrow interest keywords or ingestion.
+One call scans up to 300 raw metadata records (3 days by default), excludes ALL library matches by
+version-independent arXiv ID, normalized DOI or title, removes batch duplicates, and returns at most
+120 broad-concept/category matches. `page_size` is the upstream page size, not the Agent output limit.
+`next_offset` is null: do not repeatedly fetch more batches. `total_results` is the upstream query size;
+`scan_capped` and `prefilter_capped` expose truncation. Pass `coverage_complete` as discovery_complete.
+`candidate_lookback_days` defines the inclusive UTC submission-date window. Semantic domain screening
+must precede ingestion. Use `abstract_limit` as the post-interest target (default 100, ±20%).
+Save `{"paper_ids":["..."],"discovery_complete":true,"notes":"..."}` as the intermediate pool;
+select the final 20–50 only from that pool. Shortages or incomplete coverage require notes.
+Before saving each final recommendation, recheck first author, first affiliation, and corresponding author
+from explicit source markers and save `research_group_summary` plus `metadata_json.agent_bibliography`
+with confidence and evidence. The parsed bibliographic fields are hints; user-edited fields are protected.
+Ordinary `arxiv-search` calls still ingest by default and are for supplementary specific lookups.
 For a specifically named comparison paper, search with `--no-ingest` first. If title, author, year,
 and arXiv ID do not establish a unique match, ask the user to confirm the intended result before
 ingesting. A supplied arXiv ID or one unambiguous exact match does not require an extra confirmation.

@@ -18,15 +18,25 @@ FEATURED_LIMIT_DEFAULT = 10
 # default changes without rewriting the operation log history.
 BRIEF_LIMIT_DEFAULT_MIGRATION_ACTION = "setting.default.brief_limit.8"
 BRIEF_LIMIT_NEW_DEFAULT_MIGRATION_ACTION = "setting.default.brief_limit.50"
+BROAD_DISCOVERY_MIGRATION_ACTION = "setting.discovery.broad_domains.v1"
+BROAD_DISCOVERY_WINDOW_MIGRATION_ACTION = "setting.discovery.window_prefilter.v1"
+AGENT_BIBLIOGRAPHY_KEY = "agent_bibliography"
+RESEARCH_GROUP_SUMMARY_KEY = "research_group_summary"
+BROAD_DISCOVERY_DOMAINS = ["3D vision", "embodied intelligence", "AI agents"]
+DISCOVERY_CATEGORIES = ["cs.CV", "cs.RO", "cs.AI", "cs.LG", "cs.CL", "cs.MA", "cs.HC", "cs.SE"]
 
 DEFAULT_SETTINGS: dict[str, Any] = {
     "daily_hour": 5,
     "daily_minute": 0,
-    "abstract_limit": 50,
+    "abstract_limit": 100,
     "fulltext_limit": 10,
     "brief_limit": BRIEF_LIMIT_DEFAULT,
     "featured_limit": FEATURED_LIMIT_DEFAULT,
-    "candidate_lookback_days": 14,
+    "candidate_lookback_days": 3,
+    "discovery_scan_limit": 300,
+    "discovery_prefilter_limit": 120,
+    "discovery_domains": BROAD_DISCOVERY_DOMAINS,
+    "discovery_arxiv_categories": DISCOVERY_CATEGORIES,
     "initial_interest_domains": [
         "VLA",
         "WAM",
@@ -142,6 +152,40 @@ def ensure_default_settings(session: Session) -> None:
         )
     if brief_limit and int(brief_limit.value_json) > BRIEF_LIMIT_MAX:
         brief_limit.value_json = BRIEF_LIMIT_MAX
+    if not session.scalar(
+        select(OperationLog.id).where(OperationLog.action == BROAD_DISCOVERY_MIGRATION_ACTION)
+    ):
+        abstract_limit = session.get(AppSetting, "abstract_limit")
+        previous = abstract_limit.value_json if abstract_limit else None
+        if abstract_limit and previous == 50:
+            abstract_limit.value_json = 100
+        # Keep initial_interest_domains as fine-grained preference seeds. Existing
+        # custom domains, limits, memories and all paper data remain untouched.
+        log_operation(
+            session,
+            action=BROAD_DISCOVERY_MIGRATION_ACTION,
+            detail={"previous_abstract_limit": previous, "candidate_target_default": 100},
+        )
+    if not session.scalar(
+        select(OperationLog.id).where(
+            OperationLog.action == BROAD_DISCOVERY_WINDOW_MIGRATION_ACTION
+        )
+    ):
+        lookback = session.get(AppSetting, "candidate_lookback_days")
+        scan_limit = session.get(AppSetting, "discovery_scan_limit")
+        previous = {
+            "candidate_lookback_days": lookback.value_json if lookback else None,
+            "discovery_scan_limit": scan_limit.value_json if scan_limit else None,
+        }
+        if lookback and lookback.value_json == 14:
+            lookback.value_json = 3
+        if scan_limit and scan_limit.value_json == 1000:
+            scan_limit.value_json = 300
+        log_operation(
+            session,
+            action=BROAD_DISCOVERY_WINDOW_MIGRATION_ACTION,
+            detail={"previous": previous, "lookback_days": 3, "scan_limit": 300},
+        )
     session.commit()
 
 

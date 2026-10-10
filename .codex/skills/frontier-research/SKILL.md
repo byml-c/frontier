@@ -40,17 +40,36 @@ The `daily_brief` run is the root Agent for the whole daily ingestion workflow. 
    When confirmed evidence changed, use `interest profile-update` to refresh the one derived semantic
    profile with evidence-key citations, then reload `interest context` once before creating the
    brief. It is a rebuildable cache, not a second owner of paper facts.
-2. Build focused arXiv queries from the current graph and interests. Include modest breadth for emerging cross-domain work.
-3. Ingest candidates and de-duplicate through the Server.
-4. Respect current limits exactly: abstract reads, full-text reads, total brief items, and featured items.
-5. Rank research value and personal relevance separately. Apply recency as a decay signal, not a hard daily cutoff.
-6. Download and read full PDF text before making a final recommendation. When text is insufficient, render the relevant PDF page with `paper render-page` and inspect that image.
+2. Read `setting list`. Use `source arxiv-discover --date YYYY-MM-DD --offset 0 --page-size 100`
+   once for category/date retrieval. The Server scans up to 300 raw records over 3 days, deduplicates
+   against ALL library papers and within the batch, then returns up to 120 coarse-filtered new papers.
+   Pagination is internal; do not request more batches or library papers to fill a numerical target.
+   This command never ingests papers. Retry failed discovery with the same date; report scan_capped
+   and prefilter_capped in notes, and copy coverage_complete into discovery_complete. Keyword searches are supplemental
+   verification only and must not replace broad retrieval.
+3. Judge domain membership from titles, abstracts and authors against `discovery_domains` (normally
+   3D vision, embodied intelligence, AI agents). Categories are recall sources, not domain proof.
+   Reject off-domain papers without ingestion. Ingest new domain matches, even if they will not enter
+   today's shortlist. Server ingestion still deduplicates concurrent additions.
+   `initial_interest_domains` such as VLA/WAM are preference seeds, never domain gates.
+4. Use user preferences to narrow domain-qualified unread papers to about `abstract_limit` (default
+   100, normally 80–120). This is the interest-screened target, NOT a limit on raw abstracts viewed.
+   Reserve about 15% for promising/uncertain work within the broad domains. Save IDs with
+   `task candidate-pool TASK_ID --data @data/tasks/TASK_ID/candidate-pool.json`; supply `paper_ids`,
+   `discovery_complete`, and `notes` for shortages/incomplete coverage. Verify with `task get TASK_ID`.
+5. Rank quality and relevance independently within the saved pool; select 20–50 for the final brief,
+   respecting `brief_limit`. Author influence may modestly inform relevance but cannot bypass domains.
+   Explain shortages rather than inventing candidates or refilling from already-ingested papers.
+   Existing papers remain in the library for manual reading, but are not rediscovered in the daily batch.
+6. Download and read full PDFs only for the leading `min(fulltext_limit, featured_limit, 10)` papers.
+   The remaining brief items need translated abstracts, scores and informative comments. When full
+   text is insufficient, inspect relevant rendered pages. Record failures and continue other papers.
 7. Record concise analysis: one-line summary, one-line comment, problem, innovation, experiment, limitations, open questions, scores, and recommendation reason.
 8. Do not attach daily or candidate papers to the graph. Record probable relevance in paper analysis or recommendation fields until the user completes reading and confirms feedback.
 9. Do not add paper-backed node progress during the daily workflow.
 10. Create one dated brief with the context `source_digest` as `interest_context_digest`, add ranked
     items, verify the limits, and publish it. The Server freezes the calibration/profile snapshot
-    used for later evaluation.
+    used for later evaluation. Include the current `task_id` so pool membership is validated.
 11. Save only durable user preference or reusable workflow lessons as memory.
 
 Do not invent author roles, affiliations, experimental results, or limitations. Use `null`, “未标注”, or a concrete failure when evidence is absent.
@@ -133,8 +152,8 @@ Then:
    `limitations`, `open_questions`, and `user_attitude` fields. Cite every material paper claim in
    the first five fields as `[[page:N]]`; infer user attitude only from the
    user's own annotations, notes, or conversation.
-3. Suggest one explicit interest level (`ignored`, `neutral`, or `interested`), one explicit quality
-   level (`poor`, `normal`, or `excellent`),
+3. Suggest one explicit interest level (`ignored`, `low`, `neutral`, `high`, or `interested`), one
+   explicit quality level (`poor`, `below_average`, `normal`, `good`, or `excellent`),
    tags, and concrete graph-node candidates. Existing-node candidates include the exact node ID;
    new-node candidates include a distinct core research question and paper-specific relationship
    reason.

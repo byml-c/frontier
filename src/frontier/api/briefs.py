@@ -30,6 +30,7 @@ from ..services.common import (
     BRIEF_LIMIT_DEFAULT,
     BRIEF_LIMIT_MAX,
     FEATURED_LIMIT_DEFAULT,
+    RESEARCH_GROUP_SUMMARY_KEY,
     get_setting,
     log_operation,
     model_dict,
@@ -134,6 +135,7 @@ def _paper_snapshot(session: Session, paper: Paper) -> dict:
         "first_author": paper.first_author,
         "corresponding_author": paper.corresponding_author,
         "primary_affiliation": paper.primary_affiliation,
+        "research_group_summary": metadata.get(RESEARCH_GROUP_SUMMARY_KEY),
         "source": paper.source,
         "source_url": paper.source_url,
         "pdf_url": paper.pdf_url,
@@ -158,6 +160,7 @@ def _paper_snapshot(session: Session, paper: Paper) -> dict:
         "screening_quality_level": (paper.screening_feedback or {}).get("quality_level"),
         "screening_interest_level": (paper.screening_feedback or {}).get("interest_level"),
         "screening_feedback": (paper.screening_feedback or {}).get("comment"),
+        "agent_score_confirmed": (paper.screening_feedback or {}).get("agent_score_confirmed", False),
         "abstract_translation": translation.content if translation else None,
         "abstract_translation_status": "ready" if translation else "missing",
     }
@@ -202,6 +205,13 @@ def _serialize_brief(session: Session, brief: Brief, *, detail: bool = True) -> 
                     "author_influence_score": paper.author_influence_score,
                     "recommendation_reason": paper.recommendation_reason,
                     "abstract": paper.abstract,
+                    "authors": paper.authors or [],
+                    "first_author": paper.first_author,
+                    "corresponding_author": paper.corresponding_author,
+                    "primary_affiliation": paper.primary_affiliation,
+                    "research_group_summary": (paper.metadata_json or {}).get(
+                        RESEARCH_GROUP_SUMMARY_KEY
+                    ),
                     "screening_quality_level": (paper.screening_feedback or {}).get(
                         "quality_level"
                     ),
@@ -209,6 +219,9 @@ def _serialize_brief(session: Session, brief: Brief, *, detail: bool = True) -> 
                         "interest_level"
                     ),
                     "screening_feedback": (paper.screening_feedback or {}).get("comment"),
+                    "agent_score_confirmed": (paper.screening_feedback or {}).get(
+                        "agent_score_confirmed", False
+                    ),
                     # 阅读结论属于论文的后续状态，不应被冻结在发布时的简报快照中。
                     "completion_summary": brief_completion_summary(paper),
                     "completion_summary_structured": completion_summary_structured(
@@ -372,9 +385,7 @@ def _queue_daily_brief_regeneration(
         if item.tier != "manual":
             session.delete(item)
 
-    episode = session.scalar(
-        select(PodcastEpisode).where(PodcastEpisode.brief_id == brief.id)
-    )
+    episode = session.scalar(select(PodcastEpisode).where(PodcastEpisode.brief_id == brief.id))
     if episode is not None:
         episode.status = "voided"
         episode.revision += 1
@@ -586,6 +597,10 @@ def add_brief_item(
     paper = session.get(Paper, payload.paper_id)
     if not paper:
         raise HTTPException(status_code=404, detail="Paper not found")
+    task = session.get(TaskRun, brief.task_id) if brief.task_id else None
+    pool = (task.payload_json or {}).get("candidate_pool") if task else None
+    if pool is not None and payload.tier != "manual" and paper.id not in pool["paper_ids"]:
+        raise HTTPException(status_code=409, detail="Paper is not in the daily candidate pool")
     if not is_daily_recommendation_eligible(paper):
         raise HTTPException(
             status_code=409,
@@ -660,6 +675,14 @@ def publish_brief(
     if not rows:
         raise HTTPException(status_code=409, detail="Cannot publish a brief without unread papers")
     recommendation_count = sum(item.tier != "manual" for item, _paper in rows)
+    task = session.get(TaskRun, brief.task_id) if brief.task_id else None
+    pool = (task.payload_json or {}).get("candidate_pool") if task else None
+    if pool is not None and any(
+        item.tier != "manual" and paper.id not in pool["paper_ids"] for item, paper in rows
+    ):
+        raise HTTPException(
+            status_code=409, detail="Brief contains papers outside its candidate pool"
+        )
     limit = min(
         BRIEF_LIMIT_MAX,
         int(get_setting(session, "brief_limit", BRIEF_LIMIT_DEFAULT)),
@@ -680,6 +703,7 @@ def publish_brief(
         "title": brief.title,
         "introduction": brief.introduction,
         "paper_ids": [paper.id for _item, paper in rows],
+        **({"candidate_pool": pool} if pool is not None else {}),
         "interest_context": interest_context_snapshot(interest_context),
         "interest_context_stale_at_publish": (
             digest_used != interest_context["source_digest"] if digest_used else None
@@ -689,7 +713,14 @@ def publish_brief(
     brief.published_at = datetime.now(UTC)
     # Preprocess the ranked top ten even when an older Agent run did not mark the
     # tier explicitly; the continuous brief list is rank-driven.
-    featured_paper_ids = [paper.id for _item, paper in rows if _item.tier != "manual"][:10]
+    preprocess_limit = min(
+        10,
+        int(get_setting(session, "fulltext_limit", 10)),
+        int(get_setting(session, "featured_limit", FEATURED_LIMIT_DEFAULT)),
+    )
+    featured_paper_ids = [paper.id for _item, paper in rows if _item.tier != "manual"][
+        :preprocess_limit
+    ]
     log_operation(
         session,
         actor="agent",
@@ -706,7 +737,9 @@ def publish_brief(
     session.commit()
     result = _serialize_brief(session, brief)
     if featured_paper_ids:
-        background_tasks.add_task(queue_document_conversions, featured_paper_ids, limit=10)
+        background_tasks.add_task(
+            queue_document_conversions, featured_paper_ids, limit=preprocess_limit
+        )
     try:
         load_translation_provider_config()
     except TranslationProviderError:

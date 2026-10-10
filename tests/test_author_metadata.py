@@ -97,9 +97,7 @@ def test_extracts_one_shared_affiliation_without_guessing_author_order() -> None
 
 
 def test_does_not_guess_corresponding_author_from_an_unmapped_email() -> None:
-    result = extract_arxiv_html_author_metadata(
-        AMBIGUOUS_CORRESPONDING, known_authors()
-    )
+    result = extract_arxiv_html_author_metadata(AMBIGUOUS_CORRESPONDING, known_authors())
 
     assert result["corresponding_authors"] == []
     assert result["warnings"] == ["通讯作者脚注存在，但无法可靠映射到具体作者"]
@@ -145,9 +143,7 @@ def test_explicit_html_enrichment_preserves_historical_manual_fields(
         assert paper.corresponding_author == "Ada Researcher"
         assert paper.authors[0]["affiliations"] == ["Frontier Robotics Institute"]
         assert changed == {"authors", "corresponding_author"}
-        assert paper.metadata_json[MANUAL_BIBLIOGRAPHIC_FIELDS_KEY] == [
-            "primary_affiliation"
-        ]
+        assert paper.metadata_json[MANUAL_BIBLIOGRAPHIC_FIELDS_KEY] == ["primary_affiliation"]
         session.rollback()
 
 
@@ -188,9 +184,7 @@ def test_metadata_editor_preserves_enrichment_and_agent_cannot_override_manual_v
     )
     assert saved.status_code == 200, saved.text
     assert saved.json()["authors"][0]["affiliations"] == ["Frontier Robotics Institute"]
-    assert saved.json()["metadata_json"][MANUAL_BIBLIOGRAPHIC_FIELDS_KEY] == [
-        "primary_affiliation"
-    ]
+    assert saved.json()["metadata_json"][MANUAL_BIBLIOGRAPHIC_FIELDS_KEY] == ["primary_affiliation"]
 
     agent_update = client.patch(
         f"/api/papers/{created['id']}",
@@ -200,9 +194,50 @@ def test_metadata_editor_preserves_enrichment_and_agent_cannot_override_manual_v
     assert agent_update.json()["primary_affiliation"] == "User Selected Institute"
 
 
-def test_backfills_existing_cached_arxiv_html_without_network(
-    monkeypatch, tmp_path
-) -> None:
+def test_agent_can_save_verified_bibliography_and_group_summary(client: TestClient) -> None:
+    response = client.post(
+        "/api/papers",
+        json={
+            "title": "Agent bibliography extraction",
+            "authors": [{"name": "Raw Author"}],
+            "first_author": "Raw Author",
+            "source": "arxiv",
+            "arxiv_id": "2608.19994",
+        },
+    )
+    assert response.status_code == 200, response.text
+    paper_id = response.json()["paper"]["id"]
+
+    saved = client.patch(
+        f"/api/papers/{paper_id}",
+        json={
+            "first_author": "Verified Author",
+            "primary_affiliation": "Verified Robotics Lab",
+            "corresponding_author": "Corresponding Author",
+            "research_group_summary": "Verified Robotics Lab 主要完成真实机器人操作与触觉控制研究。",
+            "metadata_json": {
+                "agent_bibliography": {
+                    "source": "agent",
+                    "confidence": "high",
+                    "evidence": "论文首页作者单位与通讯作者脚注。",
+                }
+            },
+        },
+    )
+    assert saved.status_code == 200, saved.text
+    body = saved.json()
+    assert body["first_author"] == "Verified Author"
+    assert body["primary_affiliation"] == "Verified Robotics Lab"
+    assert body["corresponding_author"] == "Corresponding Author"
+    assert body["research_group_summary"].startswith("Verified Robotics Lab")
+    assert body["metadata_json"]["agent_bibliography"]["confidence"] == "high"
+
+    detail = client.get(f"/api/papers/{paper_id}")
+    assert detail.status_code == 200
+    assert detail.json()["research_group_summary"] == body["research_group_summary"]
+
+
+def test_backfills_existing_cached_arxiv_html_without_network(monkeypatch, tmp_path) -> None:
     monkeypatch.setattr("frontier.services.author_metadata.settings.data_dir", tmp_path)
     with SessionLocal() as session:
         paper = Paper(

@@ -698,6 +698,25 @@ def source_arxiv_search(query: str, max_results: int = 50, ingest: bool = True) 
     )
 
 
+@source_app.command("arxiv-discover")
+def source_arxiv_discover(
+    date: str | None = typer.Option(None, help="Research date (YYYY-MM-DD)"),
+    offset: int = 0,
+    page_size: int = 100,
+) -> None:
+    """Scan recent metadata and return at most 120 new prefiltered papers by default."""
+    params: dict[str, Any] = {"offset": offset, "page_size": page_size}
+    if date:
+        params["through_date"] = date
+    emit(client.request("GET", "/api/sources/arxiv/discover", params=params, timeout=180))
+
+
+@task_app.command("candidate-pool")
+def task_candidate_pool(task_id: str, data: str = typer.Option(..., help="JSON or @file")) -> None:
+    """Save the roughly 100 papers retained after domain and interest screening."""
+    emit(client.request("PUT", f"/api/tasks/{task_id}/candidate-pool", json=parse_json(data)))
+
+
 @app.command("backup")
 def backup() -> None:
     emit(client.request("POST", "/api/backup", timeout=180))

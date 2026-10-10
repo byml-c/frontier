@@ -19,7 +19,7 @@ from ..models import (
     ResearchNode,
     Tag,
 )
-from .common import model_dict
+from .common import BROAD_DISCOVERY_DOMAINS, get_setting, model_dict
 from .completion_summary import completion_summary_structured
 
 INTEREST_CONTEXT_SCHEMA_VERSION = 2
@@ -27,12 +27,12 @@ DERIVED_INTEREST_PROFILE_ID = "derived-interest-profile-v1"
 READING_PROVENANCE_KEY = "reading_provenance"
 FEEDBACK_PROVENANCE_KEY = "feedback_provenance"
 IGNORE_PROVENANCE_KEY = "ignore_provenance"
-INTEREST_LEVELS = {"ignored", "neutral", "interested"}
-QUALITY_LEVELS = {"poor", "normal", "excellent"}
+INTEREST_LEVELS = {"ignored", "low", "neutral", "high", "interested"}
+QUALITY_LEVELS = {"poor", "below_average", "normal", "good", "excellent"}
 
 
 def paper_interest_level(paper: Paper) -> str | None:
-    """Return the canonical three-state interest judgment with legacy fallback."""
+    """Return the canonical five-state interest judgment with legacy fallback."""
     if paper.status == "ignored":
         return "ignored"
     if paper.status != "completed":
@@ -46,7 +46,7 @@ def paper_interest_level(paper: Paper) -> str | None:
 
 
 def paper_quality_level(paper: Paper) -> str | None:
-    """Return the canonical three-state quality judgment with legacy fallback."""
+    """Return the canonical five-state quality judgment with legacy fallback."""
     if paper.status != "completed":
         return None
     provenance = (paper.metadata_json or {}).get(FEEDBACK_PROVENANCE_KEY)
@@ -291,6 +291,7 @@ def active_feedback_evidence_keys(session: Session) -> set[str]:
             screening.get("interest_level")
             or screening.get("quality_level")
             or screening.get("comment")
+            or screening.get("agent_score_confirmed")
         ):
             keys.add(str(screening.get("evidence_key") or f"paper:{paper.id}:screening:legacy"))
         if paper.status not in {"completed", "ignored"}:
@@ -333,7 +334,7 @@ def build_interest_context(session: Session, *, recent_limit: int = 20) -> dict[
         if isinstance(paper.screening_feedback, dict)
         and any(
             (paper.screening_feedback or {}).get(key)
-            for key in ("interest_level", "quality_level", "comment")
+            for key in ("interest_level", "quality_level", "comment", "agent_score_confirmed")
         )
     ]
     paper_ids = [paper.id for paper in all_feedback]
@@ -367,13 +368,17 @@ def build_interest_context(session: Session, *, recent_limit: int = 20) -> dict[
             stat["evidence_count"] += 1
             interest_bucket = {
                 "interested": "positive_interest",
+                "high": "positive_interest",
                 "neutral": "neutral_interest",
+                "low": "negative_interest",
                 "ignored": "negative_interest",
             }[interest_level or "neutral"]
             stat[interest_bucket] += 1
             quality_bucket = {
                 "excellent": "positive_quality",
+                "good": "positive_quality",
                 "normal": "neutral_quality",
+                "below_average": "negative_quality",
                 "poor": "negative_quality",
             }[paper_quality_level(paper) or "normal"]
             stat[quality_bucket] += 1
@@ -416,13 +421,14 @@ def build_interest_context(session: Session, *, recent_limit: int = 20) -> dict[
         (paper, attribution) for paper, attribution in daily_feedback if paper.status == "ignored"
     ]
     interest_hits = sum(
-        paper_interest_level(paper) == "interested" for paper, _ in completed_recommended
+        paper_interest_level(paper) in {"high", "interested"} for paper, _ in completed_recommended
     )
     quality_hits = sum(
-        paper_quality_level(paper) == "excellent" for paper, _ in completed_recommended
+        paper_quality_level(paper) in {"good", "excellent"} for paper, _ in completed_recommended
     )
     joint_hits = sum(
-        paper_interest_level(paper) == "interested" and paper_quality_level(paper) == "excellent"
+        paper_interest_level(paper) in {"high", "interested"}
+        and paper_quality_level(paper) in {"good", "excellent"}
         for paper, _ in completed_recommended
     )
 
@@ -432,13 +438,17 @@ def build_interest_context(session: Session, *, recent_limit: int = 20) -> dict[
         prediction = attribution["prediction"]
         interest_target = {
             "ignored": 0.0,
+            "low": 0.25,
             "neutral": 0.5,
+            "high": 0.75,
             "interested": 1.0,
         }[paper_interest_level(paper) or "neutral"]
         relevance_error = _score(interest_target, prediction.get("relevance_score"))
         quality_target = {
             "poor": 0.0,
+            "below_average": 0.25,
             "normal": 0.5,
+            "good": 0.75,
             "excellent": 1.0,
         }[paper_quality_level(paper) or "normal"]
         research_error = _score(quality_target, prediction.get("research_score"))
@@ -528,7 +538,9 @@ def build_interest_context(session: Session, *, recent_limit: int = 20) -> dict[
                     "interest": (
                         {
                             "interested": "positive",
+                            "high": "positive",
                             "neutral": "neutral",
+                            "low": "negative_weak",
                             "ignored": "negative",
                         }.get(interest_level, "neutral")
                         if is_completed
@@ -537,7 +549,9 @@ def build_interest_context(session: Session, *, recent_limit: int = 20) -> dict[
                     "quality": (
                         {
                             "excellent": "positive",
+                            "good": "positive",
                             "normal": "neutral",
+                            "below_average": "negative_weak",
                             "poor": "negative",
                         }[paper_quality_level(paper) or "normal"]
                     )
@@ -583,6 +597,7 @@ def build_interest_context(session: Session, *, recent_limit: int = 20) -> dict[
                     "author_influence": paper.author_influence_score,
                     "quality": paper.research_score,
                 },
+                "agent_score_confirmed": bool(screening.get("agent_score_confirmed")),
                 "tags": [],
                 "graph_nodes": [],
                 "user_attitude": _bounded_text(screening.get("comment"), 1_000),
@@ -593,6 +608,7 @@ def build_interest_context(session: Session, *, recent_limit: int = 20) -> dict[
 
     setting = session.get(AppSetting, "initial_interest_domains")
     seed_interests = setting.value_json if setting and isinstance(setting.value_json, list) else []
+    discovery_domains = get_setting(session, "discovery_domains", BROAD_DISCOVERY_DOMAINS)
     derived_memory = session.get(Memory, DERIVED_INTEREST_PROFILE_ID)
     interest_memory_rows = list(
         session.scalars(
@@ -667,6 +683,8 @@ def build_interest_context(session: Session, *, recent_limit: int = 20) -> dict[
         {
             "evidence_key": item["evidence_key"],
             "labels": item["labels"],
+            "agent_score_confirmed": item.get("agent_score_confirmed", False),
+            "agent_scores": item.get("agent_scores"),
             "tags": item["tags"],
             "attitude": item["user_attitude"],
             "personal_comment": item["personal_comment"],
@@ -701,6 +719,7 @@ def build_interest_context(session: Session, *, recent_limit: int = 20) -> dict[
             {"id": item["id"], "updated_at": item["updated_at"]} for item in workflow_memories
         ],
         "seed_interests": seed_interests,
+        "discovery_domains": discovery_domains,
         "graph_nodes": graph_nodes,
     }
     return {
@@ -713,6 +732,7 @@ def build_interest_context(session: Session, *, recent_limit: int = 20) -> dict[
             "semantic_profile": semantic_profile,
             "workflow_lessons": workflow_memories,
             "seed_interests": seed_interests,
+            "discovery_domains": discovery_domains,
             "confirmed_topic_profile": {
                 "formula": "(positive - negative) / (support + 2)",
                 "confirmed_paper_count": len(completed),
@@ -739,6 +759,7 @@ def interest_context_snapshot(context: dict[str, Any]) -> dict[str, Any]:
         "feedback_revision": context["feedback_revision"],
         "calibration": context["calibration"],
         "semantic_profile": context["layers"]["semantic_profile"],
+        "discovery_domains": context["layers"].get("discovery_domains", BROAD_DISCOVERY_DOMAINS),
         "screening_evidence_count": context.get("screening_evidence_count", 0),
         "confirmed_topic_profile": {
             **{key: value for key, value in profile.items() if key != "topics"},

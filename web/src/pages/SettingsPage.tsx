@@ -32,11 +32,16 @@ import type { Setting } from "../types";
 const LABELS: Record<string, { label: string; help: string }> = {
   daily_hour: { label: "日报启动小时", help: "北京时间，默认 05:00" },
   daily_minute: { label: "日报启动分钟", help: "保存后重新加载运行计划" },
-  abstract_limit: { label: "摘要阅读上限", help: "每期最多阅读的摘要数量" },
-  fulltext_limit: { label: "全文阅读上限", help: "进入推荐判断前完整阅读的论文数量" },
-  brief_limit: { label: "简报论文上限", help: "每期自动推荐的论文总数，默认 8 篇，最多 10 篇" },
+  abstract_limit: { label: "兴趣初筛候选目标", help: "领域筛选后按兴趣收敛到约 100 篇；允许上下浮动 20%，不限制最初浏览的摘要数量" },
+  fulltext_limit: { label: "全文阅读上限", help: "最终排名靠前的论文生成完整分析，最多 10 篇" },
+  brief_limit: { label: "简报论文上限", help: "从候选池选出 20–50 篇供速览，最多 50 篇" },
   featured_limit: { label: "重点推荐上限", help: "重点推荐数量必须小于简报总量" },
-  candidate_lookback_days: { label: "候选时间窗口", help: "时间衰减参与排序，不作为硬性截止" },
+  candidate_lookback_days: { label: "广泛抓取时间窗口", help: "按 arXiv 提交日期扫描最近文章（UTC）；默认 3 天" },
+  discovery_scan_limit: { label: "原始扫描上限", help: "按分类和日期最多扫描多少条元数据，默认 300" },
+  discovery_prefilter_limit: { label: "交给 Agent 的候选上限", help: "宽松预筛后交给 Agent 的文章数，默认 120" },
+  discovery_domains: { label: "大领域范围", help: "每行一个领域。领域外的文章不入库；默认 3D 视觉、具身智能、AI Agent" },
+  discovery_arxiv_categories: { label: "arXiv 抓取分类", help: "每行一个分类。用于广泛召回，Agent 会进一步判断是否属于大领域" },
+  initial_interest_domains: { label: "细分兴趣", help: "每行一个方向，例如 VLA、WAM。用于兴趣排序，不作为抓取或领域筛选条件" },
   log_level: { label: "日志级别", help: "控制服务器记录的详细程度" },
 };
 
@@ -61,7 +66,7 @@ export function SettingsPage() {
     if (query.data) setValues(Object.fromEntries(query.data.map((item) => [item.key, item.value_json])));
   }, [query.data]);
   const save = useMutation({
-    mutationFn: () => api("/api/settings", { method: "PUT", body: JSON.stringify(values) }),
+    mutationFn: () => api("/api/settings", { method: "PUT", body: JSON.stringify(Object.fromEntries(Object.entries(values).map(([key, value]) => [key, Array.isArray(value) ? [...new Set(value.map(String).map((entry) => entry.trim()).filter(Boolean))] : value]))) }),
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ["settings"] }),
   });
 
@@ -83,7 +88,9 @@ export function SettingsPage() {
                     <Typography fontWeight={700}>{LABELS[item.key].label}</Typography>
                     <Typography variant="body2" color="text.secondary">{LABELS[item.key].help}</Typography>
                   </div>
-                  {typeof item.value_json === "number" ? (
+                  {Array.isArray(item.value_json) ? (
+                    <TextField size="small" multiline minRows={3} label={LABELS[item.key].label} value={Array.isArray(values[item.key]) ? (values[item.key] as string[]).join("\n") : String(values[item.key] ?? "")} onChange={(event) => setValues({ ...values, [item.key]: event.target.value.split("\n") })} sx={{ width: { xs: "100%", sm: 280 } }} />
+                  ) : typeof item.value_json === "number" ? (
                     <TextField size="small" type="number" value={Number(values[item.key] ?? item.value_json)} onChange={(event) => setValues({ ...values, [item.key]: Number(event.target.value) })} sx={{ width: { xs: "100%", sm: 150 } }} />
                   ) : (
                     <FormControl size="small" sx={{ width: { xs: "100%", sm: 180 } }}>
