@@ -1,0 +1,32 @@
+[Unit]
+Description=Frontier personal research server
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# Use the same Unix user whose Codex CLI/provider configuration you maintain.
+User=byml
+Group=byml
+WorkingDirectory=/home/byml/agent/frontier
+EnvironmentFile=/home/byml/agent/frontier/.env
+ExecStart=/home/byml/agent/frontier/.venv/bin/frontier-server
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=30
+KillMode=control-group
+# A per-Agent cgroup OOM must not stop the Web service with it.
+OOMPolicy=continue
+# Aggregate protection for this 2-vCPU, 4-GB host.
+MemoryHigh=2147483648
+MemoryMax=2415919104
+MemorySwapMax=268435456
+CPUQuota=150%
+IOWeight=50
+TasksMax=256
+# Allow Frontier to create isolated Web and Agent child cgroups.
+Delegate=cpu io memory pids
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target

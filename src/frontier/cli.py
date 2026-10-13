@@ -693,7 +693,7 @@ def source_arxiv_search(query: str, max_results: int = 50, ingest: bool = True) 
             "POST",
             "/api/sources/arxiv/search",
             params={"query": query, "max_results": max_results, "ingest": str(ingest).lower()},
-            timeout=180,
+            timeout=660,
         )
     )
 
@@ -708,7 +708,7 @@ def source_arxiv_discover(
     params: dict[str, Any] = {"offset": offset, "page_size": page_size}
     if date:
         params["through_date"] = date
-    emit(client.request("GET", "/api/sources/arxiv/discover", params=params, timeout=180))
+    emit(client.request("GET", "/api/sources/arxiv/discover", params=params, timeout=660))
 
 
 @task_app.command("candidate-pool")

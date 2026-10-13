@@ -3,12 +3,16 @@ from __future__ import annotations
 import html
 import ipaddress
 import json
+import logging
 import multiprocessing
 import os
 import socket
 import threading
 import uuid
-from datetime import datetime
+from contextlib import contextmanager
+from contextvars import ContextVar
+from datetime import UTC, datetime
+from email.utils import parsedate_to_datetime
 from html.parser import HTMLParser
 from pathlib import Path
 from time import monotonic, sleep
@@ -31,6 +35,10 @@ USER_AGENT = "FrontierResearch/0.1 (personal research assistant)"
 ARXIV_API = "https://export.arxiv.org/api/query"
 _ARXIV_QUERY_LOCK = threading.Lock()
 _arxiv_last_query_at = 0.0
+ARXIV_RETRY_BUDGET_SECONDS = 600.0
+_ARXIV_DEADLINE: ContextVar[float | None] = ContextVar("arxiv_deadline", default=None)
+_arxiv_cooldown_until = 0.0
+_logger = logging.getLogger(__name__)
 _PDF_DOWNLOAD_TOTAL_TIMEOUT_SECONDS = 90.0
 _PDF_DOWNLOAD_IO_TIMEOUT_SECONDS = 5.0
 _PDF_TEXT_EXTRACTION_TIMEOUT_SECONDS = 75.0
@@ -180,35 +188,105 @@ def search_arxiv(query: str, max_results: int = 50) -> list[PaperCreate]:
     return search_arxiv_page(query, max_results=max_results)["items"]
 
 
-def search_arxiv_page(
-    query: str, *, max_results: int = 100, start: int = 0
-) -> dict:
+@contextmanager
+def arxiv_request_budget():
+    """Share one ten-minute budget across all pages in a discovery call."""
+    if _ARXIV_DEADLINE.get() is not None:
+        yield
+        return
+    token = _ARXIV_DEADLINE.set(monotonic() + ARXIV_RETRY_BUDGET_SECONDS)
+    try:
+        yield
+    finally:
+        _ARXIV_DEADLINE.reset(token)
+
+
+def _arxiv_retry_after(response: httpx.Response) -> float:
+    value = response.headers.get("Retry-After", "")
+    try:
+        return max(0.0, float(value))
+    except ValueError:
+        try:
+            when = parsedate_to_datetime(value)
+            if when.tzinfo is None:
+                when = when.replace(tzinfo=UTC)
+            return max(0.0, (when - datetime.now(UTC)).total_seconds())
+        except (TypeError, ValueError, OverflowError):
+            return 0.0
+
+
+def _arxiv_get(params: dict) -> httpx.Response:
+    global _arxiv_last_query_at, _arxiv_cooldown_until
+    with arxiv_request_budget():
+        deadline = _ARXIV_DEADLINE.get()
+        assert deadline is not None
+        remaining = deadline - monotonic()
+        if remaining <= 0 or not _ARXIV_QUERY_LOCK.acquire(timeout=remaining):
+            raise httpx.TimeoutException("arXiv ten-minute request budget exhausted")
+        try:
+            backoff = 60.0
+            last_error = None
+            while True:
+                remaining = deadline - monotonic()
+                delay = max(
+                    0.0,
+                    _arxiv_last_query_at + 3.0 - monotonic(),
+                    _arxiv_cooldown_until - monotonic(),
+                )
+                if remaining <= 0 or delay >= remaining:
+                    if remaining > 0:
+                        sleep(remaining)
+                    raise httpx.TimeoutException(
+                        "arXiv ten-minute request budget exhausted; retry later"
+                    ) from last_error
+                if delay:
+                    sleep(delay)
+                _arxiv_last_query_at = monotonic()
+                try:
+                    response = httpx.get(
+                        ARXIV_API,
+                        params=params,
+                        headers={"User-Agent": USER_AGENT},
+                        timeout=min(45.0, max(0.001, (deadline - monotonic()) / 4)),
+                        follow_redirects=True,
+                        **external_httpx_kwargs(ARXIV_API),
+                    )
+                    response.raise_for_status()
+                    return response
+                except httpx.HTTPStatusError as exc:
+                    if exc.response.status_code not in {429, 502, 503, 504}:
+                        raise
+                    wait = max(backoff, _arxiv_retry_after(exc.response))
+                    last_error = exc
+                except httpx.TransportError as exc:
+                    wait = backoff
+                    last_error = exc
+                _arxiv_cooldown_until = monotonic() + wait
+                _logger.warning(
+                    "arXiv request failed (%s); retry in %.0fs, budget remaining %.0fs",
+                    last_error,
+                    wait,
+                    max(0.0, deadline - monotonic()),
+                )
+                backoff = min(backoff * 2, 300.0)
+        finally:
+            _ARXIV_QUERY_LOCK.release()
+
+
+def search_arxiv_page(query: str, *, max_results: int = 100, start: int = 0) -> dict:
     """Read one metadata page without ingestion, retaining upstream pagination."""
-    global _arxiv_last_query_at
     max_results = max(1, min(max_results, 100))
     if start < 0:
         raise ValueError("arXiv start must be nonnegative")
-    # arXiv requests a three-second interval between consecutive API calls.
-    with _ARXIV_QUERY_LOCK:
-        delay = 3.0 - (monotonic() - _arxiv_last_query_at)
-        if delay > 0:
-            sleep(delay)
-        _arxiv_last_query_at = monotonic()
-    response = httpx.get(
-        ARXIV_API,
-        params={
+    response = _arxiv_get(
+        {
             "search_query": query,
             "start": start,
             "max_results": max_results,
             "sortBy": "submittedDate",
             "sortOrder": "descending",
-        },
-        headers={"User-Agent": USER_AGENT},
-        timeout=45,
-        follow_redirects=True,
-        **external_httpx_kwargs(ARXIV_API),
+        }
     )
-    response.raise_for_status()
     feed = feedparser.parse(response.text)
     if feed.get("bozo") or feed.get("version") != "atom10":
         raise ValueError("arXiv returned a malformed Atom feed")
@@ -391,9 +469,7 @@ def ingest_pdf_bytes(
             first_lines = [line.strip() for line in first_page.splitlines() if line.strip()]
             title = first_lines[0] if first_lines else Path(filename).stem
         author_names = [
-            item.strip()
-            for item in (metadata.get("author") or "").split(",")
-            if item.strip()
+            item.strip() for item in (metadata.get("author") or "").split(",") if item.strip()
         ]
         authors = [{"name": name} for name in author_names]
         paper, created = create_or_update_paper(
@@ -512,9 +588,7 @@ def _validate_pdf_text_payload(payload: object) -> dict:
 
 
 def _load_pdf_text_cache(cache: Path) -> dict:
-    max_cache_bytes = (
-        settings.paper_text_max_chars * 4 + _PDF_TEXT_CACHE_OVERHEAD_BYTES
-    )
+    max_cache_bytes = settings.paper_text_max_chars * 4 + _PDF_TEXT_CACHE_OVERHEAD_BYTES
     if cache.stat().st_size > max_cache_bytes:
         raise ValueError("Cached PDF text file exceeds the configured size limit")
     with cache.open("r", encoding="utf-8") as source:
@@ -530,9 +604,7 @@ def _pdf_text_extraction_worker(
 ) -> None:
     """Extract into JSON incrementally; the parent owns timeout and publication."""
     try:
-        with pymupdf.open(path) as document, Path(temporary).open(
-            "w", encoding="utf-8"
-        ) as output:
+        with pymupdf.open(path) as document, Path(temporary).open("w", encoding="utf-8") as output:
             output.write('{"paper_id":')
             json.dump(paper_id, output, ensure_ascii=False)
             output.write(f',"page_count":{document.page_count},"pages":[')
@@ -621,9 +693,7 @@ def _extract_pdf_text_to_cache(path: Path, cache: Path, paper_id: str) -> None:
         temporary.unlink(missing_ok=True)
 
 
-def ensure_pdf_text_cache(
-    session: Session, paper: Paper, *, force: bool = False
-) -> Path:
+def ensure_pdf_text_cache(session: Session, paper: Paper, *, force: bool = False) -> Path:
     """Validate or build a bounded cache without retaining the full text in Web memory."""
 
     with paper_processing_slot():

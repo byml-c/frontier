@@ -16,7 +16,7 @@ from .common import (
     normalize_title,
     parse_arxiv_id,
 )
-from .ingest import search_arxiv_page
+from .ingest import arxiv_request_budget, search_arxiv_page
 
 # Broad concepts, not fine-grained interests. Boundaries avoid matching "vision"
 # inside "supervision" or "agent" inside "reagent".
@@ -150,9 +150,12 @@ def discover_arxiv_page(
     # therefore need one wider request to include Friday submissions announced
     # over the weekend or after a holiday. Avoid a second request after a zero
     # result because arXiv rate-limits bursty API clients.
-    fallback_applied = through_date.weekday() in {0, 1, 2} and days < DISCOVERY_FALLBACK_LOOKBACK_DAYS
+    fallback_applied = (
+        through_date.weekday() in {0, 1, 2} and days < DISCOVERY_FALLBACK_LOOKBACK_DAYS
+    )
     effective_days = DISCOVERY_FALLBACK_LOOKBACK_DAYS if fallback_applied else days
-    raw_items, total, query = fetch_window(effective_days)
+    with arxiv_request_budget():
+        raw_items, total, query = fetch_window(effective_days)
     since = through_date - timedelta(days=effective_days - 1)
 
     # Every library status is excluded, including candidate and new arXiv versions.

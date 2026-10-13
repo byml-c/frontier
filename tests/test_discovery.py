@@ -275,6 +275,97 @@ def test_arxiv_transport_keeps_offset_total_and_rate_limit(monkeypatch):
     assert slept == [2.0]
 
 
+@pytest.fixture
+def arxiv_clock(monkeypatch):
+    clock = [1000.0]
+    waits = []
+
+    def wait(seconds):
+        waits.append(seconds)
+        clock[0] += seconds
+
+    monkeypatch.setattr(ingest, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(ingest, "sleep", wait)
+    monkeypatch.setattr(ingest, "_arxiv_last_query_at", 0.0)
+    monkeypatch.setattr(ingest, "_arxiv_cooldown_until", 0.0)
+    return clock, waits
+
+
+def test_arxiv_retries_429_and_honors_retry_after(monkeypatch, arxiv_clock):
+    calls = []
+
+    def get(url, **kwargs):
+        calls.append(kwargs)
+        assert ingest._ARXIV_QUERY_LOCK.locked()
+        return httpx.Response(
+            429 if len(calls) == 1 else 200,
+            headers={"Retry-After": "90"},
+            text=atom(),
+            request=httpx.Request("GET", url),
+        )
+
+    monkeypatch.setattr(ingest.httpx, "get", get)
+    assert ingest.search_arxiv_page("cat:cs.AI", start=1)["total_results"] == 2
+    assert len(calls) == 2
+    assert arxiv_clock[1] == [90.0]
+    assert calls[0]["params"] == calls[1]["params"]
+
+
+def test_arxiv_stops_retrying_at_ten_minutes(monkeypatch, arxiv_clock):
+    calls = []
+
+    def get(url, **kwargs):
+        calls.append(kwargs)
+        return httpx.Response(429, request=httpx.Request("GET", url))
+
+    monkeypatch.setattr(ingest.httpx, "get", get)
+    with pytest.raises(httpx.TimeoutException, match="ten-minute"):
+        ingest.search_arxiv_page("cat:cs.AI")
+    assert len(calls) == 4
+    assert arxiv_clock[0][0] == 1600.0
+    assert arxiv_clock[1] == [60.0, 120.0, 240.0, 180.0]
+
+
+def test_arxiv_budget_is_shared_across_pages(monkeypatch, arxiv_clock):
+    def get(url, **kwargs):
+        if kwargs["params"]["start"] == 0:
+            arxiv_clock[0][0] += 590
+            return httpx.Response(200, text=atom(offset=0), request=httpx.Request("GET", url))
+        return httpx.Response(429, request=httpx.Request("GET", url))
+
+    monkeypatch.setattr(ingest.httpx, "get", get)
+    with ingest.arxiv_request_budget():
+        ingest.search_arxiv_page("cat:cs.AI", start=0)
+        with pytest.raises(httpx.TimeoutException):
+            ingest.search_arxiv_page("cat:cs.AI", start=1)
+    assert arxiv_clock[0][0] == 1600.0
+
+
+def test_arxiv_retries_transport_failure(monkeypatch, arxiv_clock):
+    calls = []
+
+    def get(url, **kwargs):
+        calls.append(kwargs)
+        if len(calls) == 1:
+            raise httpx.ReadTimeout("temporary failure")
+        return httpx.Response(200, text=atom(), request=httpx.Request("GET", url))
+
+    monkeypatch.setattr(ingest.httpx, "get", get)
+    ingest.search_arxiv_page("cat:cs.AI", start=1)
+    assert arxiv_clock[1] == [60.0]
+
+
+def test_arxiv_does_not_retry_permanent_errors(monkeypatch, arxiv_clock):
+    monkeypatch.setattr(
+        ingest.httpx,
+        "get",
+        lambda url, **kwargs: httpx.Response(400, request=httpx.Request("GET", url)),
+    )
+    with pytest.raises(httpx.HTTPStatusError):
+        ingest.search_arxiv_page("invalid")
+    assert arxiv_clock[1] == []
+
+
 @pytest.mark.parametrize("body", [atom(entry=False), atom(offset=0), "<html>error</html>"])
 def test_arxiv_transport_does_not_silently_skip_broken_pages(monkeypatch, body):
     monkeypatch.setattr(ingest, "_arxiv_last_query_at", 0.0)
@@ -412,7 +503,17 @@ def test_cli_exposes_discovery_and_pool(monkeypatch):
     )
     assert calls[0][0] == ("GET", "/api/sources/arxiv/discover")
     assert calls[0][1]["params"] == {"through_date": "2026-10-10", "offset": 100, "page_size": 50}
+    assert calls[0][1]["timeout"] == 660
     assert calls[1][0] == ("PUT", "/api/tasks/task/candidate-pool")
+
+
+def test_cli_arxiv_search_allows_retry_budget(monkeypatch):
+    calls = []
+    monkeypatch.setattr(
+        cli.client, "request", lambda *args, **kwargs: calls.append(kwargs) or {}
+    )
+    cli.source_arxiv_search("cat:cs.RO", max_results=1, ingest=False)
+    assert calls[0]["timeout"] == 660
 
 
 def test_daily_prompt_separates_recall_pool_and_brief():
