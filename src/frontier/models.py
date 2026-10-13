@@ -80,6 +80,41 @@ class Paper(Base, TimestampMixin):
     metadata_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
 
 
+class ResearchGroup(Base, TimestampMixin):
+    """A durable, deduplicated profile for a lab or research team."""
+
+    __tablename__ = "research_groups"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    name: Mapped[str] = mapped_column(String(255), index=True)
+    normalized_name: Mapped[str] = mapped_column(String(255), index=True)
+    institution: Mapped[str | None] = mapped_column(Text)
+    normalized_institution: Mapped[str | None] = mapped_column(String(255), index=True)
+    homepage_url: Mapped[str | None] = mapped_column(Text)
+    aliases: Mapped[list[str]] = mapped_column(JSON, default=list)
+    research_focus: Mapped[list[str]] = mapped_column(JSON, default=list)
+    representative_contributions: Mapped[list[dict[str, Any]]] = mapped_column(JSON, default=list)
+    representative_summary: Mapped[str | None] = mapped_column(Text)
+    evidence_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    confidence: Mapped[str] = mapped_column(String(20), default="low")
+    verification_status: Mapped[str] = mapped_column(String(20), default="candidate", index=True)
+
+
+class ResearchGroupPaper(Base, TimestampMixin):
+    __tablename__ = "research_group_papers"
+    __table_args__ = (
+        UniqueConstraint("group_id", "paper_id", name="uq_research_group_paper"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    group_id: Mapped[str] = mapped_column(ForeignKey("research_groups.id", ondelete="CASCADE"), index=True)
+    paper_id: Mapped[str] = mapped_column(ForeignKey("papers.id", ondelete="CASCADE"), index=True)
+    role: Mapped[str] = mapped_column(String(40), default="author_affiliation")
+    contribution_summary: Mapped[str | None] = mapped_column(Text)
+    evidence_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    is_representative: Mapped[bool] = mapped_column(Boolean, default=False)
+
+
 class PaperVersion(Base, TimestampMixin):
     __tablename__ = "paper_versions"
     __table_args__ = (UniqueConstraint("paper_id", "version", name="uq_paper_version"),)

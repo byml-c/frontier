@@ -54,6 +54,11 @@ from ..schemas import (
     TagCreate,
     TranslationRequest,
 )
+from ..services.abstract_translation import (
+    ABSTRACT_TRANSLATION_STATE_KEY,
+    abstract_translation,
+    queue_paper_abstract_translation,
+)
 from ..services.author_metadata import (
     BIBLIOGRAPHIC_FIELDS,
     BIBLIOGRAPHIC_PROVENANCE_KEY,
@@ -64,6 +69,7 @@ from ..services.author_metadata import (
 )
 from ..services.common import (
     AGENT_BIBLIOGRAPHY_KEY,
+    RESEARCH_GROUP_PROFILE_KEY,
     RESEARCH_GROUP_SUMMARY_KEY,
     compact_search_key,
     log_operation,
@@ -122,6 +128,7 @@ from ..services.podcast_content import (
     commit_paper_narration,
     narration_payload,
 )
+from ..services.research_groups import group_for_paper, serialize_group, upsert_group_from_paper
 from ..services.task_control import ACTIVE_TASK_STATUSES, serialized_task_claim
 from ..services.task_dispatcher import submit_task
 from ..services.translation_provider import stream_translation_prompt
@@ -200,9 +207,33 @@ def _serialize_paper(session: Session, paper: Paper, *, detail: bool = False) ->
     payload["screening_interest_level"] = screening.get("interest_level")
     payload["screening_quality_level"] = screening.get("quality_level")
     payload["screening_feedback"] = screening.get("comment")
-    payload["agent_score_confirmed"] = screening.get("agent_score_confirmed", False)
+    legacy_confirmed = bool(screening.get("agent_score_confirmed", False))
+    payload["agent_quality_confirmed"] = bool(
+        screening.get("agent_quality_confirmed", legacy_confirmed)
+    )
+    payload["agent_interest_confirmed"] = bool(
+        screening.get("agent_interest_confirmed", legacy_confirmed)
+    )
+    payload["agent_score_confirmed"] = (
+        payload["agent_quality_confirmed"] and payload["agent_interest_confirmed"]
+    )
     payload["open_questions"] = metadata.get("open_questions")
     payload["research_group_summary"] = metadata.get(RESEARCH_GROUP_SUMMARY_KEY)
+    group = group_for_paper(session, paper.id)
+    payload["research_group"] = serialize_group(session, group) if group else None
+    translation = abstract_translation(session, paper)
+    translation_state = metadata.get(ABSTRACT_TRANSLATION_STATE_KEY)
+    payload["abstract_translation"] = translation.content if translation else None
+    payload["abstract_translation_status"] = (
+        "ready"
+        if translation
+        else translation_state.get("status", "missing")
+        if isinstance(translation_state, dict)
+        else "missing"
+    )
+    payload["abstract_translation_error"] = (
+        translation_state.get("error") if isinstance(translation_state, dict) else None
+    )
     if not detail:
         payload.pop("full_analysis", None)
         payload.pop("metadata_json", None)
@@ -734,6 +765,8 @@ def update_paper(
                     "personal_comment",
                     "open_questions",
                     RESEARCH_GROUP_SUMMARY_KEY,
+                    RESEARCH_GROUP_PROFILE_KEY,
+                    ABSTRACT_TRANSLATION_STATE_KEY,
                 )
                 if key in current_metadata
             },
@@ -767,6 +800,7 @@ def update_paper(
         }
     if suggested_tags is not None:
         paper.metadata_json = {**(paper.metadata_json or {}), "suggested_tags": suggested_tags}
+    upsert_group_from_paper(session, paper)
     log_operation(
         session,
         actor="agent",
@@ -798,7 +832,18 @@ def update_paper_metadata(
     quality_level = changes.pop("quality_level", None)
     screening_feedback = changes.pop("screening_feedback", None)
     agent_score_confirmed = changes.pop("agent_score_confirmed", None)
+    agent_quality_confirmed = changes.pop("agent_quality_confirmed", None)
+    agent_interest_confirmed = changes.pop("agent_interest_confirmed", None)
     update_agent_score_confirmation = "agent_score_confirmed" in payload.model_fields_set
+    update_agent_quality_confirmation = "agent_quality_confirmed" in payload.model_fields_set
+    update_agent_interest_confirmation = "agent_interest_confirmed" in payload.model_fields_set
+    if update_agent_score_confirmation:
+        if not update_agent_quality_confirmation:
+            agent_quality_confirmed = agent_score_confirmed
+            update_agent_quality_confirmation = True
+        if not update_agent_interest_confirmation:
+            agent_interest_confirmed = agent_score_confirmed
+            update_agent_interest_confirmation = True
     original_values = {field: getattr(paper, field) for field in BIBLIOGRAPHIC_FIELDS}
     if "authors" in changes and changes["authors"] is not None:
         changes["authors"] = preserve_author_details_for_unchanged_names(
@@ -824,6 +869,8 @@ def update_paper_metadata(
                     "personal_comment",
                     "open_questions",
                     RESEARCH_GROUP_SUMMARY_KEY,
+                    RESEARCH_GROUP_PROFILE_KEY,
+                    ABSTRACT_TRANSLATION_STATE_KEY,
                 )
                 if key in current_metadata
             },
@@ -865,9 +912,14 @@ def update_paper_metadata(
         or quality_level is not None
         or screening_feedback is not None
         or update_agent_score_confirmation
+        or update_agent_quality_confirmation
+        or update_agent_interest_confirmation
     ):
         if paper.status != "completed":
             current_screening = dict(paper.screening_feedback or {})
+            legacy_confirmed = bool(current_screening.get("agent_score_confirmed", False))
+            current_screening.setdefault("agent_quality_confirmed", legacy_confirmed)
+            current_screening.setdefault("agent_interest_confirmed", legacy_confirmed)
             if interest_level is not None:
                 current_screening["interest_level"] = interest_level
             if quality_level is not None:
@@ -876,6 +928,14 @@ def update_paper_metadata(
                 current_screening["comment"] = screening_feedback.strip() or None
             if update_agent_score_confirmation:
                 current_screening["agent_score_confirmed"] = bool(agent_score_confirmed)
+            if update_agent_quality_confirmation:
+                current_screening["agent_quality_confirmed"] = bool(agent_quality_confirmed)
+            if update_agent_interest_confirmation:
+                current_screening["agent_interest_confirmed"] = bool(agent_interest_confirmed)
+            current_screening["agent_score_confirmed"] = bool(
+                current_screening.get("agent_quality_confirmed", False)
+                and current_screening.get("agent_interest_confirmed", False)
+            )
             current_screening["updated_at"] = datetime.now(UTC).isoformat()
             current_screening["revision"] = int(current_screening.get("revision") or 0) + 1
             current_screening["evidence_key"] = (
@@ -883,12 +943,28 @@ def update_paper_metadata(
             )
             paper.screening_feedback = current_screening
         else:
-            if screening_feedback is not None or update_agent_score_confirmation:
+            if (
+                screening_feedback is not None
+                or update_agent_score_confirmation
+                or update_agent_quality_confirmation
+                or update_agent_interest_confirmation
+            ):
                 current_screening = dict(paper.screening_feedback or {})
+                legacy_confirmed = bool(current_screening.get("agent_score_confirmed", False))
+                current_screening.setdefault("agent_quality_confirmed", legacy_confirmed)
+                current_screening.setdefault("agent_interest_confirmed", legacy_confirmed)
                 if screening_feedback is not None:
                     current_screening["comment"] = screening_feedback.strip() or None
                 if update_agent_score_confirmation:
                     current_screening["agent_score_confirmed"] = bool(agent_score_confirmed)
+                if update_agent_quality_confirmation:
+                    current_screening["agent_quality_confirmed"] = bool(agent_quality_confirmed)
+                if update_agent_interest_confirmation:
+                    current_screening["agent_interest_confirmed"] = bool(agent_interest_confirmed)
+                current_screening["agent_score_confirmed"] = bool(
+                    current_screening.get("agent_quality_confirmed", False)
+                    and current_screening.get("agent_interest_confirmed", False)
+                )
                 current_screening["updated_at"] = datetime.now(UTC).isoformat()
                 current_screening["revision"] = int(current_screening.get("revision") or 0) + 1
                 current_screening["evidence_key"] = (
@@ -937,6 +1013,8 @@ def update_paper_metadata(
                 interest_level is not None
                 or quality_level is not None
                 or update_agent_score_confirmation
+                or update_agent_quality_confirmation
+                or update_agent_interest_confirmation
             ),
         },
     )
@@ -956,7 +1034,15 @@ def generate_paper_metadata(
     task, created = queue_paper_metadata_analysis(session, paper)
     if created:
         background_tasks.add_task(submit_task, task.id)
-    return {"id": task.id, "status": task.status, "created": created}
+    translation_task = queue_paper_abstract_translation(session, paper)
+    if translation_task:
+        background_tasks.add_task(submit_task, translation_task.id)
+    return {
+        "id": task.id,
+        "status": task.status,
+        "created": created,
+        "translation_task_id": translation_task.id if translation_task else None,
+    }
 
 
 @router.post("/{paper_id}/ignore")

@@ -266,6 +266,8 @@ def test_daily_prompt_owns_candidate_metadata_and_can_delegate_reading() -> None
     assert "Only `completed` feedback and explicit `ignored` actions are observations" in prompt
     assert "Legacy `is_interested=false` and `is_quality=false`" in prompt
     assert "are storage defaults, not user judgments" in prompt
+    assert "metadata_json.research_group_profile" in prompt
+    assert "representative_contributions" in prompt
 
 
 @pytest.mark.parametrize(

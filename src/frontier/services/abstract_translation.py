@@ -10,6 +10,8 @@ from sqlalchemy.orm import Session
 from ..models import Brief, BriefItem, Paper, TaskRun, TranslationCache
 
 TARGET_LANGUAGE = "简体中文"
+PAPER_ABSTRACT_TRANSLATION_KIND = "paper_abstract_translation"
+ABSTRACT_TRANSLATION_STATE_KEY = "abstract_translation"
 
 
 def abstract_selection_key(
@@ -36,6 +38,49 @@ def abstract_translation(
             == abstract_selection_key(paper.id, paper.abstract, target_language)
         )
     )
+
+
+def queue_paper_abstract_translation(
+    session: Session, paper: Paper, *, force: bool = False
+) -> TaskRun | None:
+    """Queue a translation for one paper, independent of brief membership.
+
+    Manual additions can be generated before a brief is published.  The historical
+    batch endpoint only knows about brief items, so keep a small paper-scoped task
+    for this workflow and reuse the same content-addressed translation cache.
+    """
+    if not paper.abstract:
+        return None
+    if not force and abstract_translation(session, paper):
+        return None
+    metadata = dict(paper.metadata_json or {})
+    state = metadata.get(ABSTRACT_TRANSLATION_STATE_KEY)
+    if isinstance(state, dict) and state.get("status") in {"queued", "processing"}:
+        task_id = state.get("task_id")
+        active = session.get(TaskRun, task_id) if isinstance(task_id, str) else None
+        if active and active.status in {"queued", "running"}:
+            return active
+    task = TaskRun(
+        kind=PAPER_ABSTRACT_TRANSLATION_KIND,
+        payload_json={
+            "paper_id": paper.id,
+            "text": paper.abstract,
+            "target_language": TARGET_LANGUAGE,
+            "selection_key": abstract_selection_key(paper.id, paper.abstract),
+        },
+    )
+    session.add(task)
+    session.flush()
+    paper.metadata_json = {
+        **metadata,
+        ABSTRACT_TRANSLATION_STATE_KEY: {
+            "status": "queued",
+            "task_id": task.id,
+            "error": None,
+        },
+    }
+    session.commit()
+    return task
 
 
 def queue_brief_abstract_translations(

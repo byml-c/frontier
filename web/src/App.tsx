@@ -7,6 +7,7 @@ import { ArchivePage } from "./pages/ArchivePage";
 import { BriefPage } from "./pages/BriefPage";
 import { LibraryPage } from "./pages/LibraryPage";
 import { MemoryPage } from "./pages/MemoryPage";
+import { ResearchGroupsPage } from "./pages/ResearchGroupsPage";
 import { SettingsPage } from "./pages/SettingsPage";
 import { TasksPage } from "./pages/TasksPage";
 import { DailyPage } from "./pages/DailyPage";
@@ -28,6 +29,7 @@ export default function App() {
         <Route path="/paper/:paperId" element={<Suspense fallback={<Loading label="正在加载阅读器" />}><ReaderPage /></Suspense>} />
         <Route path="/paper/:paperId/architecture" element={<Suspense fallback={<Loading label="正在加载架构" />}><ReaderPage /></Suspense>} />
         <Route path="/memory" element={<MemoryPage />} />
+        <Route path="/research-groups" element={<ResearchGroupsPage />} />
         <Route path="/tasks" element={<TasksPage />} />
         <Route path="/settings" element={<SettingsPage />} />
         <Route path="*" element={<Navigate to="/" replace />} />

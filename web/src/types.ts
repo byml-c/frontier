@@ -51,6 +51,7 @@ export type Paper = {
   corresponding_author?: string | null;
   primary_affiliation?: string | null;
   research_group_summary?: string | null;
+  research_group?: ResearchGroup | null;
   source: string;
   source_url?: string | null;
   pdf_url?: string | null;
@@ -77,6 +78,8 @@ export type Paper = {
   screening_quality_level?: QualityLevel | null;
   screening_feedback?: string | null;
   agent_score_confirmed?: boolean;
+  agent_quality_confirmed?: boolean;
+  agent_interest_confirmed?: boolean;
   abstract_translation?: string | null;
   abstract_translation_status?: "ready" | "queued" | "failed" | "missing" | string | null;
   abstract_translation_error?: string | null;
@@ -92,6 +95,24 @@ export type Paper = {
   nodes: NodeRef[];
   has_pdf?: boolean;
   pdf_version?: string | null;
+};
+
+export type ResearchGroup = {
+  id: string;
+  name: string;
+  institution?: string | null;
+  homepage_url?: string | null;
+  aliases: string[];
+  research_focus: string[];
+  representative_contributions: Array<{ topic?: string; summary?: string; evidence?: string }>;
+  representative_summary?: string | null;
+  confidence: string;
+  verification_status: string;
+  paper_count: number;
+  representative_paper_count: number;
+  updated_at?: string | null;
+  papers?: Array<{ id: string; title?: string | null; published_at?: string | null; contribution_summary?: string | null; is_representative: boolean; role: string }>;
+  evidence?: Record<string, unknown>;
 };
 
 export type BriefItem = {

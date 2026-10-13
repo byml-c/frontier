@@ -96,7 +96,7 @@ def _fail_undispatched_task(task_id: str, *, error: str) -> None:
     from sqlalchemy import update
 
     from ..database import SessionLocal
-    from ..models import TaskRun, utcnow
+    from ..models import Paper, TaskRun, utcnow
     from .architecture_scene import mark_architecture_generation_failed
     from .manual_recommendations import set_manual_analysis_state
     from .podcast_generation import mark_podcast_task_failed
@@ -117,6 +117,21 @@ def _fail_undispatched_task(task_id: str, *, error: str) -> None:
             mark_architecture_generation_failed(session, task_id, error)
         elif task.kind in {"manual_paper_analysis", "paper_metadata_analysis"}:
             set_manual_analysis_state(session, task, "failed", error=error)
+            session.commit()
+        elif task.kind == "paper_abstract_translation":
+            from .abstract_translation import ABSTRACT_TRANSLATION_STATE_KEY
+
+            paper_id = (task.payload_json or {}).get("paper_id")
+            paper = session.get(Paper, paper_id) if isinstance(paper_id, str) else None
+            if paper is not None:
+                metadata = dict(paper.metadata_json or {})
+                metadata[ABSTRACT_TRANSLATION_STATE_KEY] = {
+                    **dict(metadata.get(ABSTRACT_TRANSLATION_STATE_KEY) or {}),
+                    "status": "failed",
+                    "task_id": task.id,
+                    "error": error,
+                }
+                paper.metadata_json = metadata
             session.commit()
         elif task.kind == "podcast_episode_render":
             mark_podcast_task_failed(session, task, error)

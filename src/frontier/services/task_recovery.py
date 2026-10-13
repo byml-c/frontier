@@ -7,7 +7,7 @@ from datetime import datetime
 from sqlalchemy import and_, or_, select
 from sqlalchemy.orm import Session
 
-from ..models import ArchitectureDocument, Brief, Message, TaskRun, utcnow
+from ..models import ArchitectureDocument, Brief, Message, Paper, TaskRun, utcnow
 from .architecture_scene import release_agent_lock_for_task
 from .common import log_operation
 from .manual_recommendations import set_manual_analysis_state
@@ -194,6 +194,18 @@ def recover_interrupted_tasks(session: Session, started_before: datetime) -> int
 
         if task.kind in {"manual_paper_analysis", "paper_metadata_analysis"}:
             set_manual_analysis_state(session, task, "failed", error=error)
+        elif task.kind == "paper_abstract_translation":
+            paper_id = (task.payload_json or {}).get("paper_id")
+            paper = session.get(Paper, paper_id) if isinstance(paper_id, str) else None
+            if paper is not None:
+                metadata = dict(paper.metadata_json or {})
+                metadata["abstract_translation"] = {
+                    **dict(metadata.get("abstract_translation") or {}),
+                    "status": "failed",
+                    "task_id": task.id,
+                    "error": error,
+                }
+                paper.metadata_json = metadata
         if task.kind == "architecture_generation":
             _recover_architecture(session, task, error)
         elif task.kind == "podcast_episode_render":

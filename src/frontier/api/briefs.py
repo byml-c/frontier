@@ -161,8 +161,29 @@ def _paper_snapshot(session: Session, paper: Paper) -> dict:
         "screening_interest_level": (paper.screening_feedback or {}).get("interest_level"),
         "screening_feedback": (paper.screening_feedback or {}).get("comment"),
         "agent_score_confirmed": (paper.screening_feedback or {}).get("agent_score_confirmed", False),
+        "agent_quality_confirmed": (paper.screening_feedback or {}).get(
+            "agent_quality_confirmed",
+            (paper.screening_feedback or {}).get("agent_score_confirmed", False),
+        ),
+        "agent_interest_confirmed": (paper.screening_feedback or {}).get(
+            "agent_interest_confirmed",
+            (paper.screening_feedback or {}).get("agent_score_confirmed", False),
+        ),
         "abstract_translation": translation.content if translation else None,
-        "abstract_translation_status": "ready" if translation else "missing",
+        "abstract_translation_status": (
+            "ready"
+            if translation
+            else (
+                (metadata.get("abstract_translation") or {}).get("status", "missing")
+                if isinstance(metadata.get("abstract_translation"), dict)
+                else "missing"
+            )
+        ),
+        "abstract_translation_error": (
+            (metadata.get("abstract_translation") or {}).get("error")
+            if isinstance(metadata.get("abstract_translation"), dict)
+            else None
+        ),
     }
 
 
@@ -222,6 +243,14 @@ def _serialize_brief(session: Session, brief: Brief, *, detail: bool = True) -> 
                     "agent_score_confirmed": (paper.screening_feedback or {}).get(
                         "agent_score_confirmed", False
                     ),
+                    "agent_quality_confirmed": (paper.screening_feedback or {}).get(
+                        "agent_quality_confirmed",
+                        (paper.screening_feedback or {}).get("agent_score_confirmed", False),
+                    ),
+                    "agent_interest_confirmed": (paper.screening_feedback or {}).get(
+                        "agent_interest_confirmed",
+                        (paper.screening_feedback or {}).get("agent_score_confirmed", False),
+                    ),
                     # 阅读结论属于论文的后续状态，不应被冻结在发布时的简报快照中。
                     "completion_summary": brief_completion_summary(paper),
                     "completion_summary_structured": completion_summary_structured(
@@ -234,14 +263,30 @@ def _serialize_brief(session: Session, brief: Brief, *, detail: bool = True) -> 
                             "failed"
                             if paper.id in translation_errors
                             else (brief.snapshot_json or {}).get(
-                                "abstract_translation_status", "missing"
+                                "abstract_translation_status",
+                                (
+                                    ((paper.metadata_json or {}).get("abstract_translation") or {})
+                                    .get("status", "missing")
+                                    if isinstance(
+                                        (paper.metadata_json or {}).get("abstract_translation"),
+                                        dict,
+                                    )
+                                    else "missing"
+                                ),
                             )
                         )
                     ),
                     "abstract_translation": (
                         translations[paper.id].content if translations[paper.id] else None
                     ),
-                    "abstract_translation_error": translation_errors.get(paper.id),
+                    "abstract_translation_error": translation_errors.get(paper.id)
+                    or (
+                        ((paper.metadata_json or {}).get("abstract_translation") or {}).get("error")
+                        if isinstance(
+                            (paper.metadata_json or {}).get("abstract_translation"), dict
+                        )
+                        else None
+                    ),
                 }
             ),
             "current_status": paper.status,

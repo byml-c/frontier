@@ -25,6 +25,7 @@ BROAD_DISCOVERY_WINDOW_MIGRATION_ACTION = "setting.discovery.window_prefilter.v1
 DAILY_TIME_MIGRATION_ACTION = "setting.default.daily_time.0905.v1"
 AGENT_BIBLIOGRAPHY_KEY = "agent_bibliography"
 RESEARCH_GROUP_SUMMARY_KEY = "research_group_summary"
+RESEARCH_GROUP_PROFILE_KEY = "research_group_profile"
 BROAD_DISCOVERY_DOMAINS = ["3D vision", "embodied intelligence", "AI agents"]
 DISCOVERY_CATEGORIES = ["cs.CV", "cs.RO", "cs.AI", "cs.LG", "cs.CL", "cs.MA", "cs.HC", "cs.SE"]
 

@@ -32,7 +32,11 @@ from .models import (
     TranslationCache,
     utcnow,
 )
-from .services.abstract_translation import TARGET_LANGUAGE
+from .services.abstract_translation import (
+    ABSTRACT_TRANSLATION_STATE_KEY,
+    PAPER_ABSTRACT_TRANSLATION_KIND,
+    TARGET_LANGUAGE,
+)
 from .services.agent_runtime import (
     AgentSlotCancelled,
     AgentSlotTimeout,
@@ -355,6 +359,9 @@ insufficient, inspect only the first PDF/HTML page for this extraction. Do not i
 author from seniority or author position. Save `first_author`, `primary_affiliation`, and
 `corresponding_author` with `frontier paper update`, plus a concise Simplified Chinese
 `research_group_summary` describing the institution and the core lab/team's completed research focus.
+Also include `metadata_json.research_group_profile` with the group's canonical `name`, `institution`,
+`homepage_url`, `research_focus`, `representative_contributions`, `paper_contribution`,
+`is_representative`, `confidence`, and `evidence`; this is merged into the durable group index.
 If a field cannot be verified, leave it null and say so in the summary. Include
 `metadata_json.agent_bibliography` with `source: "agent"`, a `confidence` of `high`, `medium`, or
 `low`, and a short `evidence` note. A user-edited bibliographic field is protected and must not be
@@ -393,8 +400,21 @@ Process paper {paper_id} {destination}. Load its current metadata, download the 
 making a recommendation. Use rendered pages when figures, tables, or layout carry material evidence.
 This is a stateless catalog/brief analysis run, not the paper's long-lived reading Agent. Do not
 create or resume a paper Conversation and do not infer the user's attitude from unrelated history.
-Verify and update author names, first author, corresponding author, primary affiliation, source and
-publication metadata when the evidence supports them; never invent missing roles or affiliations.
+Do not stop after writing the summary. Complete the bibliography block in the same run: inspect the
+first PDF/HTML page (including superscript affiliation markers and correspondence footnotes), then
+verify and update the ordered author list, `first_author`, `primary_affiliation`, and
+`corresponding_author`. Also write a concise Simplified-Chinese `research_group_summary` describing
+the first institution and the main completed research focus of its lab or team. arXiv abstract
+metadata is authoritative for author order but usually does not contain affiliations or a reliable
+corresponding-author mapping; never infer a role from author position or seniority. If the source
+does not explicitly support a field, leave it null and state that evidence is unavailable.
+In the same `frontier paper update`, include `metadata_json.research_group_profile` with this
+shape: `name`, `institution`, `homepage_url`, `aliases`, `research_focus`,
+`representative_contributions`, `paper_contribution`, `is_representative`, `confidence`, and
+`evidence`. Keep the profile concise and evidence-backed. `research_focus` is a short list of
+durable directions; `representative_contributions` is a short list of the group's notable completed
+work themes, not invented paper titles. This profile is merged into the shared research-group index
+and must not overwrite a user-verified group.
 Save a concise Simplified-Chinese one-line summary, an information-dense Agent comment describing
 what the work does and its main highlight, problem, innovation,
 experiment evidence, limitations, open_questions, research score, relevance score, recommendation reason, and
@@ -648,6 +668,91 @@ def _run_abstract_translation_batch_task(task_id: str) -> None:
         session.commit()
 
 
+def _run_paper_abstract_translation_task(task_id: str) -> None:
+    """Translate one paper abstract and persist it in the shared cache."""
+    with SessionLocal() as session:
+        task = session.get(TaskRun, task_id)
+        if not task or task.status != "queued":
+            return
+        task.status = "running"
+        task.started_at = utcnow()
+        payload = dict(task.payload_json or {})
+        paper_id = payload.get("paper_id")
+        paper = session.get(Paper, paper_id) if isinstance(paper_id, str) else None
+        if paper is not None:
+            metadata = dict(paper.metadata_json or {})
+            metadata[ABSTRACT_TRANSLATION_STATE_KEY] = {
+                **dict(metadata.get(ABSTRACT_TRANSLATION_STATE_KEY) or {}),
+                "status": "processing",
+                "task_id": task.id,
+                "error": None,
+            }
+            paper.metadata_json = metadata
+        session.commit()
+    try:
+        text = str(payload.get("text") or "")
+        content = "".join(
+            stream_translation_prompt(
+                f"Translate this academic abstract into {payload.get('target_language') or TARGET_LANGUAGE}. Return only the translation, preserving technical terms.\n\n{text}",
+                timeout_seconds=settings.translation_timeout_seconds,
+            )
+        )
+        with SessionLocal() as session:
+            existing = session.scalar(
+                select(TranslationCache).where(
+                    TranslationCache.selection_key == payload.get("selection_key")
+                )
+            )
+            if existing is None:
+                session.add(
+                    TranslationCache(
+                        selection_key=str(payload["selection_key"]),
+                        paper_id=str(payload["paper_id"]),
+                        page_number=0,
+                        selected_text=text,
+                        target_language=str(payload.get("target_language") or TARGET_LANGUAGE),
+                        content=content,
+                        position_json={"kind": "abstract"},
+                    )
+                )
+            else:
+                existing.content = content
+            paper = session.get(Paper, payload.get("paper_id"))
+            if paper is not None:
+                metadata = dict(paper.metadata_json or {})
+                metadata[ABSTRACT_TRANSLATION_STATE_KEY] = {
+                    **dict(metadata.get(ABSTRACT_TRANSLATION_STATE_KEY) or {}),
+                    "status": "ready",
+                    "task_id": task.id,
+                    "error": None,
+                }
+                paper.metadata_json = metadata
+            task = session.get(TaskRun, task_id)
+            if task:
+                task.status = "completed"
+                task.result_json = {"translated": 1}
+                task.finished_at = utcnow()
+            session.commit()
+    except Exception as exc:  # noqa: BLE001
+        with SessionLocal() as session:
+            task = session.get(TaskRun, task_id)
+            paper = session.get(Paper, (task.payload_json or {}).get("paper_id")) if task else None
+            if paper is not None:
+                metadata = dict(paper.metadata_json or {})
+                metadata[ABSTRACT_TRANSLATION_STATE_KEY] = {
+                    **dict(metadata.get(ABSTRACT_TRANSLATION_STATE_KEY) or {}),
+                    "status": "failed",
+                    "task_id": task_id,
+                    "error": str(exc),
+                }
+                paper.metadata_json = metadata
+            if task and task.status != "cancelled":
+                task.status = "failed"
+                task.error = str(exc)
+                task.finished_at = utcnow()
+            session.commit()
+
+
 def _graph_feedback_is_active(session: Session, task: TaskRun) -> bool:
     context = (task.payload_json or {}).get("context") or {}
     evidence_key = context.get("feedback_evidence_key")
@@ -703,7 +808,9 @@ def run_task(task_id: str) -> None:
         task = session.get(TaskRun, task_id)
         if not task or task.status != "queued":
             return
-        is_translation = bool(task and task.kind in {"translate", "abstract_translation_batch"})
+        is_translation = bool(
+            task and task.kind in {"translate", "abstract_translation_batch", PAPER_ABSTRACT_TRANSLATION_KIND}
+        )
         is_podcast_render = bool(task and task.kind == "podcast_episode_render")
         uses_app_server = bool(task and (task.payload_json or {}).get("conversation_id"))
         remaining_seconds = _remaining_task_seconds(task, settings.agent_task_timeout_seconds)
@@ -718,6 +825,9 @@ def run_task(task_id: str) -> None:
     if is_translation and task and task.kind == "abstract_translation_batch":
         _run_abstract_translation_batch_task(task_id)
         return
+        if is_translation and task and task.kind == PAPER_ABSTRACT_TRANSLATION_KIND:
+            _run_paper_abstract_translation_task(task_id)
+            return
     if is_translation:
         _run_translation_task(task_id)
         return

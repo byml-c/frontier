@@ -94,6 +94,7 @@ function EvaluationMetric<Value extends string>({
   score,
   title,
   value,
+  agentConfirmed,
 }: {
   ariaLabel: string;
   disabled: boolean;
@@ -101,6 +102,7 @@ function EvaluationMetric<Value extends string>({
   options: readonly { value: Value; label: string }[];
   score?: number | null;
   agentScoreConfirmed: boolean;
+  agentConfirmed?: boolean;
   onAgentScoreConfirm?: () => void;
   title: string;
   value: Value | false;
@@ -109,7 +111,12 @@ function EvaluationMetric<Value extends string>({
     <Box sx={{ p: 1.25, border: 1, borderColor: "divider", borderRadius: 1.5 }}>
       <Typography variant="subtitle2" fontWeight={750} sx={{ mb: .75 }}>{title}</Typography>
       <Stack direction="row" alignItems="center" spacing={.75}>
-        <AgentScore value={score} confirmed={agentScoreConfirmed} disabled={disabled} onConfirm={onAgentScoreConfirm} />
+        <AgentScore
+          value={score}
+          confirmed={agentConfirmed ?? agentScoreConfirmed}
+          disabled={disabled}
+          onConfirm={onAgentScoreConfirm}
+        />
         <Stack direction="row" alignItems="stretch" sx={{ flex: 1, minWidth: 0 }}>
           <Box sx={{ alignItems: "center", bgcolor: "action.hover", border: 1, borderColor: "divider", borderRadius: "8px 0 0 8px", borderRight: 0, display: "flex", flexShrink: 0, px: .75 }}>
             <Typography variant="caption" color="text.secondary">我的</Typography>
@@ -136,7 +143,11 @@ export function PaperEvaluationToggleButtons({
   onQualityChange,
   onInterestChange,
   agentScoreConfirmed = false,
+  agentQualityConfirmed,
+  agentInterestConfirmed,
   onAgentScoreConfirm,
+  onQualityAgentScoreConfirm,
+  onInterestAgentScoreConfirm,
   disabled = false,
   qualityTitle = "研究价值",
   interestTitle = "个人相关性",
@@ -148,7 +159,11 @@ export function PaperEvaluationToggleButtons({
   onQualityChange: (value: QualityLevel) => void;
   onInterestChange: (value: InterestLevel) => void;
   agentScoreConfirmed?: boolean;
+  agentQualityConfirmed?: boolean;
+  agentInterestConfirmed?: boolean;
   onAgentScoreConfirm?: () => void;
+  onQualityAgentScoreConfirm?: () => void;
+  onInterestAgentScoreConfirm?: () => void;
   disabled?: boolean;
   qualityTitle?: string;
   interestTitle?: string;
@@ -164,7 +179,8 @@ export function PaperEvaluationToggleButtons({
           options={QUALITY_OPTIONS}
           disabled={disabled}
           agentScoreConfirmed={agentScoreConfirmed}
-          onAgentScoreConfirm={onAgentScoreConfirm}
+          agentConfirmed={agentQualityConfirmed}
+          onAgentScoreConfirm={onQualityAgentScoreConfirm ?? onAgentScoreConfirm}
           onChange={onQualityChange}
         />
       </Grid>
@@ -177,7 +193,8 @@ export function PaperEvaluationToggleButtons({
           options={INTEREST_OPTIONS}
           disabled={disabled}
           agentScoreConfirmed={agentScoreConfirmed}
-          onAgentScoreConfirm={onAgentScoreConfirm}
+          agentConfirmed={agentInterestConfirmed}
+          onAgentScoreConfirm={onInterestAgentScoreConfirm ?? onAgentScoreConfirm}
           onChange={onInterestChange}
         />
       </Grid>

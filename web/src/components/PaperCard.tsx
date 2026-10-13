@@ -67,14 +67,20 @@ export function PaperCard({
   const [interest, setInterest] = useState<InterestLevel | false>(
     paper.interest_level || paper.screening_interest_level || false,
   );
-  const [agentScoreConfirmed, setAgentScoreConfirmed] = useState(Boolean(paper.agent_score_confirmed));
+  const [agentQualityConfirmed, setAgentQualityConfirmed] = useState(
+    Boolean(paper.agent_quality_confirmed ?? paper.agent_score_confirmed),
+  );
+  const [agentInterestConfirmed, setAgentInterestConfirmed] = useState(
+    Boolean(paper.agent_interest_confirmed ?? paper.agent_score_confirmed),
+  );
   const saveScreening = useMutation({
-    mutationFn: (body: { quality_level?: QualityLevel; interest_level?: InterestLevel; screening_feedback?: string; agent_score_confirmed?: boolean }) =>
+    mutationFn: (body: { quality_level?: QualityLevel; interest_level?: InterestLevel; screening_feedback?: string; agent_quality_confirmed?: boolean; agent_interest_confirmed?: boolean }) =>
       api<Paper>(`/api/papers/${paper.id}/metadata`, { ...jsonBody(body), method: "PATCH" }),
     onError: () => {
       setQuality(paper.quality_level || paper.screening_quality_level || false);
       setInterest(paper.interest_level || paper.screening_interest_level || false);
-      setAgentScoreConfirmed(Boolean(paper.agent_score_confirmed));
+      setAgentQualityConfirmed(Boolean(paper.agent_quality_confirmed ?? paper.agent_score_confirmed));
+      setAgentInterestConfirmed(Boolean(paper.agent_interest_confirmed ?? paper.agent_score_confirmed));
     },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["brief"] });
@@ -98,10 +104,13 @@ export function PaperCard({
       ...(next.interest ? { interest_level: next.interest } : {}),
     });
   };
-  const updateAgentScoreConfirmation = () => {
-    const next = !agentScoreConfirmed;
-    setAgentScoreConfirmed(next);
-    saveScreening.mutate({ agent_score_confirmed: next });
+  const updateAgentScoreConfirmation = (metric: "quality" | "interest") => {
+    const next = metric === "quality" ? !agentQualityConfirmed : !agentInterestConfirmed;
+    if (metric === "quality") setAgentQualityConfirmed(next);
+    else setAgentInterestConfirmed(next);
+    saveScreening.mutate(metric === "quality"
+      ? { agent_quality_confirmed: next }
+      : { agent_interest_confirmed: next });
   };
   const translated = paper.abstract_translation;
   const abstract = language === "zh"
@@ -162,8 +171,10 @@ export function PaperCard({
               qualityTitle="质量"
               interestTitle="相关度"
               disabled={saveScreening.isPending}
-              agentScoreConfirmed={agentScoreConfirmed}
-              onAgentScoreConfirm={updateAgentScoreConfirmation}
+              agentQualityConfirmed={agentQualityConfirmed}
+              agentInterestConfirmed={agentInterestConfirmed}
+              onQualityAgentScoreConfirm={() => updateAgentScoreConfirmation("quality")}
+              onInterestAgentScoreConfirm={() => updateAgentScoreConfirmation("interest")}
               onQualityChange={(value) => updateMetric({ quality: value })}
               onInterestChange={(value) => updateMetric({ interest: value })}
             />

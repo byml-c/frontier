@@ -1776,6 +1776,43 @@ def test_metadata_generation_can_be_requested_without_adding_a_brief_item(
     assert paper["id"] not in after_ids
 
 
+def test_agent_score_confirmations_are_independent(client: TestClient) -> None:
+    paper = create_paper(client, "Independent Agent score confirmations")
+    quality = client.patch(
+        f"/api/papers/{paper['id']}/metadata",
+        json={"agent_quality_confirmed": True},
+    )
+    assert quality.status_code == 200, quality.text
+    body = quality.json()
+    assert body["agent_quality_confirmed"] is True
+    assert body["agent_interest_confirmed"] is False
+    assert body["agent_score_confirmed"] is False
+
+    interest = client.patch(
+        f"/api/papers/{paper['id']}/metadata",
+        json={"agent_interest_confirmed": True},
+    )
+    assert interest.status_code == 200, interest.text
+    body = interest.json()
+    assert body["agent_quality_confirmed"] is True
+    assert body["agent_interest_confirmed"] is True
+    assert body["agent_score_confirmed"] is True
+
+
+def test_metadata_generation_queues_single_paper_abstract_translation(
+    client: TestClient, monkeypatch
+) -> None:
+    monkeypatch.setattr("frontier.api.papers.settings.enable_codex_runs", True)
+    monkeypatch.setattr("frontier.api.papers.submit_task", lambda _task_id: True)
+    paper = create_paper(client, "Metadata generation with abstract translation")
+    requested = client.post(f"/api/papers/{paper['id']}/metadata/generate")
+    assert requested.status_code == 200, requested.text
+    translation_task_id = requested.json()["translation_task_id"]
+    assert translation_task_id
+    detail = client.get(f"/api/papers/{paper['id']}").json()
+    assert detail["abstract_translation_status"] == "queued"
+
+
 def test_confirm_feedback_preserves_metadata_tags_when_tag_ids_are_omitted(
     client: TestClient,
 ) -> None:

@@ -6,6 +6,7 @@ import ExpandMoreRounded from "@mui/icons-material/ExpandMoreRounded";
 import FiberManualRecordRounded from "@mui/icons-material/FiberManualRecordRounded";
 import MenuRounded from "@mui/icons-material/MenuRounded";
 import PsychologyRounded from "@mui/icons-material/PsychologyRounded";
+import GroupsRounded from "@mui/icons-material/GroupsRounded";
 import SettingsRounded from "@mui/icons-material/SettingsRounded";
 import StorageRounded from "@mui/icons-material/StorageRounded";
 import TaskAltRounded from "@mui/icons-material/TaskAltRounded";
@@ -34,6 +35,7 @@ const navItems: NavItem[] = [
     { to: "/library?view=collection", label: "积累库", active: (path, search) => path === "/library" && new URLSearchParams(search).get("view") === "collection" },
   ] },
   { to: "/memory", label: "记忆", icon: StorageRounded },
+  { to: "/research-groups", label: "课题组", icon: GroupsRounded },
   { to: "/tasks", label: "任务", icon: TaskAltRounded, children: [
     { to: "/tasks?view=tasks", label: "Agent 任务", active: (path, search) => path === "/tasks" && new URLSearchParams(search).get("view") !== "logs" },
     { to: "/tasks?view=logs", label: "操作记录", active: (path, search) => path === "/tasks" && new URLSearchParams(search).get("view") === "logs" },
@@ -48,6 +50,7 @@ function routeHeader(pathname: string): PageHeaderContent | null {
   if (pathname === "/library") return { title: "论文库" };
   if (pathname.startsWith("/paper/")) return { title: "论文阅读" };
   if (pathname === "/memory") return { title: "研究记忆" };
+  if (pathname === "/research-groups") return { title: "课题组" };
   if (pathname === "/tasks") return { title: "任务中心" };
   if (pathname === "/settings") return { title: "运行设置" };
   return null;

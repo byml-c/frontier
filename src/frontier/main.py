@@ -20,6 +20,7 @@ from .api import (
     interests,
     papers,
     podcasts,
+    research_groups,
     system,
 )
 from .auth import request_is_internal, request_is_trusted
@@ -136,6 +137,7 @@ app.include_router(architectures.router)
 app.include_router(graph.router)
 app.include_router(briefs.router)
 app.include_router(podcasts.router)
+app.include_router(research_groups.router)
 app.include_router(interests.router)
 app.include_router(conversations.router)
 

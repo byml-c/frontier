@@ -126,10 +126,35 @@ class PaperMetadataUpdate(BaseModel):
     quality_level: Literal["poor", "below_average", "normal", "good", "excellent"] | None = None
     screening_feedback: str | None = Field(default=None, max_length=2000)
     agent_score_confirmed: bool | None = None
+    agent_quality_confirmed: bool | None = None
+    agent_interest_confirmed: bool | None = None
     completion_summary_structured: CompletionSummaryStructured | None = None
     metadata_json: dict[str, Any] | None = None
     tag_ids: list[str] | None = None
     new_tags: list[str] = Field(default_factory=list)
+
+
+class ResearchGroupCreate(BaseModel):
+    name: str = Field(min_length=1, max_length=255)
+    institution: str = Field(min_length=1, max_length=500)
+    homepage_url: str | None = None
+    aliases: list[str] = Field(default_factory=list)
+    research_focus: list[str] = Field(default_factory=list)
+    representative_contributions: list[dict[str, Any]] = Field(default_factory=list)
+    representative_summary: str | None = None
+    confidence: Literal["high", "medium", "low"] = "medium"
+
+
+class ResearchGroupUpdate(BaseModel):
+    name: str | None = Field(default=None, min_length=1, max_length=255)
+    institution: str | None = Field(default=None, min_length=1, max_length=500)
+    homepage_url: str | None = None
+    aliases: list[str] | None = None
+    research_focus: list[str] | None = None
+    representative_contributions: list[dict[str, Any]] | None = None
+    representative_summary: str | None = None
+    confidence: Literal["high", "medium", "low"] | None = None
+    verification_status: Literal["candidate", "verified", "archived"] | None = None
 
 
 class IgnorePaper(BaseModel):
