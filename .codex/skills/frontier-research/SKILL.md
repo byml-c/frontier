@@ -41,7 +41,8 @@ The `daily_brief` run is the root Agent for the whole daily ingestion workflow. 
    profile with evidence-key citations, then reload `interest context` once before creating the
    brief. It is a rebuildable cache, not a second owner of paper facts.
 2. Read `setting list`. Use `source arxiv-discover --date YYYY-MM-DD --offset 0 --page-size 100`
-   once for category/date retrieval. The Server scans up to 300 raw records over 3 days, deduplicates
+   once for category/date retrieval. The Server scans up to 300 raw records over 3 days, expanding
+   to 7 days from Monday through Wednesday to cover announcement delays, then deduplicates
    against ALL library papers and within the batch, then returns up to 120 coarse-filtered new papers.
    Pagination is internal; do not request more batches or library papers to fill a numerical target.
    This command never ingests papers. Retry failed discovery with the same date; report scan_capped

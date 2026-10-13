@@ -8,7 +8,7 @@ from apscheduler.triggers.cron import CronTrigger
 from .config import settings
 from .database import SessionLocal
 from .services.backup import create_local_git_backup
-from .services.common import get_setting
+from .services.common import get_daily_time
 from .services.research_day import current_research_date
 from .services.task_control import get_or_create_daily_task
 from .services.task_dispatcher import submit_task
@@ -32,8 +32,7 @@ def scheduled_daily() -> None:
 
 def configure_jobs() -> None:
     with SessionLocal() as session:
-        hour = int(get_setting(session, "daily_hour", 5))
-        minute = int(get_setting(session, "daily_minute", 0))
+        hour, minute = get_daily_time(session)
     scheduler.add_job(
         scheduled_daily,
         CronTrigger(hour=hour, minute=minute, timezone=ZoneInfo(settings.timezone)),

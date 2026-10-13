@@ -10,6 +10,7 @@ from ..models import Paper
 from .common import (
     BROAD_DISCOVERY_DOMAINS,
     DISCOVERY_CATEGORIES,
+    DISCOVERY_FALLBACK_LOOKBACK_DAYS,
     get_setting,
     log_operation,
     normalize_title,
@@ -39,7 +40,9 @@ DOMAIN_PATTERNS = {
     ),
 }
 LLM_CONTEXT = re.compile(r"\b(?:llms?|language models?|foundation models?)\b", re.IGNORECASE)
-AGENT_ACTIVITY = re.compile(r"\b(?:planning|reasoning|memory|tools?|workflow|autonomous)\b", re.IGNORECASE)
+AGENT_ACTIVITY = re.compile(
+    r"\b(?:planning|reasoning|memory|tools?|workflow|autonomous)\b", re.IGNORECASE
+)
 
 
 def coarse_domain_match(
@@ -112,32 +115,45 @@ def discover_arxiv_page(
     prefilter_limit = int(get_setting(session, "discovery_prefilter_limit", 120))
     if offset < 0 or offset >= scan_limit or not 1 <= page_size <= 100:
         raise ValueError("offset must be below discovery_scan_limit; page_size must be 1–100")
-    since = through_date - timedelta(days=days - 1)
-    query = (
-        "(" + " OR ".join(f"cat:{category}" for category in categories) + ")"
-        f" AND submittedDate:[{since:%Y%m%d}0000 TO {through_date:%Y%m%d}2359]"
-    )
-    raw_items = []
-    next_raw_offset = offset
-    total: int | None = None
-    scan_end = scan_limit
-    while next_raw_offset < scan_end:
-        page = search_arxiv_page(
-            query, start=next_raw_offset, max_results=min(page_size, scan_end - next_raw_offset)
+
+    def fetch_window(window_days: int) -> tuple[list, int | None, str]:
+        since = through_date - timedelta(days=window_days - 1)
+        query = (
+            "(" + " OR ".join(f"cat:{category}" for category in categories) + ")"
+            f" AND submittedDate:[{since:%Y%m%d}0000 TO {through_date:%Y%m%d}2359]"
         )
-        reported_total = page["total_results"]
-        if reported_total is None:
-            raise ValueError(
-                "arXiv omitted totalResults; coverage cannot be verified, retry discovery"
+        raw_items = []
+        next_raw_offset = offset
+        total: int | None = None
+        scan_end = scan_limit
+        while next_raw_offset < scan_end:
+            page = search_arxiv_page(
+                query, start=next_raw_offset, max_results=min(page_size, scan_end - next_raw_offset)
             )
-        total = reported_total
-        scan_end = min(total, scan_limit)
-        if not page["items"] and next_raw_offset < scan_end:
-            raise ValueError(f"Empty arXiv page at offset {next_raw_offset}; retry discovery")
-        raw_items.extend(page["items"])
-        next_raw_offset += len(page["items"])
-        if not page["items"]:
-            break
+            reported_total = page["total_results"]
+            if reported_total is None:
+                raise ValueError(
+                    "arXiv omitted totalResults; coverage cannot be verified, retry discovery"
+                )
+            total = reported_total
+            scan_end = min(total, scan_limit)
+            if not page["items"] and next_raw_offset < scan_end:
+                raise ValueError(f"Empty arXiv page at offset {next_raw_offset}; retry discovery")
+            raw_items.extend(page["items"])
+            next_raw_offset += len(page["items"])
+            if not page["items"]:
+                break
+        return raw_items, total, query
+
+    # arXiv's recent-list date is an announcement date, while the API's
+    # submittedDate is the original submission date. Monday-Wednesday listings
+    # therefore need one wider request to include Friday submissions announced
+    # over the weekend or after a holiday. Avoid a second request after a zero
+    # result because arXiv rate-limits bursty API clients.
+    fallback_applied = through_date.weekday() in {0, 1, 2} and days < DISCOVERY_FALLBACK_LOOKBACK_DAYS
+    effective_days = DISCOVERY_FALLBACK_LOOKBACK_DAYS if fallback_applied else days
+    raw_items, total, query = fetch_window(effective_days)
+    since = through_date - timedelta(days=effective_days - 1)
 
     # Every library status is excluded, including candidate and new arXiv versions.
     # Read identities only, not full paper/analysis records.
@@ -184,6 +200,9 @@ def discover_arxiv_page(
         "candidate_target": get_setting(session, "abstract_limit", 100),
         "scan_limit": scan_limit,
         "prefilter_limit": prefilter_limit,
+        "requested_lookback_days": days,
+        "effective_lookback_days": effective_days,
+        "fallback_applied": fallback_applied,
         "since_date": since.isoformat(),
         "through_date": through_date.isoformat(),
         "date_timezone": "UTC",

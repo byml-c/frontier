@@ -6,14 +6,14 @@ from zoneinfo import ZoneInfo
 from sqlalchemy.orm import Session
 
 from ..config import settings
-from .common import get_setting
+from .common import get_daily_time
 
 
 def research_date_at(
     now: datetime,
     *,
-    rollover_hour: int = 5,
-    rollover_minute: int = 0,
+    rollover_hour: int = 9,
+    rollover_minute: int = 5,
     timezone: str | None = None,
 ) -> date:
     """Return the research day whose boundary is the daily update time."""
@@ -28,9 +28,10 @@ def research_date_at(
 def current_research_date(session: Session, *, now: datetime | None = None) -> date:
     """Use the configured daily schedule as the shared date boundary."""
     zone = ZoneInfo(settings.timezone)
+    hour, minute = get_daily_time(session)
     return research_date_at(
         now or datetime.now(zone),
-        rollover_hour=int(get_setting(session, "daily_hour", 5)),
-        rollover_minute=int(get_setting(session, "daily_minute", 0)),
+        rollover_hour=hour,
+        rollover_minute=minute,
         timezone=settings.timezone,
     )

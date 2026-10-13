@@ -33,7 +33,7 @@ Browser ──HTTP/NDJSON stream──> FastAPI Server ──SQLite / data files
 ## 技术选择
 
 - Python 3.12、FastAPI、SQLAlchemy、SQLite；
-- APScheduler 执行北京时间 05:00 的日任务；
+- APScheduler 按运行设置执行每日任务，默认北京时间 09:05；
 - PyMuPDF 提取 PDF 文本、页码与图片；
 - arXiv Atom API 负责候选采集；
 - React、TypeScript、Vite、Material UI（默认亮色主题）；

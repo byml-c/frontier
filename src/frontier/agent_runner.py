@@ -311,7 +311,8 @@ selection and ranking, never the initial retrieval query or the domain gate. Gen
 tool use, planning, multi-agent collaboration, memory, and computer use, not just embodied agents.
 Start discovery with `frontier source arxiv-discover --date {run_date} --offset 0 --page-size 100`.
 This read-only tool scans the configured broad arXiv categories over the recent candidate_lookback_days
-(default 3), then applies a high-recall server-side prefilter to obvious vision, robotics, embodied,
+(default 3; Monday through Wednesday use up to 7 days in a single request to cover weekend or holiday
+announcement delays), then applies a high-recall server-side prefilter to obvious vision, robotics, embodied,
 or agent-related metadata. It scans at most discovery_scan_limit raw records (default 300) and returns
 at most discovery_prefilter_limit records (default 120) to you. Inspect every returned item; the
 prefilter is only an efficiency filter, not proof of domain membership. It deliberately does not use

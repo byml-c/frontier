@@ -75,7 +75,8 @@ uv run frontier source arxiv-search 'ti:"exact paper title" AND au:"author surna
 ```
 
 Daily discovery retrieves category/date pages internally, without narrow interest keywords or ingestion.
-One call scans up to 300 raw metadata records (3 days by default), excludes ALL library matches by
+One call scans up to 300 raw metadata records (3 days by default, expanding to 7 days from Monday
+through Wednesday to cover announcement delays), excludes ALL library matches by
 version-independent arXiv ID, normalized DOI or title, removes batch duplicates, and returns at most
 120 broad-concept/category matches. `page_size` is the upstream page size, not the Agent output limit.
 `next_offset` is null: do not repeatedly fetch more batches. `total_results` is the upstream query size;

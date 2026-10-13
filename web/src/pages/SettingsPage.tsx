@@ -30,8 +30,7 @@ import { ErrorState, Loading } from "../components/States";
 import type { Setting } from "../types";
 
 const LABELS: Record<string, { label: string; help: string }> = {
-  daily_hour: { label: "日报启动小时", help: "北京时间，默认 05:00" },
-  daily_minute: { label: "日报启动分钟", help: "保存后重新加载运行计划" },
+  daily_time: { label: "日报启动时间", help: "北京时间，默认 09:05；保存后重新加载运行计划" },
   abstract_limit: { label: "兴趣初筛候选目标", help: "领域筛选后按兴趣收敛到约 100 篇；允许上下浮动 20%，不限制最初浏览的摘要数量" },
   fulltext_limit: { label: "全文阅读上限", help: "最终排名靠前的论文生成完整分析，最多 10 篇" },
   brief_limit: { label: "简报论文上限", help: "从候选池选出 20–50 篇供速览，最多 50 篇" },
@@ -88,7 +87,9 @@ export function SettingsPage() {
                     <Typography fontWeight={700}>{LABELS[item.key].label}</Typography>
                     <Typography variant="body2" color="text.secondary">{LABELS[item.key].help}</Typography>
                   </div>
-                  {Array.isArray(item.value_json) ? (
+                  {item.key === "daily_time" ? (
+                    <TextField size="small" type="time" value={String(values[item.key] ?? item.value_json)} onChange={(event) => setValues({ ...values, [item.key]: event.target.value })} inputProps={{ step: 60 }} sx={{ width: { xs: "100%", sm: 150 } }} />
+                  ) : Array.isArray(item.value_json) ? (
                     <TextField size="small" multiline minRows={3} label={LABELS[item.key].label} value={Array.isArray(values[item.key]) ? (values[item.key] as string[]).join("\n") : String(values[item.key] ?? "")} onChange={(event) => setValues({ ...values, [item.key]: event.target.value.split("\n") })} sx={{ width: { xs: "100%", sm: 280 } }} />
                   ) : typeof item.value_json === "number" ? (
                     <TextField size="small" type="number" value={Number(values[item.key] ?? item.value_json)} onChange={(event) => setValues({ ...values, [item.key]: Number(event.target.value) })} sx={{ width: { xs: "100%", sm: 150 } }} />

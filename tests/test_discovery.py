@@ -100,6 +100,38 @@ def test_discovery_requires_verifiable_coverage(client, discovery_db, monkeypatc
     assert "coverage" in response.json()["detail"]
 
 
+def test_discovery_expands_window_for_monday_tuesday_announcement_lag(
+    client, discovery_db, monkeypatch
+):
+    calls = []
+
+    def page(query, *, start, max_results):
+        calls.append(query)
+        return {
+            "items": [
+                PaperCreate(
+                    title="Delayed embodied robot paper",
+                    abstract="A robot agent learns manipulation from 3D vision.",
+                    arxiv_id="2610.99999",
+                )
+            ],
+            "total_results": 1,
+            "start": start,
+        }
+
+    monkeypatch.setattr(discovery, "search_arxiv_page", page)
+    response = client.get("/api/sources/arxiv/discover", params={"through_date": "2026-10-13"})
+    assert response.status_code == 200, response.text
+    result = response.json()
+    assert result["fallback_applied"] is True
+    assert result["requested_lookback_days"] == 3
+    assert result["effective_lookback_days"] == 7
+    assert result["since_date"] == "2026-10-07"
+    assert result["count"] == 1
+    assert len(calls) == 1
+    assert "submittedDate:[202610070000 TO 202610132359]" in calls[0]
+
+
 @pytest.mark.parametrize(
     "status", ["candidate", "reading", "feedback_pending", "completed", "ignored"]
 )

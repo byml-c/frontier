@@ -7,10 +7,10 @@ from frontier.services.research_day import research_date_at
 def test_research_day_rolls_over_at_daily_update_time() -> None:
     zone = ZoneInfo("Asia/Shanghai")
 
-    assert research_date_at(datetime(2026, 8, 14, 4, 59, tzinfo=zone)).isoformat() == (
+    assert research_date_at(datetime(2026, 8, 14, 9, 4, tzinfo=zone)).isoformat() == (
         "2026-08-13"
     )
-    assert research_date_at(datetime(2026, 8, 14, 5, 0, tzinfo=zone)).isoformat() == (
+    assert research_date_at(datetime(2026, 8, 14, 9, 5, tzinfo=zone)).isoformat() == (
         "2026-08-14"
     )
 

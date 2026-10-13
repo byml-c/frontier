@@ -278,6 +278,7 @@ def test_health_and_defaults(client: TestClient) -> None:
     assert settings["fulltext_limit"] == 10
     assert settings["brief_limit"] == 50
     assert settings["featured_limit"] == 10
+    assert settings["daily_time"] == "09:05"
     assert (
         client.put(
             "/api/settings",
@@ -306,6 +307,14 @@ def test_health_and_defaults(client: TestClient) -> None:
         ).status_code
         == 200
     )
+    assert client.put("/api/settings/daily_time", json={"value": "09:30"}).status_code == 200
+    assert client.put("/api/settings/daily_time", json={"value": "9:30"}).status_code == 422
+    settings_after = {
+        item["key"]: item["value_json"] for item in client.get("/api/settings").json()
+    }
+    assert settings_after["daily_time"] == "09:30"
+    assert settings_after["daily_hour"] == 9
+    assert settings_after["daily_minute"] == 30
 
 
 def test_paper_dedup_annotations_and_feedback(client: TestClient) -> None:
@@ -961,7 +970,7 @@ def test_daily_brief_excludes_prior_reading_but_stays_stable_after_publish(
     )
 
     # Daily briefs follow Frontier's configured research-day rollover, which can
-    # still be the previous calendar date before the 05:00 scheduler boundary.
+    # still be the previous calendar date before the configured scheduler boundary.
     from frontier.database import SessionLocal
     from frontier.services.research_day import current_research_date
 

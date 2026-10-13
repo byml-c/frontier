@@ -20,7 +20,7 @@ Agent 语义领域筛选 → 合格文章入库 → 兴趣初筛约 100 篇 →
 | --- | --- | --- |
 | `discovery_domains` | 三个大领域 | Agent 判断是否允许入库 |
 | `discovery_arxiv_categories` | cs.CV、cs.RO、cs.AI、cs.LG、cs.CL、cs.MA、cs.HC、cs.SE | 广泛召回来源，不等同于领域通过 |
-| `candidate_lookback_days` | 3 | 包含截止日的 UTC 提交日期窗口 |
+| `candidate_lookback_days` | 3 | 通常包含截止日的 UTC 提交日期窗口；周一至周三自动扩展到 7 天以覆盖公告延迟 |
 | `discovery_scan_limit` | 300 | 该窗口内按分类分页扫描的最新文章数 |
 | `discovery_prefilter_limit` | 120 | 宽松预筛后实际交给 Agent 的文章上限 |
 | `initial_interest_domains` | 保留原有值 | 细分兴趣先验 |

@@ -23,10 +23,12 @@ from ..services.bootstrap import import_bibtex
 from ..services.common import (
     BRIEF_LIMIT_DEFAULT,
     BRIEF_LIMIT_MAX,
+    DAILY_TIME_DEFAULT,
     FEATURED_LIMIT_DEFAULT,
     get_setting,
     log_operation,
     model_dict,
+    parse_daily_time,
 )
 from ..services.discovery import discover_arxiv_page, valid_string_list
 from ..services.ingest import create_or_update_paper, search_arxiv
@@ -68,9 +70,19 @@ NUMERIC_SETTING_RANGES = {
 
 
 def _validate_setting_value(key: str, value: object) -> None:
-    if key in {"discovery_domains", "discovery_arxiv_categories", "initial_interest_domains"} and not valid_string_list(
-        value, categories=key == "discovery_arxiv_categories"
-    ):
+    if key == "daily_time":
+        if not isinstance(value, str):
+            raise HTTPException(status_code=422, detail="daily_time must be a string")
+        try:
+            parse_daily_time(value)
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        return
+    if key in {
+        "discovery_domains",
+        "discovery_arxiv_categories",
+        "initial_interest_domains",
+    } and not valid_string_list(value, categories=key == "discovery_arxiv_categories"):
         raise HTTPException(status_code=422, detail=f"{key} must be a nonempty unique string list")
     if key in NUMERIC_SETTING_RANGES:
         if isinstance(value, bool) or not isinstance(value, int):
@@ -90,6 +102,36 @@ def _validate_setting_relationships(values: dict[str, object]) -> None:
         values.get("brief_limit", BRIEF_LIMIT_DEFAULT)
     ):
         raise HTTPException(status_code=422, detail="featured_limit must be below brief_limit")
+
+
+def _setting_changes(current: dict[str, object], payload: dict[str, object]) -> dict[str, object]:
+    """Validate all inputs before deriving consistent canonical/legacy schedule values."""
+    for key, value in payload.items():
+        _validate_setting_value(key, value)
+    changes = dict(payload)
+    if "daily_time" in changes:
+        hour, minute = parse_daily_time(changes["daily_time"])
+    elif {"daily_hour", "daily_minute"} & changes.keys():
+        current_hour, current_minute = parse_daily_time(
+            current.get("daily_time", DAILY_TIME_DEFAULT)
+        )
+        hour = changes.get("daily_hour", current.get("daily_hour", current_hour))
+        minute = changes.get("daily_minute", current.get("daily_minute", current_minute))
+    else:
+        return changes
+    changes.update(
+        {"daily_time": f"{hour:02d}:{minute:02d}", "daily_hour": hour, "daily_minute": minute}
+    )
+    return changes
+
+
+def _save_setting_changes(session: Session, changes: dict[str, object]) -> None:
+    for key, value in changes.items():
+        item = session.get(AppSetting, key)
+        if item is None:
+            session.add(AppSetting(key=key, value_json=value))
+        else:
+            item.value_json = value
 
 
 @router.get("/health")
@@ -150,16 +192,10 @@ def update_setting(
     payload: SettingUpdate,
     session: Annotated[Session, Depends(get_session)],
 ) -> dict:
-    _validate_setting_value(key, payload.value)
-    values = {item.key: item.value_json for item in session.scalars(select(AppSetting))}
-    values[key] = payload.value
-    _validate_setting_relationships(values)
-    item = session.get(AppSetting, key)
-    if item is None:
-        item = AppSetting(key=key, value_json=payload.value)
-        session.add(item)
-    else:
-        item.value_json = payload.value
+    current = {item.key: item.value_json for item in session.scalars(select(AppSetting))}
+    changes = _setting_changes(current, {key: payload.value})
+    _validate_setting_relationships({**current, **changes})
+    _save_setting_changes(session, changes)
     log_operation(
         session,
         actor="user",
@@ -168,11 +204,11 @@ def update_setting(
         entity_id=key,
     )
     session.commit()
-    if key in {"daily_hour", "daily_minute"}:
+    if key in {"daily_time", "daily_hour", "daily_minute"}:
         from ..scheduler import configure_jobs
 
         configure_jobs()
-    return model_dict(item)
+    return model_dict(session.get(AppSetting, key))
 
 
 @router.put("/settings")
@@ -181,17 +217,9 @@ def update_settings(
     session: Annotated[Session, Depends(get_session)],
 ) -> list[dict]:
     current = {item.key: item.value_json for item in session.scalars(select(AppSetting))}
-    values = {**current, **payload}
-    for key, value in payload.items():
-        _validate_setting_value(key, value)
-    _validate_setting_relationships(values)
-    for key, value in payload.items():
-        item = session.get(AppSetting, key)
-        if item is None:
-            item = AppSetting(key=key, value_json=value)
-            session.add(item)
-        else:
-            item.value_json = value
+    changes = _setting_changes(current, payload)
+    _validate_setting_relationships({**current, **changes})
+    _save_setting_changes(session, changes)
     log_operation(
         session,
         actor="user",
@@ -200,7 +228,7 @@ def update_settings(
         detail={"keys": sorted(payload)},
     )
     session.commit()
-    if {"daily_hour", "daily_minute"} & payload.keys():
+    if {"daily_time", "daily_hour", "daily_minute"} & payload.keys():
         from ..scheduler import configure_jobs
 
         configure_jobs()
@@ -493,9 +521,7 @@ def stream_task(
                     yield encode_stream_event("delta", delta=delta)
             else:
                 stream_options = (
-                    {"session_id": session_id}
-                    if payload.kind == "finish_reading"
-                    else {}
+                    {"session_id": session_id} if payload.kind == "finish_reading" else {}
                 )
                 if recovery_prompt:
                     stream_options["recovery_prompt"] = recovery_prompt
@@ -554,9 +580,7 @@ def stream_task(
                             return
                         raise RuntimeError("Agent 任务状态已变化，未覆盖其终态")
                     if conversation_id:
-                        current_conversation = runner_session.get(
-                            Conversation, conversation_id
-                        )
+                        current_conversation = runner_session.get(Conversation, conversation_id)
                         if current_conversation and thread_id:
                             current_conversation.codex_session_id = thread_id
                     runner_session.commit()
@@ -571,8 +595,7 @@ def stream_task(
                     runner_session.commit()
             with SessionLocal() as runner_session:
                 cancelled = bool(
-                    (task := runner_session.get(TaskRun, task_id))
-                    and task.status == "cancelled"
+                    (task := runner_session.get(TaskRun, task_id)) and task.status == "cancelled"
                 )
             if cancelled:
                 yield encode_stream_event("cancelled", task_id=task_id)
@@ -732,8 +755,10 @@ def arxiv_discover(
 ) -> dict:
     try:
         return discover_arxiv_page(
-            session, through_date=through_date or current_research_date(session),
-            offset=offset, page_size=page_size,
+            session,
+            through_date=through_date or current_research_date(session),
+            offset=offset,
+            page_size=page_size,
         )
     except Exception as exc:
         raise HTTPException(status_code=502, detail=f"arXiv discovery failed: {exc}") from exc
@@ -756,15 +781,26 @@ def save_candidate_pool(
     target = int(get_setting(session, "abstract_limit", 100))
     if len(payload.paper_ids) > (target * 6 + 4) // 5:
         raise HTTPException(status_code=422, detail="Candidate pool exceeds 120% of the target")
-    if (len(payload.paper_ids) < target * 0.8 or not payload.discovery_complete) and not payload.notes.strip():
-        raise HTTPException(status_code=422, detail="Explain candidate shortage or incomplete coverage")
+    if (
+        len(payload.paper_ids) < target * 0.8 or not payload.discovery_complete
+    ) and not payload.notes.strip():
+        raise HTTPException(
+            status_code=422, detail="Explain candidate shortage or incomplete coverage"
+        )
     papers = list(session.scalars(select(Paper).where(Paper.id.in_(payload.paper_ids))))
-    if len(papers) != len(payload.paper_ids) or any(paper.status != "candidate" for paper in papers):
-        raise HTTPException(status_code=422, detail="Candidate pool requires existing unread papers")
+    if len(papers) != len(payload.paper_ids) or any(
+        paper.status != "candidate" for paper in papers
+    ):
+        raise HTTPException(
+            status_code=422, detail="Candidate pool requires existing unread papers"
+        )
     pool = {**payload.model_dump(), "target": target, "saved_at": utcnow().isoformat()}
     task.payload_json = {**(task.payload_json or {}), "candidate_pool": pool}
     log_operation(
-        session, actor="agent", action="discovery.candidate_pool_saved", task_id=task.id,
+        session,
+        actor="agent",
+        action="discovery.candidate_pool_saved",
+        task_id=task.id,
         detail={"count": len(papers), **{k: v for k, v in pool.items() if k != "paper_ids"}},
     )
     session.flush()
