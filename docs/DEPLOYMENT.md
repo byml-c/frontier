@@ -197,3 +197,7 @@ arXiv 论文的 PDF、HTML 图片和公式资源由浏览器直接访问 `arxiv.
 清理结果写入 `data/migrations/storage.arxiv_link_only.v1.json`。首次部署建议先用
 `dry-run` 检查结果，再切换为 `auto`。`FRONTIER_DOCUMENT_RUNTIME_SLOTS=5` 控制实时文档槽位；
 服务重启会清空 `data/runtime/documents`，不会保留纯文本或 document 缓存。
+
+`FRONTIER_AGENT_MAX_CONCURRENT_RUNS` 是根 Agent 总预算，当前默认 6：
+general/日报/打分为 4，`FRONTIER_METADATA_AGENT_MAX_CONCURRENT_RUNS=2` 为课题组整理。
+两条 lane 各有独立队列和 worker，元信息整理不会占满日报打分通道。

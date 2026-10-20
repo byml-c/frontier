@@ -10,13 +10,13 @@ logger = logging.getLogger(__name__)
 
 _QUEUE_CAPACITY_PER_WORKER = 8
 _state_lock = threading.Lock()
-_work_queue: queue.Queue[str] | None = None
+_lane_queues: dict[str, queue.Queue[str]] = {}
 _workers: list[threading.Thread] = []
 _accepted_task_ids: set[str] = set()
 _stopping = False
 
 
-def _run_worker(work_queue: queue.Queue[str]) -> None:
+def _run_worker(work_queue: queue.Queue[str], lane: str) -> None:
     from ..agent_runner import run_task
 
     try:
@@ -35,7 +35,7 @@ def _run_worker(work_queue: queue.Queue[str]) -> None:
                 try:
                     run_task(task_id)
                 except Exception:
-                    logger.exception("Dispatched task %s crashed outside its runner", task_id)
+                    logger.exception("Dispatched %s task %s crashed outside its runner", lane, task_id)
                 finally:
                     with _state_lock:
                         _accepted_task_ids.discard(task_id)
@@ -49,45 +49,57 @@ def _run_worker(work_queue: queue.Queue[str]) -> None:
 
 
 def start_task_dispatcher() -> None:
-    """Start the fixed worker pool once for this service process."""
-    global _stopping, _work_queue
+    """Start separate general and metadata worker lanes once per process."""
+    global _stopping, _lane_queues
     with _state_lock:
         if _workers:
             return
         _stopping = False
-        worker_count = settings.agent_max_concurrent_runs
-        _work_queue = queue.Queue(
-            maxsize=max(worker_count, worker_count * _QUEUE_CAPACITY_PER_WORKER)
-        )
-        for index in range(worker_count):
-            worker = threading.Thread(
-                target=_run_worker,
-                args=(_work_queue,),
-                name=f"frontier-task-{index + 1}",
-                daemon=True,
+        lane_counts = {
+            "general": settings.general_agent_max_concurrent_runs,
+            "metadata": settings.metadata_agent_max_concurrent_runs,
+        }
+        _lane_queues = {}
+        for lane, worker_count in lane_counts.items():
+            lane_queue = queue.Queue(
+                maxsize=max(worker_count, worker_count * _QUEUE_CAPACITY_PER_WORKER)
             )
-            _workers.append(worker)
-            worker.start()
+            _lane_queues[lane] = lane_queue
+            for index in range(worker_count):
+                worker = threading.Thread(
+                    target=_run_worker,
+                    args=(lane_queue, lane),
+                    name=f"frontier-{lane}-{index + 1}",
+                    daemon=True,
+                )
+                _workers.append(worker)
+                worker.start()
 
 
-def submit_task(task_id: str) -> bool:
-    """Submit without blocking; duplicate pending/running IDs are accepted once."""
+def submit_task(
+    task_id: str,
+    *,
+    fail_on_full: bool = True,
+    lane: str = "general",
+) -> bool:
+    """Submit without blocking; metadata has a queue independent from scoring."""
     start_task_dispatcher()
     accepted = False
     with _state_lock:
-        if _stopping or _work_queue is None:
+        work_queue = _lane_queues.get(lane)
+        if _stopping or work_queue is None:
             pass
         elif task_id in _accepted_task_ids:
             return True
         else:
             try:
-                _work_queue.put_nowait(task_id)
+                work_queue.put_nowait(task_id)
             except queue.Full:
-                logger.error("Task dispatch queue is full; rejected %s", task_id)
+                logger.error("%s task dispatch queue is full; rejected %s", lane, task_id)
             else:
                 _accepted_task_ids.add(task_id)
                 accepted = True
-    if not accepted:
+    if not accepted and fail_on_full:
         _fail_undispatched_task(task_id, error="Agent 任务队列已满，任务未启动")
     return accepted
 
@@ -144,22 +156,23 @@ def _fail_undispatched_task(task_id: str, *, error: str) -> None:
 
 
 def stop_task_dispatcher(*, wait: bool = False) -> None:
-    """Stop accepting work and fail bounded queued items without blocking shutdown."""
-    global _stopping, _work_queue
+    """Stop both lanes, fail queued work, and optionally join workers."""
+    global _stopping
     pending: list[str] = []
     with _state_lock:
-        if not _workers or _work_queue is None:
+        if not _workers:
             return
         _stopping = True
         workers = list(_workers)
-        while True:
-            try:
-                task_id = _work_queue.get_nowait()
-            except queue.Empty:
-                break
-            pending.append(task_id)
-            _accepted_task_ids.discard(task_id)
-            _work_queue.task_done()
+        for work_queue in _lane_queues.values():
+            while True:
+                try:
+                    task_id = work_queue.get_nowait()
+                except queue.Empty:
+                    break
+                pending.append(task_id)
+                _accepted_task_ids.discard(task_id)
+                work_queue.task_done()
     for task_id in pending:
         _fail_undispatched_task(
             task_id,
@@ -171,17 +184,23 @@ def stop_task_dispatcher(*, wait: bool = False) -> None:
     with _state_lock:
         if wait or not any(worker.is_alive() for worker in workers):
             _workers.clear()
+            _lane_queues.clear()
             _accepted_task_ids.clear()
-            _work_queue = None
 
 
 def task_dispatcher_snapshot() -> dict[str, int | bool]:
     """Expose bounded-pool state for health checks and deterministic tests."""
     with _state_lock:
+        general = _lane_queues.get("general")
+        metadata = _lane_queues.get("metadata")
         return {
             "running": bool(_workers) and not _stopping,
             "workers": len(_workers),
+            "general_workers": settings.general_agent_max_concurrent_runs,
+            "metadata_workers": settings.metadata_agent_max_concurrent_runs,
+            "capacity": general.maxsize if general is not None else 0,
+            "metadata_capacity": metadata.maxsize if metadata is not None else 0,
             "accepted": len(_accepted_task_ids),
-            "queued": _work_queue.qsize() if _work_queue is not None else 0,
-            "capacity": _work_queue.maxsize if _work_queue is not None else 0,
+            "queued_general": general.qsize() if general is not None else 0,
+            "queued_metadata": metadata.qsize() if metadata is not None else 0,
         }

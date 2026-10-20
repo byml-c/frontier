@@ -617,8 +617,7 @@ def add_arxiv(
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except Exception as exc:
         raise HTTPException(status_code=502, detail=f"arXiv ingestion failed: {exc}") from exc
-    for task in queue_metadata_enrichment(session, [paper.id], reason="arxiv-ingest"):
-        background_tasks.add_task(submit_task, task.id)
+    queue_metadata_enrichment(session, [paper.id], reason="arxiv-ingest")
     if recommend:
         return _manual_ingest_result(session, paper, created, background_tasks, analyze=analyze)
     return {"paper": _serialize_paper(session, paper, detail=True), "created": created}
@@ -638,8 +637,7 @@ def add_url(
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except Exception as exc:
         raise HTTPException(status_code=502, detail=f"URL ingestion failed: {exc}") from exc
-    for task in queue_metadata_enrichment(session, [paper.id], reason="url-ingest"):
-        background_tasks.add_task(submit_task, task.id)
+    queue_metadata_enrichment(session, [paper.id], reason="url-ingest")
     if recommend:
         return _manual_ingest_result(session, paper, created, background_tasks, analyze=analyze)
     return {"paper": _serialize_paper(session, paper, detail=True), "created": created}
@@ -664,8 +662,7 @@ async def add_pdf(
         paper, created = ingest_pdf_bytes(session, content, file.filename or "upload.pdf")
     except Exception as exc:
         raise HTTPException(status_code=400, detail=f"PDF ingestion failed: {exc}") from exc
-    for task in queue_metadata_enrichment(session, [paper.id], reason="upload-ingest"):
-        background_tasks.add_task(submit_task, task.id)
+    queue_metadata_enrichment(session, [paper.id], reason="upload-ingest")
     if recommend:
         return _manual_ingest_result(session, paper, created, background_tasks, analyze=analyze)
     return {"paper": _serialize_paper(session, paper, detail=True), "created": created}
@@ -743,6 +740,71 @@ def complete_paper_metadata_enrichment(
     )
     session.commit()
     return _serialize_paper(session, paper, detail=True)
+
+
+@router.post("/{paper_id}/metadata-enrichment/retry")
+def retry_paper_metadata_enrichment(
+    paper_id: str,
+    session: Annotated[Session, Depends(get_session)],
+) -> dict:
+    paper = _paper_or_404(session, paper_id)
+    state = dict((paper.metadata_json or {}).get("metadata_enrichment") or {})
+    paper.metadata_json = {
+        **(paper.metadata_json or {}),
+        "metadata_enrichment": {
+            **state,
+            "status": "pending",
+            "task_id": None,
+            "error": None,
+            "requested_at": datetime.now(UTC).isoformat(),
+        },
+    }
+    log_operation(
+        session,
+        actor="user",
+        action="paper.metadata_enrichment_retried",
+        entity_type="paper",
+        entity_id=paper.id,
+    )
+    session.commit()
+    return _serialize_paper(session, paper, detail=True)
+
+
+@router.post("/metadata-enrichment/retry-failed")
+def retry_failed_metadata_enrichment(
+    session: Annotated[Session, Depends(get_session)],
+) -> dict:
+    papers = list(
+        session.scalars(
+            select(Paper).where(
+                Paper.metadata_json["metadata_enrichment"]["status"].as_string()
+                == "failed"
+            )
+        ).all()
+    )
+    now = datetime.now(UTC).isoformat()
+    for paper in papers:
+        state = dict((paper.metadata_json or {}).get("metadata_enrichment") or {})
+        paper.metadata_json = {
+            **(paper.metadata_json or {}),
+            "metadata_enrichment": {
+                **state,
+                "status": "pending",
+                "task_id": None,
+                "error": None,
+                "requested_at": now,
+            },
+        }
+    if papers:
+        log_operation(
+            session,
+            actor="user",
+            action="paper.metadata_enrichment_retried",
+            entity_type="metadata_batch",
+            detail={"paper_count": len(papers)},
+        )
+    session.commit()
+    return {"retried": len(papers)}
 
 
 @router.get("/{paper_id}/narration")

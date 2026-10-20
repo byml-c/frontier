@@ -3,7 +3,7 @@ from __future__ import annotations
 import threading
 
 from frontier import agent_runner
-from frontier.database import SessionLocal
+from frontier.database import SessionLocal, create_tables
 from frontier.models import TaskRun
 from frontier.services import task_dispatcher
 
@@ -19,8 +19,10 @@ def test_dispatcher_is_bounded_and_deduplicates_task_ids(monkeypatch) -> None:
 
     monkeypatch.setattr(agent_runner, "run_task", run_task)
     monkeypatch.setattr(task_dispatcher.settings, "agent_max_concurrent_runs", 1)
+    monkeypatch.setattr(task_dispatcher.settings, "metadata_agent_max_concurrent_runs", 1)
     monkeypatch.setattr(task_dispatcher, "_QUEUE_CAPACITY_PER_WORKER", 1)
     task_dispatcher.stop_task_dispatcher(wait=True)
+    create_tables()
     with SessionLocal() as session:
         tasks = [TaskRun(kind="graph_maintenance") for _ in range(3)]
         session.add_all(tasks)
@@ -34,7 +36,9 @@ def test_dispatcher_is_bounded_and_deduplicates_task_ids(monkeypatch) -> None:
         assert task_dispatcher.submit_task(second_id) is True
         assert task_dispatcher.submit_task(rejected_id) is False
         snapshot = task_dispatcher.task_dispatcher_snapshot()
-        assert snapshot["workers"] == 1
+        assert snapshot["workers"] == 2
+        assert snapshot["general_workers"] == 1
+        assert snapshot["metadata_workers"] == 1
         assert snapshot["capacity"] == 1
         assert snapshot["accepted"] == 2
         with SessionLocal() as session:

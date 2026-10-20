@@ -230,6 +230,16 @@ def paper_metadata_complete(
     )
 
 
+@paper_app.command("metadata-retry")
+def paper_metadata_retry(paper_id: str) -> None:
+    emit(client.request("POST", f"/api/papers/{paper_id}/metadata-enrichment/retry"))
+
+
+@paper_app.command("metadata-retry-failed")
+def paper_metadata_retry_failed() -> None:
+    emit(client.request("POST", "/api/papers/metadata-enrichment/retry-failed"))
+
+
 @paper_app.command("ignore")
 def paper_ignore(paper_id: str, reason: str = typer.Option(...)) -> None:
     emit(client.request("POST", f"/api/papers/{paper_id}/ignore", json={"reason": reason}))

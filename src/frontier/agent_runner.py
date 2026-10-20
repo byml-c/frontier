@@ -851,6 +851,7 @@ def run_task(task_id: str) -> None:
         task = session.get(TaskRun, task_id)
         if not task or task.status != "queued":
             return
+        task_kind = task.kind
         is_translation = bool(
             task and task.kind in {"translate", "abstract_translation_batch", PAPER_ABSTRACT_TRANSLATION_KIND}
         )
@@ -885,7 +886,11 @@ def run_task(task_id: str) -> None:
 
     deadline = time.monotonic() + remaining_seconds
     try:
-        with root_agent_slot(deadline=deadline, cancelled=no_longer_queued):
+        with root_agent_slot(
+            task_kind=task_kind,
+            deadline=deadline,
+            cancelled=no_longer_queued,
+        ):
             evict_idle_codex_app_servers()
             _run_codex_task(
                 task_id,

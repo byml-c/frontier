@@ -1,8 +1,12 @@
 from fastapi.testclient import TestClient
+from sqlalchemy import select
 
 from frontier.database import SessionLocal
-from frontier.models import TaskRun
-from frontier.services.paper_metadata import queue_metadata_enrichment
+from frontier.models import Paper, TaskRun
+from frontier.services.paper_metadata import (
+    dispatch_next_metadata_batch,
+    queue_metadata_enrichment,
+)
 
 
 def test_agent_paper_update_creates_and_updates_research_group(client: TestClient) -> None:
@@ -125,16 +129,98 @@ def test_metadata_context_and_first_page_endpoints(client: TestClient, monkeypat
 
 def test_metadata_enrichment_task_is_bounded(client: TestClient, monkeypatch) -> None:
     monkeypatch.setattr("frontier.services.paper_metadata.settings.enable_codex_runs", True)
+    submitted: dict[str, object] = {}
+
+    def submit(task_id: str, **kwargs: object) -> bool:
+        submitted["task_id"] = task_id
+        submitted.update(kwargs)
+        return True
+
+    monkeypatch.setattr("frontier.services.paper_metadata.submit_task", submit)
     paper = client.post(
         "/api/papers",
         json={"title": "Metadata task paper", "authors": [{"name": "Ada Researcher"}]},
     ).json()["paper"]
     with SessionLocal() as session:
         tasks = queue_metadata_enrichment(session, [paper["id"]], reason="test")
-        assert len(tasks) == 1
-        task = session.get(TaskRun, tasks[0].id)
+        assert tasks == []
+        pending = session.get(Paper, paper["id"])
+        assert pending.metadata_json["metadata_enrichment"]["status"] == "pending"
+        task = dispatch_next_metadata_batch(session)
         assert task is not None
         assert task.kind == "paper_metadata_enrichment"
         assert paper["id"] in task.payload_json["paper_ids"]
         assert len(task.payload_json["paper_ids"]) <= 10
-        assert task.payload_json.get("reason")
+        assert task.payload_json.get("reason") == "coordinator"
+        assert submitted["lane"] == "metadata"
+
+
+def test_metadata_batch_stays_pending_when_agent_queue_is_full(
+    client: TestClient, monkeypatch
+) -> None:
+    monkeypatch.setattr("frontier.services.paper_metadata.settings.enable_codex_runs", True)
+    monkeypatch.setattr("frontier.services.paper_metadata.submit_task", lambda *_args, **_kwargs: False)
+    paper = client.post(
+        "/api/papers",
+        json={"title": "Queue pressure paper", "authors": [{"name": "Ada Researcher"}]},
+    ).json()["paper"]
+    with SessionLocal() as session:
+        queue_metadata_enrichment(session, [paper["id"]], reason="test")
+        assert dispatch_next_metadata_batch(session) is None
+        pending = session.get(Paper, paper["id"])
+        assert pending.metadata_json["metadata_enrichment"]["status"] == "pending"
+
+
+def test_failed_metadata_enrichment_can_be_retried(client: TestClient) -> None:
+    paper = client.post(
+        "/api/papers",
+        json={"title": "Retry metadata paper", "authors": [{"name": "Ada Researcher"}]},
+    ).json()["paper"]
+    with SessionLocal() as session:
+        item = session.get(Paper, paper["id"])
+        item.metadata_json = {
+            "metadata_enrichment": {"status": "failed", "error": "queue full"}
+        }
+        session.commit()
+
+    retried = client.post(f"/api/papers/{paper['id']}/metadata-enrichment/retry")
+    assert retried.status_code == 200
+    assert retried.json()["metadata_json"]["metadata_enrichment"]["status"] == "pending"
+
+
+def test_metadata_coordinator_uses_two_parallel_batches(monkeypatch) -> None:
+    monkeypatch.setattr("frontier.services.paper_metadata.settings.enable_codex_runs", True)
+    monkeypatch.setattr(
+        "frontier.services.paper_metadata.settings.metadata_agent_max_concurrent_runs", 2
+    )
+    monkeypatch.setattr(
+        "frontier.services.paper_metadata.submit_task",
+        lambda *_args, **_kwargs: True,
+    )
+    with SessionLocal() as session:
+        for task in session.scalars(
+            select(TaskRun).where(
+                TaskRun.kind == "paper_metadata_enrichment",
+                TaskRun.status.in_({"queued", "running"}),
+            )
+        ).all():
+            task.status = "cancelled"
+        session.commit()
+        papers = [
+            Paper(
+                title=f"Metadata parallel {index}",
+                normalized_title=f"metadata parallel {index}",
+                authors=[{"name": "Ada Researcher"}],
+            )
+            for index in range(25)
+        ]
+        session.add_all(papers)
+        session.commit()
+        queue_metadata_enrichment(session, [paper.id for paper in papers], reason="test")
+        first = dispatch_next_metadata_batch(session)
+        second = dispatch_next_metadata_batch(session)
+        third = dispatch_next_metadata_batch(session)
+        assert first is not None and second is not None
+        assert third is None
+        assert len(first.payload_json["paper_ids"]) <= 10
+        assert len(second.payload_json["paper_ids"]) <= 10

@@ -20,7 +20,12 @@ logger = logging.getLogger(__name__)
 
 _CGROUP_CONTROLLERS = ("cpu", "io", "memory", "pids")
 _CGROUP_PERIOD_US = 100_000
-_ROOT_AGENT_SLOTS = threading.BoundedSemaphore(settings.agent_max_concurrent_runs)
+_ROOT_AGENT_SLOTS = threading.BoundedSemaphore(
+    settings.general_agent_max_concurrent_runs
+)
+_METADATA_AGENT_SLOTS = threading.BoundedSemaphore(
+    settings.metadata_agent_max_concurrent_runs
+)
 _LAYOUT_LOCK = threading.Lock()
 _LAYOUT: _CgroupLayout | None = None
 _INITIALIZATION_ATTEMPTED = False
@@ -70,6 +75,7 @@ def codex_subagent_limit_args() -> list[str]:
 @contextmanager
 def root_agent_slot(
     *,
+    task_kind: str | None = None,
     deadline: float | None = None,
     cancelled: Callable[[], bool] | None = None,
 ) -> Iterator[None]:
@@ -79,8 +85,13 @@ def root_agent_slot(
     synchronous streaming iterator on different worker threads, while a suspended
     worker thread may run unrelated requests.
     """
+    slots = (
+        _METADATA_AGENT_SLOTS
+        if task_kind == "paper_metadata_enrichment"
+        else _ROOT_AGENT_SLOTS
+    )
     if deadline is None and cancelled is None:
-        _ROOT_AGENT_SLOTS.acquire()
+        slots.acquire()
     else:
         while True:
             if cancelled and cancelled():
@@ -89,7 +100,7 @@ def root_agent_slot(
             if remaining is not None and remaining <= 0:
                 raise AgentSlotTimeout("Agent run timed out while waiting for capacity")
             wait_seconds = 0.1 if remaining is None else min(0.1, remaining)
-            if _ROOT_AGENT_SLOTS.acquire(timeout=wait_seconds):
+            if slots.acquire(timeout=wait_seconds):
                 break
     try:
         if cancelled and cancelled():
@@ -98,7 +109,7 @@ def root_agent_slot(
             raise AgentSlotTimeout("Agent run timed out before startup")
         yield
     finally:
-        _ROOT_AGENT_SLOTS.release()
+        slots.release()
 
 
 def initialize_agent_resource_manager() -> bool:

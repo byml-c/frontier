@@ -38,9 +38,12 @@ class Settings(BaseSettings):
     codex_max_concurrent_subagents: int = Field(default=1, ge=0)
     codex_subagent_max_depth: int = Field(default=1, ge=0)
     codex_subagent_job_timeout_seconds: int = Field(default=1800, ge=1)
-    # Serialize root Agent work across background exec runs and interactive
-    # app-server turns. Child-process cgroups provide the hard resource limit.
-    agent_max_concurrent_runs: int = Field(default=1, ge=1)
+    # Total root-Agent concurrency budget. Child-process cgroups provide the hard
+    # resource limit; the metadata lane is carved out of this total.
+    agent_max_concurrent_runs: int = Field(default=6, ge=1)
+    # Metadata enrichment has its own dispatcher lane and root-Agent budget so it
+    # can run alongside daily scoring without consuming the whole pool.
+    metadata_agent_max_concurrent_runs: int = Field(default=2, ge=1)
     agent_task_timeout_seconds: int = Field(default=10_800, ge=1)
     agent_interactive_timeout_seconds: int = Field(default=3600, ge=1)
     agent_app_server_start_timeout_seconds: int = Field(default=30, ge=1)
@@ -115,6 +118,11 @@ class Settings(BaseSettings):
         if ":" in host and not host.startswith("["):
             host = f"[{host}]"
         return f"http://{host}:{self.port}"
+
+    @property
+    def general_agent_max_concurrent_runs(self) -> int:
+        """General/scoring lane budget, keeping metadata as a bounded slice."""
+        return max(1, self.agent_max_concurrent_runs - self.metadata_agent_max_concurrent_runs)
 
     @property
     def pdf_dir(self) -> Path:

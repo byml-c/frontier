@@ -41,6 +41,7 @@ from .services.completion_summary import migrate_legacy_completion_summaries
 from .services.daily_selections import migrate_legacy_daily_selections
 from .services.document_reader import shutdown_document_worker
 from .services.document_runtime import reset_document_runtime
+from .services.paper_metadata import start_metadata_coordinator, stop_metadata_coordinator
 from .services.research_groups import migrate_research_group_links
 from .services.storage_migration import run_storage_migration
 from .services.task_dispatcher import start_task_dispatcher, stop_task_dispatcher
@@ -72,11 +73,13 @@ async def lifespan(_app: FastAPI):
     if settings.enable_codex_runs:
         start_codex_app_server_pool()
     start_task_dispatcher()
+    start_metadata_coordinator()
     start_scheduler()
     try:
         yield
     finally:
         stop_scheduler()
+        stop_metadata_coordinator()
         stop_task_dispatcher(wait=False)
         cancel_all_codex_runs()
         stop_codex_app_server_pool()
