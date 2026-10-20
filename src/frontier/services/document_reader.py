@@ -653,3 +653,16 @@ def document_asset(paper_id: str, filename: str) -> Path:
     if not path.exists():
         raise FileNotFoundError(filename)
     return path
+
+
+# Runtime implementation: document files live in at most five temporary slots
+# under data/runtime/documents and are discarded on process shutdown.
+from . import document_runtime as _document_runtime
+
+DOCUMENT_SCHEMA_VERSION = _document_runtime.DOCUMENT_SCHEMA_VERSION
+DocumentReaderUnavailable = _document_runtime.DocumentReaderUnavailable  # noqa: F811
+document_status = _document_runtime.document_status  # noqa: F811
+queue_document_conversion = _document_runtime.queue_document_conversion  # noqa: F811
+queue_document_conversions = _document_runtime.queue_document_conversions  # noqa: F811
+document_asset = _document_runtime.document_asset  # noqa: F811
+shutdown_document_worker = _document_runtime.shutdown_document_worker  # noqa: F811

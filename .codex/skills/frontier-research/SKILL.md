@@ -87,6 +87,25 @@ When a user or task names a paper, author, arXiv ID, method, or keyword, especia
 
 Never silently choose between ambiguous papers or claim to have compared full texts after reading only search metadata.
 
+## Metadata enrichment at ingestion
+
+This is a separate Agent job from daily scoring and paper reading. It runs for newly ingested
+papers and owns authors, affiliations, corresponding authors, research groups, and group tags.
+
+- Read `paper metadata-context PAPER_ID` first.
+- Search the durable group index in English and Chinese before creating anything:
+  `research-group search "<lab name>"`, institution, acronym, PI, and aliases.
+- If affiliation is ambiguous, read only `paper first-page PAPER_ID --max-chars 2500`; do not
+  fetch or retain the complete PDF. Official lab pages or public source pages may be consulted;
+  record the URL in the evidence note.
+- Reuse an exact lab/institution/PI match. Do not overwrite a user-verified group's identity.
+- Create a new group only when no reliable match exists, with `verification_status: "candidate"`.
+- Bind with `paper assign-group`; the Server makes `Paper.research_group_id` canonical and creates
+  the group tag.
+- Correct only evidence-backed bibliographic fields with `paper update`.
+- Never translate abstracts, write scores, write `Paper.summary`, or modify the research graph.
+- Finish every paper with `paper metadata-complete`, including unresolved group evidence.
+
 ## Computation
 
 - Run Python as `uv run python`. NumPy, SciPy, scikit-learn, pandas, and opencv-python are declared project dependencies.

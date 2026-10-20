@@ -1,8 +1,6 @@
 from __future__ import annotations
 
-import json
 import multiprocessing
-import threading
 from collections.abc import Iterator
 from pathlib import Path
 
@@ -44,65 +42,23 @@ def _write_pdf(path: Path, text: str = "bounded extraction") -> None:
     document.close()
 
 
-def test_document_conversion_uses_one_bounded_worker_and_shutdown_marks_queue(
+def test_document_runtime_keeps_at_most_five_temporary_slots(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    document_reader.shutdown_document_worker(wait_seconds=2)
-    monkeypatch.setattr(document_reader.settings, "data_dir", tmp_path)
-    monkeypatch.setattr(document_reader, "_DOCUMENT_CONVERSION_QUEUE_LIMIT", 2)
-    document_reader.settings.ensure_directories()
-    entered = threading.Event()
-    release = threading.Event()
-    restarted = threading.Event()
-    converted: list[str] = []
+    monkeypatch.setattr(document_reader._document_runtime, "_RUNTIME_ROOT", tmp_path / "runtime")
+    document_reader._document_runtime.reset_document_runtime()
+    document_reader._document_runtime._slots.clear()
+    document_reader._document_runtime._inflight.clear()
 
-    def fake_convert(paper_id: str, _force: bool) -> None:
-        converted.append(paper_id)
-        entered.set()
-        release.wait(timeout=2)
-        if paper_id == "paper-restarted":
-            restarted.set()
-        with document_reader._conversion_condition:
-            document_reader._converting.discard(paper_id)
+    for index in range(6):
+        slot = document_reader._document_runtime._slot_dir(f"paper-{index}")
+        assert slot.is_dir()
 
-    monkeypatch.setattr(document_reader, "_convert_document_task", fake_convert)
-
-    assert document_reader.queue_document_conversion("paper-active") is True
-    assert entered.wait(timeout=1)
-    assert document_reader.queue_document_conversion("paper-queued-1") is True
-    assert document_reader.queue_document_conversion("paper-queued-1") is False
-    assert document_reader.queue_document_conversion("paper-queued-2") is True
-    assert document_reader.queue_document_conversion("paper-overflow") is False
-
-    workers = [
-        thread
-        for thread in threading.enumerate()
-        if thread.name == "document-reader-worker"
-    ]
-    assert len(workers) == 1
-    overflow_status = json.loads(
-        document_reader._paths("paper-overflow")[2].read_text(encoding="utf-8")
-    )
-    assert overflow_status["status"] == "failed"
-    assert overflow_status["retryable"] is True
-    assert "队列已满" in overflow_status["error"]
-
+    assert len(document_reader._document_runtime._slots) == 5
+    assert "paper-0" not in document_reader._document_runtime._slots
+    assert len(list((tmp_path / "runtime").iterdir())) == 5
     document_reader.shutdown_document_worker(wait_seconds=0)
-    for paper_id in ("paper-queued-1", "paper-queued-2"):
-        status = json.loads(
-            document_reader._paths(paper_id)[2].read_text(encoding="utf-8")
-        )
-        assert status["status"] == "failed"
-        assert status["retryable"] is True
-        assert "服务正在关闭" in status["error"]
-
-    release.set()
-    workers[0].join(timeout=1)
-    assert converted == ["paper-active"]
-    assert document_reader.queue_document_conversion("paper-restarted") is True
-    assert restarted.wait(timeout=1)
-    document_reader.shutdown_document_worker(wait_seconds=1)
 
 
 def test_pdf_download_enforces_monotonic_total_deadline(
@@ -143,7 +99,7 @@ def test_pdf_download_enforces_monotonic_total_deadline(
     client.close()
 
 
-def test_pdf_text_extraction_process_writes_validated_cache(
+def test_pdf_text_extraction_is_ephemeral(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
     session: Session,
@@ -154,41 +110,12 @@ def test_pdf_text_extraction_process_writes_validated_cache(
     _write_pdf(path, "subprocess extraction works")
     paper = _local_pdf_paper(session, path)
 
-    cache = ingest.ensure_pdf_text_cache(session, paper)
     payload = ingest.extract_pdf_text(session, paper)
 
-    assert cache.exists()
     assert payload["paper_id"] == paper.id
     assert payload["page_count"] == 1
     assert "subprocess extraction works" in payload["pages"][0]["text"]
-    assert not list(cache.parent.glob(f"{cache.name}.tmp-*"))
-
-
-def test_cached_pdf_text_is_revalidated_against_current_limit(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-    session: Session,
-) -> None:
-    monkeypatch.setattr(ingest.settings, "data_dir", tmp_path)
-    monkeypatch.setattr(ingest.settings, "paper_text_max_chars", 5)
-    ingest.settings.ensure_directories()
-    path = ingest.settings.pdf_dir / "cached.pdf"
-    _write_pdf(path)
-    paper = _local_pdf_paper(session, path)
-    cache = ingest.settings.text_dir / f"{paper.id}.json"
-    cache.write_text(
-        json.dumps(
-            {
-                "paper_id": paper.id,
-                "page_count": 1,
-                "pages": [{"page_number": 1, "text": "too-large"}],
-            }
-        ),
-        encoding="utf-8",
-    )
-
-    with pytest.raises(ValueError, match="Cached PDF text exceeds"):
-        ingest.ensure_pdf_text_cache(session, paper)
+    assert not list(ingest.settings.text_dir.glob("*.json"))
 
 
 def test_extraction_timeout_terminates_child_and_removes_temporary_file(

@@ -70,6 +70,9 @@ class Settings(BaseSettings):
     paper_processing_max_concurrency: int = Field(default=1, ge=1)
     paper_download_max_bytes: int = Field(default=64 * 1024**2, ge=1)
     paper_text_max_chars: int = Field(default=20_000_000, ge=1)
+    document_runtime_slots: int = Field(default=5, ge=1, le=20)
+    document_runtime_idle_seconds: int = Field(default=900, ge=60)
+    storage_migration_mode: Literal["auto", "dry-run", "off"] = "auto"
     translation_env_file: Path = PROJECT_ROOT / "translation.env"
     translation_timeout_seconds: int = Field(default=120, ge=1)
     aliyun_tts_api_key: str | None = None
@@ -130,6 +133,10 @@ class Settings(BaseSettings):
         return self.data_dir / "text"
 
     @property
+    def runtime_dir(self) -> Path:
+        return self.data_dir / "runtime"
+
+    @property
     def document_dir(self) -> Path:
         return self.data_dir / "documents"
 
@@ -152,6 +159,7 @@ class Settings(BaseSettings):
             self.upload_dir,
             self.task_dir,
             self.text_dir,
+            self.runtime_dir,
             self.document_dir,
             self.architecture_dir,
             self.export_dir,

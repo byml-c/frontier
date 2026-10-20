@@ -40,6 +40,9 @@ from .services.common import ensure_default_settings
 from .services.completion_summary import migrate_legacy_completion_summaries
 from .services.daily_selections import migrate_legacy_daily_selections
 from .services.document_reader import shutdown_document_worker
+from .services.document_runtime import reset_document_runtime
+from .services.research_groups import migrate_research_group_links
+from .services.storage_migration import run_storage_migration
 from .services.task_dispatcher import start_task_dispatcher, stop_task_dispatcher
 from .services.task_recovery import recover_interrupted_tasks
 from .services.translation_provider import close_translation_provider, warm_translation_provider
@@ -54,7 +57,15 @@ async def lifespan(_app: FastAPI):
         cleanup_stale_architecture_locks(session)
         migrate_legacy_completion_summaries(session)
         migrate_legacy_daily_selections(session)
+        migrate_research_group_links(session)
+        session.commit()
+        if settings.storage_migration_mode != "off":
+            run_storage_migration(
+                session, dry_run=settings.storage_migration_mode == "dry-run"
+            )
+            session.commit()
         recover_interrupted_tasks(session, started_before=startup_cutoff)
+    reset_document_runtime()
     initialize_agent_resource_manager()
     queue_cached_arxiv_author_metadata_backfill()
     warm_translation_provider()

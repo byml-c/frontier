@@ -13,6 +13,7 @@ from sqlalchemy.orm import Session
 from ..architecture_schemas import ArchitectureScene
 from ..config import settings
 from ..models import ArchitectureAsset, ArchitectureDocument, Paper, TaskRun
+from .paper_sources import paper_source_version
 
 ARCHITECTURE_SCHEMA_VERSION = 1
 USER_LOCK_LEASE_SECONDS = 300
@@ -72,13 +73,7 @@ def _task_lock_is_live(session: Session, owner_id: str | None) -> bool:
 
 
 def _paper_pdf_version(paper: Paper) -> str | None:
-    if not paper.pdf_path:
-        return None
-    path = Path(paper.pdf_path)
-    if not path.is_file():
-        return None
-    stat = path.stat()
-    return f"{stat.st_mtime_ns:x}-{stat.st_size:x}"
+    return paper_source_version(paper)
 
 
 def refresh_lock(session: Session, item: ArchitectureDocument) -> bool:

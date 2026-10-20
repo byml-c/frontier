@@ -29,6 +29,7 @@ bootstrap_app = typer.Typer(no_args_is_help=True)
 architecture_app = typer.Typer(no_args_is_help=True)
 narration_app = typer.Typer(no_args_is_help=True)
 podcast_app = typer.Typer(no_args_is_help=True)
+research_group_app = typer.Typer(no_args_is_help=True)
 
 app.add_typer(paper_app, name="paper")
 app.add_typer(graph_app, name="graph")
@@ -42,6 +43,7 @@ app.add_typer(bootstrap_app, name="bootstrap")
 app.add_typer(architecture_app, name="architecture")
 app.add_typer(narration_app, name="narration")
 app.add_typer(podcast_app, name="podcast")
+app.add_typer(research_group_app, name="research-group")
 
 
 def emit(value: Any) -> None:
@@ -181,6 +183,51 @@ def paper_upload(path: Path) -> None:
 def paper_update(paper_id: str, data: str = typer.Option(..., help="JSON string or @file")) -> None:
     payload = _require_chinese_agent_prose(parse_json(data))
     emit(client.request("PATCH", f"/api/papers/{paper_id}", json=payload))
+
+
+@paper_app.command("assign-group")
+def paper_assign_group(paper_id: str, group_id: str) -> None:
+    """Bind a paper to the canonical research group selected by the metadata Agent."""
+    emit(
+        client.request(
+            "PATCH",
+            f"/api/papers/{paper_id}",
+            json={"research_group_id": group_id},
+        )
+    )
+
+
+@paper_app.command("metadata-context")
+def paper_metadata_context(paper_id: str) -> None:
+    emit(client.request("GET", f"/api/papers/{paper_id}/metadata-context"))
+
+
+@paper_app.command("first-page")
+def paper_first_page(paper_id: str, max_chars: int = 2500) -> None:
+    """Return a short, non-persisted affiliation/author snippet."""
+    emit(
+        client.request(
+            "GET",
+            f"/api/papers/{paper_id}/first-page",
+            params={"max_chars": max_chars},
+            timeout=120,
+        )
+    )
+
+
+@paper_app.command("metadata-complete")
+def paper_metadata_complete(
+    paper_id: str,
+    status: str = typer.Option("completed", help="completed or failed"),
+    note: str | None = typer.Option(None, help="short evidence or unresolved reason"),
+) -> None:
+    emit(
+        client.request(
+            "POST",
+            f"/api/papers/{paper_id}/metadata-enrichment/complete",
+            json={"status": status, "note": note},
+        )
+    )
 
 
 @paper_app.command("ignore")
@@ -549,6 +596,38 @@ def brief_translate(brief_id: str, force: bool = False) -> None:
             "POST", f"/api/briefs/{brief_id}/abstract-translations", params={"force": force}
         )
     )
+
+
+@research_group_app.command("search")
+def research_group_search(
+    query: str,
+    limit: int = typer.Option(20, min=1, max=200),
+) -> None:
+    """Search groups by English/Chinese name, institution, alias, or focus."""
+    emit(
+        client.request(
+            "GET",
+            "/api/research-groups",
+            params={"q": query, "limit": limit},
+        )
+    )
+
+
+@research_group_app.command("get")
+def research_group_get(group_id: str) -> None:
+    emit(client.request("GET", f"/api/research-groups/{group_id}"))
+
+
+@research_group_app.command("create")
+def research_group_create(data: str = typer.Option(..., help="JSON string or @file")) -> None:
+    emit(client.request("POST", "/api/research-groups", json=parse_json(data)))
+
+
+@research_group_app.command("update")
+def research_group_update(
+    group_id: str, data: str = typer.Option(..., help="JSON string or @file")
+) -> None:
+    emit(client.request("PATCH", f"/api/research-groups/{group_id}", json=parse_json(data)))
 
 
 @narration_app.command("get")

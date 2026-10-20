@@ -11,6 +11,8 @@ from sqlalchemy import select
 
 from frontier.agent_runner import _parse_citations
 from frontier.api.papers import _translation_key
+from frontier.database import SessionLocal
+from frontier.models import Paper
 from frontier.schemas import PaperCreate, TranslationRequest
 from frontier.services.document_reader import (
     DOCUMENT_SCHEMA_VERSION,
@@ -1058,15 +1060,10 @@ def test_brief_publish_drops_papers_that_started_reading_after_ranking(
     assert [item["paper"]["id"] for item in published.json()["items"]] == [eligible["id"]]
 
 
-def test_brief_accepts_configured_limit_and_prewarms_configured_leading_papers(
+def test_brief_accepts_configured_limit_without_automatic_document_prewarm(
     client: TestClient,
     monkeypatch,
 ) -> None:
-    queued_batches: list[list[str]] = []
-    monkeypatch.setattr(
-        "frontier.api.briefs.queue_document_conversions",
-        lambda paper_ids, *, limit: queued_batches.append(list(paper_ids)[:limit]),
-    )
     monkeypatch.setattr(
         "frontier.api.briefs.get_setting",
         lambda _session, key, default: {
@@ -1079,10 +1076,8 @@ def test_brief_accepts_configured_limit_and_prewarms_configured_leading_papers(
         "/api/briefs",
         json={"brief_date": "2026-07-30", "title": "Featured text cache test"},
     ).json()
-    featured_ids = []
     for index in range(5):
         paper = create_paper(client, f"Featured cache paper {index}")
-        featured_ids.append(paper["id"])
         assert (
             client.post(
                 f"/api/briefs/{brief['id']}/items",
@@ -1111,15 +1106,10 @@ def test_brief_accepts_configured_limit_and_prewarms_configured_leading_papers(
     published = client.post(f"/api/briefs/{brief['id']}/publish")
 
     assert published.status_code == 200, published.text
-    assert queued_batches == [featured_ids[:4]]
+    assert len(published.json()["items"]) == 10
 
 
 def test_pdf_upload_and_extract(client: TestClient, monkeypatch) -> None:
-    queued_batches: list[tuple[list[str], int]] = []
-    monkeypatch.setattr(
-        "frontier.api.papers.queue_document_conversions",
-        lambda paper_ids, *, limit=4: queued_batches.append((list(paper_ids), limit)),
-    )
     document = pymupdf.open()
     page = document.new_page()
     page.insert_text((72, 72), "A Tactile Robot Paper")
@@ -1132,7 +1122,6 @@ def test_pdf_upload_and_extract(client: TestClient, monkeypatch) -> None:
     )
     assert response.status_code == 200, response.text
     paper = response.json()["paper"]
-    assert queued_batches == [([paper["id"]], 1)]
     assert paper["pdf_version"]
     pdf_response = client.get(f"/api/papers/{paper['id']}/pdf?v={paper['pdf_version']}")
     assert pdf_response.status_code == 200
@@ -1153,6 +1142,29 @@ def test_pdf_upload_and_extract(client: TestClient, monkeypatch) -> None:
         ).status_code
         == 400
     )
+
+
+def test_arxiv_pdf_uses_source_redirect_without_local_download(client: TestClient) -> None:
+    paper = create_paper(client, "arXiv redirect paper")
+    with SessionLocal() as session:
+        item = session.get(Paper, paper["id"])
+        assert item is not None
+        item.source = "arxiv"
+        item.arxiv_id = "2410.24164"
+        item.arxiv_version = 4
+        session.commit()
+
+    response = client.get(
+        f"/api/papers/{paper['id']}/pdf",
+        follow_redirects=False,
+    )
+    assert response.status_code == 302
+    assert response.headers["location"] == "https://arxiv.org/pdf/2410.24164v4"
+
+    download = client.post(f"/api/papers/{paper['id']}/download-pdf")
+    assert download.status_code == 200
+    assert download.json()["url"] == "https://arxiv.org/pdf/2410.24164v4"
+    assert download.json()["pdf_path"] is None
 
 
 def test_document_reader_queues_and_serves_cached_result(client: TestClient, monkeypatch) -> None:
@@ -1272,7 +1284,7 @@ def test_document_resources_api_reports_not_ready_without_partial_data(
     response = client.get(f"/api/papers/{paper['id']}/document/resources")
 
     assert response.status_code == 409
-    assert queued == [paper["id"]]
+    assert queued == []
     assert response.json()["detail"]["document_status"]["status"] == "missing"
 
 
@@ -1321,11 +1333,6 @@ def test_manual_ingest_stages_daily_recommendation_and_metadata_edit(
 ) -> None:
     monkeypatch.setattr("frontier.api.papers.settings.enable_codex_runs", True)
     monkeypatch.setattr("frontier.api.papers.submit_task", lambda _task_id: True)
-    queued_batches: list[tuple[list[str], int]] = []
-    monkeypatch.setattr(
-        "frontier.api.papers.queue_document_conversions",
-        lambda paper_ids, *, limit=4: queued_batches.append((list(paper_ids), limit)),
-    )
     document = pymupdf.open()
     page = document.new_page()
     page.insert_text((72, 72), "A User Added Tactile Foundation Policy")
@@ -1342,8 +1349,6 @@ def test_manual_ingest_stages_daily_recommendation_and_metadata_edit(
     result = response.json()
     assert result["analysis_task_id"]
     assert result["paper"]["analysis_status"] == "queued"
-    assert queued_batches == [([result["paper"]["id"]], 1)]
-
     latest = client.get("/api/briefs/latest")
     assert latest.status_code == 200
     manual_items = [
@@ -1389,11 +1394,6 @@ def test_manual_ingest_stages_daily_recommendation_and_metadata_edit(
 
 
 def test_manual_ingest_can_defer_agent_analysis(client: TestClient, monkeypatch) -> None:
-    queued_batches: list[tuple[list[str], int]] = []
-    monkeypatch.setattr(
-        "frontier.api.papers.queue_document_conversions",
-        lambda paper_ids, *, limit=4: queued_batches.append((list(paper_ids), limit)),
-    )
     document = pymupdf.open()
     page = document.new_page()
     page.insert_text((72, 72), "Deferred Agent Analysis Paper")
@@ -1409,7 +1409,6 @@ def test_manual_ingest_can_defer_agent_analysis(client: TestClient, monkeypatch)
     result = response.json()
     assert result["analysis_task_id"] is None
     assert result["paper"]["analysis_status"] is None
-    assert queued_batches == [([result["paper"]["id"]], 1)]
     latest = client.get("/api/briefs/latest").json()
     assert any(item["paper"]["id"] == result["paper"]["id"] for item in latest["items"])
 

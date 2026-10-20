@@ -15,9 +15,10 @@ from fastapi import (
     Form,
     HTTPException,
     Query,
+    Response,
     UploadFile,
 )
-from fastapi.responses import FileResponse, StreamingResponse
+from fastapi.responses import FileResponse, RedirectResponse, StreamingResponse
 from sqlalchemy import Text, and_, case, cast, func, or_, select, update
 from sqlalchemy.orm import Session
 
@@ -33,6 +34,7 @@ from ..models import (
     PaperNode,
     PaperTag,
     ReadingProgress,
+    ResearchGroup,
     ResearchNode,
     Tag,
     TaskRun,
@@ -46,6 +48,7 @@ from ..schemas import (
     IgnorePaper,
     PaperAgentContextSyncRequest,
     PaperCreate,
+    PaperMetadataEnrichmentComplete,
     PaperMetadataUpdate,
     PaperNarrationCommit,
     PaperUpdate,
@@ -87,13 +90,13 @@ from ..services.document_reader import (
     document_asset,
     document_status,
     queue_document_conversion,
-    queue_document_conversions,
 )
 from ..services.document_resources import RESOURCE_KINDS, structured_document_resources
+from ..services.first_page import paper_first_page_text
 from ..services.ingest import (
     create_or_update_paper,
     download_paper_pdf,
-    ensure_pdf_text_cache,
+    extract_pdf_text,
     ingest_arxiv,
     ingest_pdf_bytes,
     ingest_url,
@@ -119,6 +122,8 @@ from ..services.paper_agent_context import (
     build_paper_agent_context,
     sync_paper_agent_context,
 )
+from ..services.paper_metadata import queue_metadata_enrichment
+from ..services.paper_sources import arxiv_html_url, arxiv_pdf_url
 from ..services.podcast_content import (
     PodcastContentError,
     PodcastContentNotFoundError,
@@ -128,7 +133,13 @@ from ..services.podcast_content import (
     commit_paper_narration,
     narration_payload,
 )
-from ..services.research_groups import group_for_paper, serialize_group, upsert_group_from_paper
+from ..services.research_groups import (
+    assign_research_group,
+    clear_research_group,
+    group_for_paper,
+    serialize_group,
+    upsert_group_from_paper,
+)
 from ..services.task_control import ACTIVE_TASK_STATUSES, serialized_task_claim
 from ..services.task_dispatcher import submit_task
 from ..services.translation_provider import stream_translation_prompt
@@ -191,6 +202,10 @@ def _serialize_paper(session: Session, paper: Paper, *, detail: bool = False) ->
     payload["nodes"] = [dict(row._mapping) for row in nodes]
     pdf_path = Path(paper.pdf_path) if paper.pdf_path else None
     payload["has_pdf"] = bool(pdf_path and pdf_path.exists())
+    payload["pdf_source_url"] = arxiv_pdf_url(paper) or (
+        f"/api/papers/{paper.id}/pdf" if payload["has_pdf"] else None
+    )
+    payload["html_source_url"] = arxiv_html_url(paper)
     if pdf_path and pdf_path.exists():
         pdf_stat = pdf_path.stat()
         payload["pdf_version"] = f"{pdf_stat.st_mtime_ns:x}-{pdf_stat.st_size:x}"
@@ -602,7 +617,8 @@ def add_arxiv(
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except Exception as exc:
         raise HTTPException(status_code=502, detail=f"arXiv ingestion failed: {exc}") from exc
-    background_tasks.add_task(queue_document_conversions, [paper.id], limit=1)
+    for task in queue_metadata_enrichment(session, [paper.id], reason="arxiv-ingest"):
+        background_tasks.add_task(submit_task, task.id)
     if recommend:
         return _manual_ingest_result(session, paper, created, background_tasks, analyze=analyze)
     return {"paper": _serialize_paper(session, paper, detail=True), "created": created}
@@ -622,7 +638,8 @@ def add_url(
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except Exception as exc:
         raise HTTPException(status_code=502, detail=f"URL ingestion failed: {exc}") from exc
-    background_tasks.add_task(queue_document_conversions, [paper.id], limit=1)
+    for task in queue_metadata_enrichment(session, [paper.id], reason="url-ingest"):
+        background_tasks.add_task(submit_task, task.id)
     if recommend:
         return _manual_ingest_result(session, paper, created, background_tasks, analyze=analyze)
     return {"paper": _serialize_paper(session, paper, detail=True), "created": created}
@@ -647,7 +664,8 @@ async def add_pdf(
         paper, created = ingest_pdf_bytes(session, content, file.filename or "upload.pdf")
     except Exception as exc:
         raise HTTPException(status_code=400, detail=f"PDF ingestion failed: {exc}") from exc
-    background_tasks.add_task(queue_document_conversions, [paper.id], limit=1)
+    for task in queue_metadata_enrichment(session, [paper.id], reason="upload-ingest"):
+        background_tasks.add_task(submit_task, task.id)
     if recommend:
         return _manual_ingest_result(session, paper, created, background_tasks, analyze=analyze)
     return {"paper": _serialize_paper(session, paper, detail=True), "created": created}
@@ -656,6 +674,75 @@ async def add_pdf(
 @router.get("/{paper_id}")
 def get_paper(paper_id: str, session: Annotated[Session, Depends(get_session)]) -> dict:
     return _serialize_paper(session, _paper_or_404(session, paper_id), detail=True)
+
+
+@router.get("/{paper_id}/metadata-context")
+def get_paper_metadata_context(
+    paper_id: str, session: Annotated[Session, Depends(get_session)]
+) -> dict:
+    """Compact, non-analysis context for the ingestion metadata Agent."""
+    paper = _paper_or_404(session, paper_id)
+    group = group_for_paper(session, paper.id)
+    return {
+        "id": paper.id,
+        "title": paper.title,
+        "abstract": paper.abstract,
+        "authors": paper.authors or [],
+        "first_author": paper.first_author,
+        "corresponding_author": paper.corresponding_author,
+        "primary_affiliation": paper.primary_affiliation,
+        "arxiv_id": paper.arxiv_id,
+        "arxiv_version": paper.arxiv_version,
+        "source": paper.source,
+        "source_url": paper.source_url,
+        "pdf_url": paper.pdf_url,
+        "research_group_id": paper.research_group_id,
+        "research_group": serialize_group(session, group, detail=True) if group else None,
+        "metadata_enrichment": (paper.metadata_json or {}).get("metadata_enrichment"),
+    }
+
+
+@router.get("/{paper_id}/first-page")
+def get_paper_first_page(
+    paper_id: str,
+    session: Annotated[Session, Depends(get_session)],
+    max_chars: int = Query(default=2500, ge=200, le=8000),
+) -> dict:
+    """Expose a short affiliation snippet without retaining the PDF or HTML."""
+    return paper_first_page_text(
+        session, _paper_or_404(session, paper_id), max_chars=max_chars
+    )
+
+
+@router.post("/{paper_id}/metadata-enrichment/complete")
+def complete_paper_metadata_enrichment(
+    paper_id: str,
+    payload: PaperMetadataEnrichmentComplete,
+    session: Annotated[Session, Depends(get_session)],
+) -> dict:
+    paper = _paper_or_404(session, paper_id)
+    state = dict((paper.metadata_json or {}).get("metadata_enrichment") or {})
+    note = payload.note.strip() if payload.note and payload.note.strip() else None
+    paper.metadata_json = {
+        **(paper.metadata_json or {}),
+        "metadata_enrichment": {
+            **state,
+            "status": payload.status,
+            "note": note,
+            "error": note if payload.status == "failed" else None,
+            "updated_at": datetime.now(UTC).isoformat(),
+        },
+    }
+    log_operation(
+        session,
+        actor="agent",
+        action="paper.metadata_enrichment_completed",
+        entity_type="paper",
+        entity_id=paper.id,
+        detail={"status": payload.status, "note": note},
+    )
+    session.commit()
+    return _serialize_paper(session, paper, detail=True)
 
 
 @router.get("/{paper_id}/narration")
@@ -740,6 +827,8 @@ def update_paper(
     suggested_tags = changes.pop("suggested_tags", None)
     research_group_summary = changes.pop("research_group_summary", None)
     update_research_group_summary = "research_group_summary" in payload.model_fields_set
+    research_group_id = changes.pop("research_group_id", None)
+    update_research_group_id = "research_group_id" in payload.model_fields_set
     open_questions = changes.pop("open_questions", None)
     update_open_questions = "open_questions" in payload.model_fields_set
     protected_fields = manual_bibliographic_fields(session, paper)
@@ -800,7 +889,16 @@ def update_paper(
         }
     if suggested_tags is not None:
         paper.metadata_json = {**(paper.metadata_json or {}), "suggested_tags": suggested_tags}
-    upsert_group_from_paper(session, paper)
+    if update_research_group_id:
+        if research_group_id:
+            group = session.get(ResearchGroup, research_group_id)
+            if group is None:
+                raise HTTPException(status_code=404, detail="Research group not found")
+            assign_research_group(session, paper, group)
+        else:
+            clear_research_group(session, paper)
+    else:
+        upsert_group_from_paper(session, paper)
     log_operation(
         session,
         actor="agent",
@@ -827,6 +925,8 @@ def update_paper_metadata(
     open_questions = changes.pop("open_questions", None)
     research_group_summary = changes.pop("research_group_summary", None)
     update_research_group_summary = "research_group_summary" in payload.model_fields_set
+    research_group_id = changes.pop("research_group_id", None)
+    update_research_group_id = "research_group_id" in payload.model_fields_set
     update_open_questions = "open_questions" in payload.model_fields_set
     interest_level = changes.pop("interest_level", None)
     quality_level = changes.pop("quality_level", None)
@@ -907,6 +1007,16 @@ def update_paper_metadata(
         }
     if tag_ids is not None:
         _replace_paper_tags(session, paper.id, tag_ids, new_tags)
+    if update_research_group_id:
+        if research_group_id:
+            group = session.get(ResearchGroup, research_group_id)
+            if group is None:
+                raise HTTPException(status_code=404, detail="Research group not found")
+            assign_research_group(session, paper, group)
+        else:
+            clear_research_group(session, paper)
+    else:
+        upsert_group_from_paper(session, paper)
     if (
         interest_level is not None
         or quality_level is not None
@@ -1455,6 +1565,13 @@ def confirm_feedback(
 @router.post("/{paper_id}/download-pdf")
 def fetch_pdf(paper_id: str, session: Annotated[Session, Depends(get_session)]) -> dict:
     paper = _paper_or_404(session, paper_id)
+    if source_url := arxiv_pdf_url(paper):
+        return {
+            "paper_id": paper.id,
+            "pdf_path": None,
+            "url": source_url,
+            "source": "arxiv",
+        }
     try:
         path = download_paper_pdf(session, paper)
     except ValueError as exc:
@@ -1465,8 +1582,12 @@ def fetch_pdf(paper_id: str, session: Annotated[Session, Depends(get_session)]) 
 
 
 @router.get("/{paper_id}/pdf")
-def get_pdf(paper_id: str, session: Annotated[Session, Depends(get_session)]) -> FileResponse:
+def get_pdf(
+    paper_id: str, session: Annotated[Session, Depends(get_session)]
+) -> Response:
     paper = _paper_or_404(session, paper_id)
+    if source_url := arxiv_pdf_url(paper):
+        return RedirectResponse(source_url, status_code=302)
     try:
         path = download_paper_pdf(session, paper)
     except Exception as exc:
@@ -1484,17 +1605,12 @@ def get_pdf_text(
     paper_id: str,
     session: Annotated[Session, Depends(get_session)],
     force: bool = False,
-) -> FileResponse:
+) -> dict:
     paper = _paper_or_404(session, paper_id)
     try:
-        cache = ensure_pdf_text_cache(session, paper, force=force)
+        return extract_pdf_text(session, paper, force=force)
     except Exception as exc:
         raise HTTPException(status_code=400, detail=f"PDF extraction failed: {exc}") from exc
-    return FileResponse(
-        cache,
-        media_type="application/json",
-        headers={"Cache-Control": "private, no-store"},
-    )
 
 
 @router.get("/{paper_id}/document")
@@ -1548,8 +1664,6 @@ def get_document_resources(
     except Exception as exc:
         raise HTTPException(status_code=400, detail=f"Document lookup failed: {exc}") from exc
     if document.get("status") != "ready":
-        if document.get("status") in {"missing", "processing"}:
-            queue_document_conversion(paper_id)
         raise HTTPException(
             status_code=409,
             detail={

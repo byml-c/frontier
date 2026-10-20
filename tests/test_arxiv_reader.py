@@ -110,6 +110,29 @@ def test_arxiv_html_preserves_semantics_without_duplicate_captions(tmp_path: Pat
     assert "A complete reference" in reference["text"]
 
 
+def test_arxiv_html_without_asset_fetch_uses_source_urls(tmp_path: Path) -> None:
+    payload = convert_arxiv_html_content(
+        ARXIV_HTML,
+        base_url="https://arxiv.org/html/1234.56789",
+        pdf_path=None,
+        paper_id="paper-direct",
+        version="v1",
+        root=tmp_path / "reader",
+        schema_version=10,
+        fetch_asset=None,
+    )
+
+    pictures = [block for block in payload["blocks"] if block["kind"] == "picture"]
+    assert pictures[0]["image_url"] == (
+        "https://arxiv.org/html/paper-v1/figure.png"
+    )
+    assert pictures[1]["image_url"] == (
+        "https://arxiv.org/html/paper-v1/vector-figure.svg"
+    )
+    assert pictures[0]["page_number"] is None
+    assert not (tmp_path / "reader" / "assets").exists()
+
+
 def test_arxiv_html_attaches_a_preceding_textless_image_to_its_caption(
     tmp_path: Path,
 ) -> None:

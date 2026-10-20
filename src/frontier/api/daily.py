@@ -38,7 +38,9 @@ from ..services.daily_selections import (
     append_daily_selection,
     daily_selection_items,
 )
+from ..services.paper_sources import arxiv_html_url, arxiv_pdf_url
 from ..services.research_day import current_research_date
+from ..services.research_groups import group_for_paper, serialize_group
 
 router = APIRouter(prefix="/api/daily", tags=["daily"])
 
@@ -86,12 +88,21 @@ def _public_paper(session: Session, paper: Paper) -> dict:
         "first_author": paper.first_author,
         "corresponding_author": paper.corresponding_author,
         "primary_affiliation": paper.primary_affiliation,
+        "research_group_id": paper.research_group_id,
+        "research_group": (
+            serialize_group(session, group)
+            if (group := group_for_paper(session, paper.id)) is not None
+            else None
+        ),
         "research_group_summary": (paper.metadata_json or {}).get(RESEARCH_GROUP_SUMMARY_KEY),
         "source": paper.source,
         "source_url": paper.source_url,
+        "pdf_source_url": arxiv_pdf_url(paper),
+        "html_source_url": arxiv_html_url(paper),
         "arxiv_id": paper.arxiv_id,
         "published_at": paper.published_at.isoformat() if paper.published_at else None,
         "status": paper.status,
+        "catalog_summary": paper.catalog_summary,
         "summary": paper.summary,
         "agent_comment": paper.agent_comment,
         "problem": paper.problem,

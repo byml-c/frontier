@@ -257,6 +257,56 @@ def build_prompt(task: TaskRun) -> str:
         "on their own correctly indented Markdown lines; do not use dollar-sign math delimiters. "
         f"The task id is {task.id}. {delegation_policy}{research_capabilities}"
     )
+    if task.kind == "paper_metadata_enrichment":
+        paper_ids = [
+            str(value)
+            for value in (payload.get("paper_ids") or [])
+            if isinstance(value, str)
+        ][:10]
+        return f"""{workflow_common}
+
+Process metadata enrichment for these newly ingested papers:
+{json.dumps(paper_ids, ensure_ascii=False)}
+
+For each paper, in order:
+1. Read `frontier paper metadata-context PAPER_ID`.
+2. Inspect the title, abstract, ordered authors, affiliations, source URL, and current group.
+3. Search the existing group index before creating anything. Run several focused queries with
+   `frontier research-group search "<query>" --limit 20` using the English lab name, Chinese
+   translation, institution, acronym, PI name, and any alias found in the abstract or paper page.
+   Search both English and Chinese when either is plausible. Treat an exact institution plus lab
+   or PI match as the same group; do not create a duplicate because of punctuation, abbreviation,
+   or translated naming.
+4. If the affiliation or group identity is still ambiguous, run
+   `frontier paper first-page PAPER_ID --max-chars 2500`. This returns only a short HTML/PDF
+   snippet and does not create a document cache. Use only explicit evidence from the snippet.
+   You may also consult an official lab page or other public source when the local index is
+   ambiguous; record the URL in the evidence note. Never invent a group from a generic institution.
+5. If an existing group is the same lab, reuse it. Do not overwrite a user-verified group's name
+   or institution. You may add a missing alias or research focus with
+   `frontier research-group update GROUP_ID --data @data/tasks/{task.id}/group-update.json`.
+6. If no existing group matches, create exactly one new group with
+   `frontier research-group create --data @data/tasks/{task.id}/group.json`. Use
+   `verification_status: "candidate"`, the explicit lab/group name when available, the institution,
+   and a concise research focus. If only an institution is explicit, create an institution-level
+   group and mark confidence `low`; never invent a lab name.
+7. Bind the paper with `frontier paper assign-group PAPER_ID GROUP_ID`. The server creates the
+   group tag automatically.
+8. Use `frontier paper update PAPER_ID --data @data/tasks/{task.id}/paper.json` only for
+   evidence-backed bibliographic corrections: ordered authors, `first_author`,
+   `primary_affiliation`, and `corresponding_author`. Do not write `summary`, scores,
+   translations, recommendation fields, or long paper analysis.
+9. If the evidence is insufficient, leave the group unbound and record the concrete missing
+   evidence in the final summary; do not guess.
+10. Finish each paper with
+    `frontier paper metadata-complete PAPER_ID --status completed --note "<brief evidence>"`.
+    Use `--status failed` only for a concrete source/tool failure; an unresolved group is still a
+    completed metadata pass with an explanatory note.
+
+Do not translate abstracts. Do not score the paper. Do not write `Paper.summary`. Do not modify
+the research graph. Keep all temporary JSON under `data/tasks/{task.id}/`. Finish with a compact
+JSON summary of papers processed, group matches, groups created, and unresolved papers.
+"""
     if task.kind == "daily_brief":
         run_date = (
             payload.get("date") or datetime.now(ZoneInfo(settings.timezone)).date().isoformat()
@@ -299,9 +349,10 @@ Frontier mutation yourself. Candidate analysis must not use or create a paper-re
 that long-lived main Agent is reserved for papers the user actively reads and discusses.
 Download and read candidate full texts sequentially. Do not start parallel PDF downloads, document
 conversion processes, or full-text CLI commands on this low-resource deployment.
-Write only pre-reading catalog fields such as `Paper.summary` and recommendation analysis. Never
-write `completion_summary` or `completion_summary_structured`; those are user-reading conclusions
-owned exclusively by the paper main Agent after the user finishes reading.
+Write only pre-reading catalog fields such as `Paper.catalog_summary` and recommendation analysis.
+`Paper.summary` is reserved for the leading full-text subset and must remain null for every other
+selected paper. Never write `completion_summary` or `completion_summary_structured`; those are
+user-reading conclusions owned exclusively by the paper main Agent after the user finishes reading.
 Use the context's `source_digest` when creating the brief as `interest_context_digest`. Adjust
 discovery and ranking using topic affinities, recent semantic attitude evidence, hit rates, and
 Brier scores. When feedback support is small, avoid overfitting and keep modest cross-domain
@@ -351,21 +402,13 @@ continuous final brief between 20 and 50 papers (never more than the
 configured brief limit), while at most min(fulltext_limit, featured_limit, 10) receive full-text
 analysis and preprocessing. Rank the entire pool first. Store `topic_relevance_score`,
 `author_influence_score`, and independent quality `research_score`; fold author influence into
-relevance modestly without displaying it. For every paper that enters the final 20–50, correct the
-bibliographic block before saving the recommendation. Treat the automatically parsed first author,
-first affiliation, and corresponding author as untrusted hints. Use the ordered author list, explicit
-affiliation markers, and corresponding-author footnotes from the source; when abstract metadata is
-insufficient, inspect only the first PDF/HTML page for this extraction. Do not infer a corresponding
-author from seniority or author position. Save `first_author`, `primary_affiliation`, and
-`corresponding_author` with `frontier paper update`, plus a concise Simplified Chinese
-`research_group_summary` describing the institution and the core lab/team's completed research focus.
-Also include `metadata_json.research_group_profile` with the group's canonical `name`, `institution`,
-`homepage_url`, `research_focus`, `representative_contributions`, `paper_contribution`,
-`is_representative`, `confidence`, and `evidence`; this is merged into the durable group index.
-If a field cannot be verified, leave it null and say so in the summary. Include
-`metadata_json.agent_bibliography` with `source: "agent"`, a `confidence` of `high`, `medium`, or
-`low`, and a short `evidence` note. A user-edited bibliographic field is protected and must not be
-overwritten. Save a concise, information-dense Agent comment for every
+relevance modestly without displaying it. Bibliographic metadata, research groups, and group tags
+are owned by the ingestion metadata Agent. Do not repeat affiliation/group extraction or create
+groups in this daily scoring run; use the existing fields and leave missing values blank.
+For every paper that enters the final 20–50, save a concise Simplified-Chinese
+`catalog_summary` (not `Paper.summary`) and an information-dense Agent comment. Only the leading
+full-text subset may write `Paper.summary` and detailed analysis fields. Save a concise,
+information-dense Agent comment for every
 final brief item; do not put the entire 100-paper intermediate pool in the brief. The comment must explain what the work does
 and its concrete methodological or empirical highlight, such as the proposed mechanism, benchmark,
 real-robot result, or a reported limitation. Never explain or repeat the numerical quality or

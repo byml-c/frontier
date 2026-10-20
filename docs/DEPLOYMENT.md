@@ -182,3 +182,18 @@ sudo 密码，避免无人值守部署永久卡住。脚本会通过一个短暂
 `FRONTIER_HOST` 和 `FRONTIER_PORT`，不要求服务使用默认的 `127.0.0.1:8000`。
 
 首版没有应用层登录。若不用 Tailscale，必须在应用前增加等价的设备身份验证；不能直接把 8000 暴露到公网。
+
+## 6. arXiv 直链与启动资源迁移
+
+arXiv 论文的 PDF、HTML 图片和公式资源由浏览器直接访问 `arxiv.org`，服务端不转发媒体文件。
+服务端仍需访问 arXiv 以执行扫描和实时文本解析；受限网络请配置 `FRONTIER_OUTBOUND_PROXY`。
+
+`FRONTIER_STORAGE_MIGRATION_MODE` 控制启动清理：
+
+- `dry-run`：只写审计文件，不删除文件
+- `auto`：删除 arXiv 的本地 PDF、`data/text` 和旧 document 缓存，保留上传 PDF 与架构图引用的 document 资源
+- `off`：跳过清理
+
+清理结果写入 `data/migrations/storage.arxiv_link_only.v1.json`。首次部署建议先用
+`dry-run` 检查结果，再切换为 `auto`。`FRONTIER_DOCUMENT_RUNTIME_SLOTS=5` 控制实时文档槽位；
+服务重启会清空 `data/runtime/documents`，不会保留纯文本或 document 缓存。

@@ -3,7 +3,7 @@ from __future__ import annotations
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Query
-from sqlalchemy import Text, func, or_, select
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from ..database import get_session
@@ -29,19 +29,25 @@ def list_research_groups(
     status: str | None = None,
     limit: int = Query(default=100, ge=1, le=200),
 ) -> list[dict]:
-    statement = select(ResearchGroup).order_by(ResearchGroup.updated_at.desc()).limit(limit)
+    statement = select(ResearchGroup).order_by(ResearchGroup.updated_at.desc())
+    groups = list(session.scalars(statement).all())
     if q and (query := q.strip()):
-        token = f"%{query}%"
-        statement = statement.where(
-            or_(
-                ResearchGroup.name.ilike(token),
-                ResearchGroup.institution.ilike(token),
-                func.cast(ResearchGroup.aliases, Text).ilike(token),
-            )
-        )
+        needle = query.casefold()
+
+        def matches(group: ResearchGroup) -> bool:
+            values = [
+                group.name,
+                group.institution,
+                group.representative_summary or "",
+                *(group.aliases or []),
+                *(group.research_focus or []),
+            ]
+            return any(needle in str(value).casefold() for value in values if value)
+
+        groups = [group for group in groups if matches(group)]
     if status:
-        statement = statement.where(ResearchGroup.verification_status == status)
-    return [serialize_group(session, group) for group in session.scalars(statement)]
+        groups = [group for group in groups if group.verification_status == status]
+    return [serialize_group(session, group) for group in groups[:limit]]
 
 
 @router.get("/{group_id}")
@@ -76,7 +82,7 @@ def create_research_group(
         representative_contributions=payload.representative_contributions,
         representative_summary=payload.representative_summary,
         confidence=payload.confidence,
-        verification_status="verified",
+        verification_status=payload.verification_status,
     )
     session.add(group)
     session.commit()

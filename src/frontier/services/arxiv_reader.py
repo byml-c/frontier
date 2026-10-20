@@ -32,7 +32,7 @@ class ArxivHtmlUnavailable(RuntimeError):
 
 def convert_from_arxiv_html(
     arxiv_id: str,
-    pdf_path: Path,
+    pdf_path: Path | None,
     *,
     paper_id: str,
     version: str,
@@ -40,6 +40,8 @@ def convert_from_arxiv_html(
     schema_version: int,
     known_authors: list[dict[str, Any]] | None = None,
     on_progress: Callable[..., None] | None = None,
+    persist_html: bool = False,
+    fetch_assets: bool = False,
 ) -> dict[str, Any]:
     source_id = arxiv_id.strip().removeprefix("arXiv:")
     source_url = f"{ARXIV_HTML_BASE}{source_id}"
@@ -68,7 +70,8 @@ def convert_from_arxiv_html(
         if "ltx_document" not in html:
             raise ArxivHtmlUnavailable("arXiv HTML 中没有可读取的 LaTeX 文档结构")
         root.mkdir(parents=True, exist_ok=True)
-        (root / "arxiv.html").write_text(html, encoding="utf-8")
+        if persist_html:
+            (root / "arxiv.html").write_text(html, encoding="utf-8")
         try:
             return convert_arxiv_html_content(
                 html,
@@ -79,7 +82,11 @@ def convert_from_arxiv_html(
                 root=root,
                 schema_version=schema_version,
                 known_authors=known_authors,
-                fetch_asset=lambda url, target: _fetch_asset(client, url, target),
+                fetch_asset=(
+                    (lambda url, target: _fetch_asset(client, url, target))
+                    if fetch_assets
+                    else None
+                ),
                 on_progress=on_progress,
             )
         except ArxivHtmlUnavailable:
@@ -92,7 +99,7 @@ def convert_arxiv_html_content(
     html: str,
     *,
     base_url: str,
-    pdf_path: Path,
+    pdf_path: Path | None,
     paper_id: str,
     version: str,
     root: Path,
@@ -110,9 +117,10 @@ def convert_arxiv_html_content(
         on_progress("structuring", "正在整理 LaTeX 章节与引用", 42, 3)
     title_node = article.select_one("h1.ltx_title_document")
     title = _plain_text(title_node) if isinstance(title_node, Tag) else pdf_path.stem
-    page_locator = _PageLocator(pdf_path)
+    page_locator = _PageLocator(pdf_path) if pdf_path is not None else None
     assets = root / "assets"
-    assets.mkdir(parents=True, exist_ok=True)
+    if fetch_asset is not None:
+        assets.mkdir(parents=True, exist_ok=True)
     blocks: list[dict[str, Any]] = []
 
     selected = article.select(
@@ -143,12 +151,14 @@ def convert_arxiv_html_content(
             fetch_asset=fetch_asset,
         )
         if block is not None:
-            block["page_number"] = page_locator.locate(
-                f"{block.get('caption', '')} {block.get('text', '')}"
+            block["page_number"] = (
+                page_locator.locate(f"{block.get('caption', '')} {block.get('text', '')}")
+                if page_locator is not None
+                else None
             )
             composite = bool(block.pop("_composite_figure", False))
             aspect_ratio = block.pop("_figure_aspect_ratio", None)
-            if composite and isinstance(aspect_ratio, int | float):
+            if composite and isinstance(aspect_ratio, int | float) and pdf_path is not None:
                 rendered = _render_pdf_figure(
                     pdf_path,
                     page_number=int(block["page_number"]),
@@ -251,30 +261,44 @@ def _build_block(
         if isinstance(caption_node, Tag):
             block["caption_html"] = _safe_fragment(caption_node, base_url, inner=True)
         if visual_source is not None and _is_composite_figure(visual_source):
-            figure_html, image_urls = _cache_figure_fragment(
-                visual_source,
-                base_url=base_url,
-                paper_id=paper_id,
-                assets=assets,
-                fetch_asset=fetch_asset,
-            )
+            if fetch_asset:
+                figure_html, image_urls = _cache_figure_fragment(
+                    visual_source,
+                    base_url=base_url,
+                    paper_id=paper_id,
+                    assets=assets,
+                    fetch_asset=fetch_asset,
+                )
+            else:
+                figure_html, image_urls = _absolutize_figure_fragment(
+                    visual_source,
+                    base_url=base_url,
+                )
             if figure_html:
                 block["html"] = figure_html
             if image_urls:
                 block["image_urls"] = image_urls
             block["_composite_figure"] = True
             block["_figure_aspect_ratio"] = _figure_aspect_ratio(visual_source)
-        elif asset_url and fetch_asset:
+        elif asset_url:
             source_url = asset_url
-            suffix = Path(urlparse(source_url).path).suffix.lower()
-            if suffix not in _ASSET_SUFFIXES:
-                suffix = ".img"
-            target = assets / f"{hashlib.sha1(source_url.encode(), usedforsecurity=False).hexdigest()[:20]}{suffix}"
-            try:
-                saved = fetch_asset(source_url, target)
-                block["image_url"] = f"/api/papers/{paper_id}/document/assets/{saved.name}"
-            except (httpx.HTTPError, OSError, ValueError) as exc:
-                logger.warning("Could not cache arXiv figure %s: %s", source_url, exc)
+            if fetch_asset:
+                suffix = Path(urlparse(source_url).path).suffix.lower()
+                if suffix not in _ASSET_SUFFIXES:
+                    suffix = ".img"
+                target = assets / (
+                    f"{hashlib.sha1(source_url.encode(), usedforsecurity=False).hexdigest()[:20]}"
+                    f"{suffix}"
+                )
+                try:
+                    saved = fetch_asset(source_url, target)
+                    block["image_url"] = (
+                        f"/api/papers/{paper_id}/document/assets/{saved.name}"
+                    )
+                except (httpx.HTTPError, OSError, ValueError) as exc:
+                    logger.warning("Could not cache arXiv figure %s: %s", source_url, exc)
+            else:
+                block["image_url"] = urljoin(base_url, source_url)
         if not block.get("image_url") and isinstance(table, Tag):
             block["html"] = _safe_fragment(table, base_url)
         if not block.get("image_url") and not block.get("html"):
@@ -447,6 +471,32 @@ def _cache_figure_fragment(
     return _safe_fragment(clone, base_url, inner=True), cached_urls
 
 
+def _absolutize_figure_fragment(node: Tag, *, base_url: str) -> tuple[str, list[str]]:
+    """Rewrite figure media to arXiv URLs without downloading any asset."""
+    clone_soup = BeautifulSoup(str(node), "lxml")
+    clone = clone_soup.find(node.name)
+    if not isinstance(clone, Tag):
+        return "", []
+    caption = clone.find("figcaption")
+    if isinstance(caption, Tag):
+        caption.decompose()
+    image_urls: list[str] = []
+    for media in clone.find_all(["img", "object", "embed", "source"]):
+        value = _media_source(media)
+        if not value:
+            continue
+        source_url = urljoin(base_url, value)
+        image_urls.append(source_url)
+        if media.name == "object":
+            media["data"] = source_url
+        elif media.name in {"img", "embed"}:
+            media["src"] = source_url
+            media.attrs.pop("srcset", None)
+        elif media.name == "source":
+            media["srcset"] = source_url
+    return _safe_fragment(clone, base_url, inner=True), list(dict.fromkeys(image_urls))
+
+
 def _render_pdf_figure(
     pdf_path: Path,
     *,
@@ -603,6 +653,18 @@ def _safe_fragment(node: Tag, base_url: str, *, inner: bool = False) -> str:
             link["href"] = urljoin(base_url, href)
             link["target"] = "_blank"
             link["rel"] = "noopener noreferrer"
+    for media in clone.find_all(["img", "object", "embed", "source"]):
+        value = _media_source(media)
+        if not value:
+            continue
+        absolute = urljoin(base_url, value)
+        if media.name == "object":
+            media["data"] = absolute
+        elif media.name in {"img", "embed"}:
+            media["src"] = absolute
+            media.attrs.pop("srcset", None)
+        elif media.name == "source":
+            media["srcset"] = absolute
     return clone.decode_contents() if inner else str(clone)
 
 

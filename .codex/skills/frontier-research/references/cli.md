@@ -13,6 +13,10 @@ uv run frontier paper add-arxiv 2410.24164
 uv run frontier paper add-url https://example.org/paper
 uv run frontier paper upload /absolute/path/paper.pdf
 uv run frontier paper update PAPER_ID --data '{"summary":"...","research_score":0.9}'
+uv run frontier paper metadata-context PAPER_ID
+uv run frontier paper first-page PAPER_ID --max-chars 2500
+uv run frontier paper assign-group PAPER_ID GROUP_ID
+uv run frontier paper metadata-complete PAPER_ID --status completed --note "explicit affiliation"
 uv run frontier paper download PAPER_ID
 uv run frontier paper text PAPER_ID
 uv run frontier paper text PAPER_ID --page 7
@@ -37,6 +41,23 @@ Use the task prompt's `paper agent-context --conversation-id` command only when 
 `paper finish` stores the six completion-summary sections structurally. The Server also renders a
 legacy Markdown `completion_summary` for older private clients. `user_attitude` is private and is
 excluded from daily and brief summary payloads.
+
+## Research groups
+
+```bash
+uv run frontier research-group search 'Embodied Control Lab' --limit 20
+uv run frontier research-group search '具身控制实验室' --limit 20
+uv run frontier research-group get GROUP_ID
+uv run frontier research-group create --data @data/tasks/TASK_ID/group.json
+uv run frontier research-group update GROUP_ID --data @data/tasks/TASK_ID/group-update.json
+```
+
+The metadata Agent must search by English name, Chinese name, institution, acronym, PI, and
+existing aliases before creating a group. Reuse an exact institution/lab or PI match. Create a
+group only when no reliable match exists; use `verification_status: "candidate"` for a new group.
+`paper assign-group` makes `Paper.research_group_id` canonical and creates the group tag. Use
+`paper first-page` when the affiliation is ambiguous; it returns a short non-persisted snippet.
+The metadata Agent does not translate abstracts, score papers, or write `Paper.summary`.
 
 Use `paper resources` for the cached structured arXiv HTML representation. It returns formula TeX,
 figure and table captions plus local asset paths, searchable table text, bibliography entries, and

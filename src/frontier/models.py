@@ -47,6 +47,9 @@ class Paper(Base, TimestampMixin):
     first_author: Mapped[str | None] = mapped_column(String(255))
     corresponding_author: Mapped[str | None] = mapped_column(String(255))
     primary_affiliation: Mapped[str | None] = mapped_column(Text)
+    research_group_id: Mapped[str | None] = mapped_column(
+        ForeignKey("research_groups.id", ondelete="SET NULL"), index=True
+    )
     source: Mapped[str] = mapped_column(String(50), default="manual", index=True)
     source_url: Mapped[str | None] = mapped_column(Text)
     pdf_url: Mapped[str | None] = mapped_column(Text)
@@ -59,6 +62,7 @@ class Paper(Base, TimestampMixin):
     last_considered_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     status: Mapped[str] = mapped_column(String(32), default="candidate", index=True)
     ignored_reason: Mapped[str | None] = mapped_column(Text)
+    catalog_summary: Mapped[str | None] = mapped_column(Text)
     summary: Mapped[str | None] = mapped_column(Text)
     agent_comment: Mapped[str | None] = mapped_column(Text)
     problem: Mapped[str | None] = mapped_column(Text)
@@ -396,6 +400,9 @@ class Tag(Base, TimestampMixin):
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
     name: Mapped[str] = mapped_column(String(100), unique=True, index=True)
     color: Mapped[str | None] = mapped_column(String(20))
+    research_group_id: Mapped[str | None] = mapped_column(
+        ForeignKey("research_groups.id", ondelete="CASCADE"), unique=True, index=True
+    )
 
 
 class PaperTag(Base, TimestampMixin):

@@ -259,15 +259,16 @@ def test_daily_prompt_owns_candidate_metadata_and_can_delegate_reading() -> None
     assert "canonical summary and analysis fields" in prompt
     assert "delegate independent full-text evidence extraction" in prompt
     assert "must not use or create a paper-reading Conversation" in prompt
-    assert "Never\nwrite `completion_summary` or `completion_summary_structured`" in prompt
+    assert "Never write `completion_summary` or `completion_summary_structured`" in prompt
     assert "without user-confirmed feedback as missing data" in prompt
     assert "exclude those papers from hit-rate and calibration" in prompt
     assert "denominators" in prompt
     assert "Only `completed` feedback and explicit `ignored` actions are observations" in prompt
     assert "Legacy `is_interested=false` and `is_quality=false`" in prompt
     assert "are storage defaults, not user judgments" in prompt
-    assert "metadata_json.research_group_profile" in prompt
-    assert "representative_contributions" in prompt
+    assert "owned by the ingestion metadata Agent" in prompt
+    assert "`Paper.catalog_summary`" in prompt
+    assert "`Paper.summary` is reserved" in prompt
 
 
 @pytest.mark.parametrize(

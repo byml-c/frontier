@@ -17,6 +17,7 @@ from ..schemas import (
     PodcastEpisodeCommit,
     PodcastEpisodeStatusUpdate,
 )
+from .paper_sources import paper_source_version
 
 
 class PodcastContentError(RuntimeError):
@@ -67,13 +68,7 @@ def _digest(value: Any) -> str:
 
 
 def _pdf_version(paper: Paper) -> str | None:
-    if not paper.pdf_path:
-        return None
-    path = Path(paper.pdf_path)
-    if not path.is_file():
-        return None
-    stat = path.stat()
-    return f"{stat.st_mtime_ns:x}-{stat.st_size:x}"
+    return paper_source_version(paper)
 
 
 def paper_narration_source_digest(paper: Paper) -> str:

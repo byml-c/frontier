@@ -6,6 +6,7 @@ from typing import Any
 
 PAPER_ANALYSIS_PROSE_FIELDS = frozenset(
     {
+        "catalog_summary",
         "summary",
         "agent_comment",
         "problem",

@@ -32,6 +32,7 @@ class PaperUpdate(BaseModel):
     first_author: str | None = None
     corresponding_author: str | None = None
     primary_affiliation: str | None = None
+    research_group_id: str | None = None
     research_group_summary: str | None = Field(default=None, max_length=2_000)
     source: str | None = None
     source_url: str | None = None
@@ -40,6 +41,7 @@ class PaperUpdate(BaseModel):
     arxiv_version: int | None = None
     doi: str | None = None
     published_at: date | None = None
+    catalog_summary: str | None = None
     summary: str | None = None
     agent_comment: str | None = None
     problem: str | None = None
@@ -108,12 +110,14 @@ class PaperMetadataUpdate(BaseModel):
     first_author: str | None = None
     corresponding_author: str | None = None
     primary_affiliation: str | None = None
+    research_group_id: str | None = None
     research_group_summary: str | None = Field(default=None, max_length=2_000)
     source: str | None = None
     source_url: str | None = None
     pdf_url: str | None = None
     doi: str | None = None
     published_at: date | None = None
+    catalog_summary: str | None = None
     summary: str | None = None
     agent_comment: str | None = None
     problem: str | None = None
@@ -143,6 +147,7 @@ class ResearchGroupCreate(BaseModel):
     representative_contributions: list[dict[str, Any]] = Field(default_factory=list)
     representative_summary: str | None = None
     confidence: Literal["high", "medium", "low"] = "medium"
+    verification_status: Literal["candidate", "verified"] = "candidate"
 
 
 class ResearchGroupUpdate(BaseModel):
@@ -155,6 +160,11 @@ class ResearchGroupUpdate(BaseModel):
     representative_summary: str | None = None
     confidence: Literal["high", "medium", "low"] | None = None
     verification_status: Literal["candidate", "verified", "archived"] | None = None
+
+
+class PaperMetadataEnrichmentComplete(BaseModel):
+    status: Literal["completed", "failed"] = "completed"
+    note: str | None = Field(default=None, max_length=2_000)
 
 
 class IgnorePaper(BaseModel):

@@ -327,7 +327,7 @@ function PaperCard({
         </Typography>
         <Box sx={{ mt: 1 }}>
           <ExpandablePaperText lines={3}>
-            {paper.summary || paper.abstract || "摘要与分析信息待补充。"}
+            {paper.summary || paper.catalog_summary || paper.abstract || "摘要与分析信息待补充。"}
           </ExpandablePaperText>
         </Box>
       </CardContent>

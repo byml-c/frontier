@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-from pathlib import Path
 from typing import Any
 
 from sqlalchemy import func, select
@@ -25,6 +24,7 @@ from .common import as_json_value
 from .completion_summary import completion_summary_structured
 from .interest_evidence import paper_interest_level, paper_quality_level
 from .paper_conversations import find_paper_conversation
+from .paper_sources import paper_source_version
 
 _PAPER_FACT_FIELDS = (
     "id",
@@ -80,13 +80,7 @@ _SYNC_SECTION_KEYS = (
 
 
 def _pdf_version(paper: Paper) -> str | None:
-    if not paper.pdf_path:
-        return None
-    path = Path(paper.pdf_path)
-    if not path.is_file():
-        return None
-    stat = path.stat()
-    return f"{stat.st_mtime_ns:x}-{stat.st_size:x}"
+    return paper_source_version(paper)
 
 
 def _paper_facts(paper: Paper) -> dict[str, Any]:
@@ -387,6 +381,7 @@ def _raw_paper_agent_context(
         "architecture": _architecture_summary(session, paper.id, current_pdf_version=pdf_version),
         "document": {
             "has_pdf": pdf_version is not None,
+            "has_source": pdf_version is not None,
             "pdf_version": pdf_version,
             "full_text_included": False,
         },

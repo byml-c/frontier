@@ -90,6 +90,61 @@ def run_schema_migrations() -> None:
                 "INSERT INTO schema_migrations(version, applied_at) "
                 "VALUES (1, CURRENT_TIMESTAMP)"
             )
+        if 2 not in applied:
+            if connection.dialect.name == "sqlite":
+                paper_columns = {
+                    str(row[1])
+                    for row in connection.exec_driver_sql("PRAGMA table_info(papers)").fetchall()
+                }
+                if "research_group_id" not in paper_columns:
+                    connection.exec_driver_sql(
+                        "ALTER TABLE papers ADD COLUMN research_group_id VARCHAR(36)"
+                    )
+                tag_columns = {
+                    str(row[1])
+                    for row in connection.exec_driver_sql("PRAGMA table_info(tags)").fetchall()
+                }
+                if "research_group_id" not in tag_columns:
+                    connection.exec_driver_sql(
+                        "ALTER TABLE tags ADD COLUMN research_group_id VARCHAR(36)"
+                    )
+            else:
+                connection.exec_driver_sql(
+                    "ALTER TABLE papers ADD COLUMN IF NOT EXISTS research_group_id VARCHAR(36)"
+                )
+                connection.exec_driver_sql(
+                    "ALTER TABLE tags ADD COLUMN IF NOT EXISTS research_group_id VARCHAR(36)"
+                )
+            connection.exec_driver_sql(
+                "CREATE INDEX IF NOT EXISTS ix_papers_research_group_id "
+                "ON papers(research_group_id)"
+            )
+            connection.exec_driver_sql(
+                "CREATE UNIQUE INDEX IF NOT EXISTS ux_tags_research_group_id "
+                "ON tags(research_group_id) WHERE research_group_id IS NOT NULL"
+            )
+            connection.exec_driver_sql(
+                "INSERT INTO schema_migrations(version, applied_at) "
+                "VALUES (2, CURRENT_TIMESTAMP)"
+            )
+        if 3 not in applied:
+            if connection.dialect.name == "sqlite":
+                columns = {
+                    str(row[1])
+                    for row in connection.exec_driver_sql("PRAGMA table_info(papers)").fetchall()
+                }
+                if "catalog_summary" not in columns:
+                    connection.exec_driver_sql(
+                        "ALTER TABLE papers ADD COLUMN catalog_summary TEXT"
+                    )
+            else:
+                connection.exec_driver_sql(
+                    "ALTER TABLE papers ADD COLUMN IF NOT EXISTS catalog_summary TEXT"
+                )
+            connection.exec_driver_sql(
+                "INSERT INTO schema_migrations(version, applied_at) "
+                "VALUES (3, CURRENT_TIMESTAMP)"
+            )
 
 
 def get_session() -> Generator[Session, None, None]:

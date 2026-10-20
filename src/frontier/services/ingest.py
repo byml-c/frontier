@@ -7,6 +7,7 @@ import logging
 import multiprocessing
 import os
 import socket
+import tempfile
 import threading
 import uuid
 from contextlib import contextmanager
@@ -30,6 +31,7 @@ from ..schemas import PaperCreate
 from .common import log_operation, normalize_title, parse_arxiv_id
 from .heavy_work import paper_processing_slot
 from .outbound_network import external_httpx_kwargs
+from .paper_sources import arxiv_pdf_url, download_pdf_to_temp
 
 USER_AGENT = "FrontierResearch/0.1 (personal research assistant)"
 ARXIV_API = "https://export.arxiv.org/api/query"
@@ -694,38 +696,64 @@ def _extract_pdf_text_to_cache(path: Path, cache: Path, paper_id: str) -> None:
 
 
 def ensure_pdf_text_cache(session: Session, paper: Paper, *, force: bool = False) -> Path:
-    """Validate or build a bounded cache without retaining the full text in Web memory."""
-
-    with paper_processing_slot():
-        cache = _pdf_text_cache_path(paper.id)
-        if cache.exists() and not force:
-            _load_pdf_text_cache(cache)
-            return cache
-        path = download_paper_pdf(session, paper)
-        _extract_pdf_text_to_cache(path, cache, paper.id)
-        return cache
+    """Compatibility shim for callers that still expect a temporary text path."""
+    del force
+    payload = extract_pdf_text(session, paper)
+    with tempfile.NamedTemporaryFile(
+        prefix=f"frontier-text-{paper.id[:8]}-", suffix=".json", delete=False
+    ) as temporary:
+        target = Path(temporary.name)
+    target.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+    return target
 
 
 def extract_pdf_text(session: Session, paper: Paper, *, force: bool = False) -> dict:
-    """Compatibility helper for in-process callers that explicitly need a dict."""
-    with paper_processing_slot():
-        cache = ensure_pdf_text_cache(session, paper, force=force)
-        return _load_pdf_text_cache(cache)
+    """Extract text into a temporary file and never retain it after the call."""
+    del force
+    with paper_processing_slot(), tempfile.TemporaryDirectory() as root:
+        target = Path(root) / "text.json"
+        source = None
+        temporary_pdf: Path | None = None
+        if paper.pdf_path and Path(paper.pdf_path).is_file():
+            source = Path(paper.pdf_path)
+        elif arxiv_pdf_url(paper):
+            temporary_pdf = download_pdf_to_temp(paper)
+            source = temporary_pdf
+        elif paper.pdf_url:
+            source = download_paper_pdf(session, paper)
+        if source is None:
+            raise ValueError("PDF unavailable")
+        try:
+            _extract_pdf_text_to_cache(source, target, paper.id)
+            return _load_pdf_text_cache(target)
+        finally:
+            if temporary_pdf is not None:
+                temporary_pdf.unlink(missing_ok=True)
 
 
 def render_pdf_page(session: Session, paper: Paper, page_number: int, *, dpi: int = 144) -> Path:
     """Render one PDF page for Agent-side inspection of figures and layouts."""
-    with paper_processing_slot():
-        path = download_paper_pdf(session, paper)
+    with paper_processing_slot(), tempfile.TemporaryDirectory():
+        temporary_pdf: Path | None = None
+        if paper.pdf_path and Path(paper.pdf_path).is_file():
+            path = Path(paper.pdf_path)
+        elif arxiv_pdf_url(paper):
+            temporary_pdf = download_pdf_to_temp(paper)
+            path = temporary_pdf
+        else:
+            path = download_paper_pdf(session, paper)
         document = pymupdf.open(path)
         try:
             if page_number < 1 or page_number > document.page_count:
                 raise ValueError(f"Page must be between 1 and {document.page_count}")
-            target = settings.text_dir / f"{paper.id}-page-{page_number}-{dpi}dpi.png"
-            if not target.exists():
-                page = document[page_number - 1]
-                pixmap = page.get_pixmap(dpi=dpi, alpha=False)
-                pixmap.save(target)
+            renders = settings.runtime_dir / "renders"
+            renders.mkdir(parents=True, exist_ok=True)
+            target = renders / f"{paper.id}-page-{page_number}-{dpi}dpi.png"
+            page = document[page_number - 1]
+            pixmap = page.get_pixmap(dpi=dpi, alpha=False)
+            pixmap.save(target)
             return target
         finally:
             document.close()
+            if temporary_pdf is not None:
+                temporary_pdf.unlink(missing_ok=True)

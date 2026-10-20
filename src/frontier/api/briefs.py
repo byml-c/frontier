@@ -39,7 +39,6 @@ from ..services.completion_summary import (
     brief_completion_summary,
     completion_summary_structured,
 )
-from ..services.document_reader import queue_document_conversions
 from ..services.interest_evidence import (
     build_interest_context,
     interest_context_snapshot,
@@ -50,6 +49,7 @@ from ..services.manual_recommendations import (
     current_analysis_state,
     is_daily_recommendation_eligible,
 )
+from ..services.paper_sources import arxiv_html_url, arxiv_pdf_url
 from ..services.podcast_content import (
     PodcastContentError,
     PodcastContentNotFoundError,
@@ -64,6 +64,7 @@ from ..services.podcast_generation import (
     PodcastGenerationError,
     get_or_create_podcast_task,
 )
+from ..services.research_groups import group_for_paper, serialize_group
 from ..services.task_control import (
     ACTIVE_TASK_STATUSES,
     get_or_create_daily_task,
@@ -135,11 +136,20 @@ def _paper_snapshot(session: Session, paper: Paper) -> dict:
         "first_author": paper.first_author,
         "corresponding_author": paper.corresponding_author,
         "primary_affiliation": paper.primary_affiliation,
+        "research_group_id": paper.research_group_id,
+        "research_group": (
+            serialize_group(session, group)
+            if (group := group_for_paper(session, paper.id)) is not None
+            else None
+        ),
         "research_group_summary": metadata.get(RESEARCH_GROUP_SUMMARY_KEY),
         "source": paper.source,
         "source_url": paper.source_url,
         "pdf_url": paper.pdf_url,
+        "pdf_source_url": arxiv_pdf_url(paper),
+        "html_source_url": arxiv_html_url(paper),
         "published_at": paper.published_at.isoformat() if paper.published_at else None,
+        "catalog_summary": paper.catalog_summary,
         "summary": paper.summary,
         "agent_comment": paper.agent_comment,
         "problem": paper.problem,
@@ -214,6 +224,7 @@ def _serialize_brief(session: Session, brief: Brief, *, detail: bool = True) -> 
                     # correct a brief comment after publication without rewriting
                     # the historical membership decision.
                     "summary": paper.summary,
+                    "catalog_summary": paper.catalog_summary,
                     "agent_comment": paper.agent_comment,
                     "problem": paper.problem,
                     "innovation": paper.innovation,
@@ -230,6 +241,12 @@ def _serialize_brief(session: Session, brief: Brief, *, detail: bool = True) -> 
                     "first_author": paper.first_author,
                     "corresponding_author": paper.corresponding_author,
                     "primary_affiliation": paper.primary_affiliation,
+                    "research_group_id": paper.research_group_id,
+                    "research_group": (
+                        serialize_group(session, group)
+                        if (group := group_for_paper(session, paper.id)) is not None
+                        else None
+                    ),
                     "research_group_summary": (paper.metadata_json or {}).get(
                         RESEARCH_GROUP_SUMMARY_KEY
                     ),
@@ -756,16 +773,6 @@ def publish_brief(
     }
     brief.status = "published"
     brief.published_at = datetime.now(UTC)
-    # Preprocess the ranked top ten even when an older Agent run did not mark the
-    # tier explicitly; the continuous brief list is rank-driven.
-    preprocess_limit = min(
-        10,
-        int(get_setting(session, "fulltext_limit", 10)),
-        int(get_setting(session, "featured_limit", FEATURED_LIMIT_DEFAULT)),
-    )
-    featured_paper_ids = [paper.id for _item, paper in rows if _item.tier != "manual"][
-        :preprocess_limit
-    ]
     log_operation(
         session,
         actor="agent",
@@ -776,15 +783,11 @@ def publish_brief(
         detail={
             "item_count": len(rows),
             "excluded_reading_count": len(excluded_rows),
-            "text_cache_count": len(featured_paper_ids),
+            "text_cache_count": 0,
         },
     )
     session.commit()
     result = _serialize_brief(session, brief)
-    if featured_paper_ids:
-        background_tasks.add_task(
-            queue_document_conversions, featured_paper_ids, limit=preprocess_limit
-        )
     try:
         load_translation_provider_config()
     except TranslationProviderError:
