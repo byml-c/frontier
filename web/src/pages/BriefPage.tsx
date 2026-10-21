@@ -53,7 +53,7 @@ export function BriefPage() {
         <Tab value="rated" label={`已评分 ${ordered.filter((item) => item.paper.agent_score_confirmed || item.paper.agent_quality_confirmed || item.paper.agent_interest_confirmed || item.paper.screening_feedback || item.paper.screening_quality_level || item.paper.screening_interest_level).length}`} />
       </Tabs>
     </Stack>
-    {!visible.length && <Empty title={view === "rated" ? "还没有评分记录" : "暂无论文"} body={view === "rated" ? "点击论文下方的质量或相关度标签，记录你的偏好。" : "切换其他分类继续阅读。"} />}
+    {!visible.length && <Empty title={view === "rated" ? "还没有评分记录" : "暂无论文"} body={view === "rated" ? "点击论文下方的相关度标签，记录你的偏好。" : "切换其他分类继续阅读。"} />}
     <Stack spacing={1.5}>
       {visible.map((item) => (
         <PaperCard
@@ -63,7 +63,7 @@ export function BriefPage() {
           paper={{ ...item.paper, status: item.current_status, interest_level: item.interest_level, quality_level: item.quality_level, is_interested: item.is_interested, is_quality: item.is_quality }}
           rank={item.rank}
           featured={item.tier === "featured"}
-          preprocessed={item.rank > 0 && item.rank <= 10}
+          preprocessed={Boolean(item.paper.problem || item.paper.innovation || item.paper.experiment || item.paper.limitations || item.paper.open_questions)}
         />
       ))}
     </Stack>

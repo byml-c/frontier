@@ -15,3 +15,8 @@ export const INTEREST_OPTIONS: readonly { value: InterestLevel; label: string }[
   { value: "high", label: "较相关" },
   { value: "interested", label: "高度相关" },
 ] as const;
+
+export function relevanceScoreLabel(score?: number | null): string {
+  if (score == null || !Number.isFinite(score) || score < 0 || score > 1) return "待评估";
+  return INTEREST_OPTIONS[Math.round(score * 4)].label;
+}

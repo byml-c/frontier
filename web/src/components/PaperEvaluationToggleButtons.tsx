@@ -1,10 +1,10 @@
 import CheckRounded from "@mui/icons-material/CheckRounded";
 import { Box, ButtonBase, Grid, Stack, ToggleButton, ToggleButtonGroup, Tooltip, Typography } from "@mui/material";
 import type { InterestLevel, QualityLevel } from "../types";
-import { INTEREST_OPTIONS, QUALITY_OPTIONS } from "./paperEvaluation";
+import { INTEREST_OPTIONS, QUALITY_OPTIONS, relevanceScoreLabel } from "./paperEvaluation";
 
-function AgentScore({ value, confirmed, disabled = false, onConfirm }: { value?: number | null; confirmed: boolean; disabled?: boolean; onConfirm?: () => void }) {
-  const label = value == null ? "—" : value.toFixed(2);
+function AgentScore({ value, scoreLabel, confirmed, disabled = false, onConfirm }: { value?: number | null; scoreLabel?: string; confirmed: boolean; disabled?: boolean; onConfirm?: () => void }) {
+  const label = scoreLabel ?? (value == null ? "—" : value.toFixed(2));
   const score = (
     <ButtonBase
       aria-label={confirmed ? `已认可 Agent 打分 ${label}` : `认可 Agent 打分 ${label}`}
@@ -70,8 +70,9 @@ export function PaperChoiceToggle<Value extends string>({
         "& .MuiToggleButton-root": {
           height: 34,
           minWidth: 0,
-          px: { xs: .625, sm: 1 },
+          px: { xs: .375, sm: 1 },
           py: 0,
+          fontSize: { xs: ".6875rem", sm: ".8125rem" },
           whiteSpace: "nowrap",
           textTransform: "none",
         },
@@ -92,6 +93,7 @@ function EvaluationMetric<Value extends string>({
   onAgentScoreConfirm,
   options,
   score,
+  scoreLabel,
   title,
   value,
   agentConfirmed,
@@ -101,6 +103,7 @@ function EvaluationMetric<Value extends string>({
   onChange: (value: Value) => void;
   options: readonly { value: Value; label: string }[];
   score?: number | null;
+  scoreLabel?: string;
   agentScoreConfirmed: boolean;
   agentConfirmed?: boolean;
   onAgentScoreConfirm?: () => void;
@@ -110,9 +113,10 @@ function EvaluationMetric<Value extends string>({
   return (
     <Box sx={{ p: 1.25, border: 1, borderColor: "divider", borderRadius: 1.5 }}>
       <Typography variant="subtitle2" fontWeight={750} sx={{ mb: .75 }}>{title}</Typography>
-      <Stack direction="row" alignItems="center" spacing={.75}>
+      <Stack direction={{ xs: "column", sm: "row" }} alignItems={{ xs: "stretch", sm: "center" }} spacing={.75}>
         <AgentScore
           value={score}
+          scoreLabel={scoreLabel}
           confirmed={agentConfirmed ?? agentScoreConfirmed}
           disabled={disabled}
           onConfirm={onAgentScoreConfirm}
@@ -151,6 +155,7 @@ export function PaperEvaluationToggleButtons({
   disabled = false,
   qualityTitle = "研究价值",
   interestTitle = "个人相关性",
+  showQuality = true,
 }: {
   researchScore?: number | null;
   relevanceScore?: number | null;
@@ -167,10 +172,11 @@ export function PaperEvaluationToggleButtons({
   disabled?: boolean;
   qualityTitle?: string;
   interestTitle?: string;
+  showQuality?: boolean;
 }) {
   return (
     <Grid container spacing={1.25}>
-      <Grid size={{ xs: 12, md: 6 }}>
+      {showQuality && <Grid size={{ xs: 12, md: 6 }}>
         <EvaluationMetric
           title={qualityTitle}
           score={researchScore}
@@ -183,11 +189,12 @@ export function PaperEvaluationToggleButtons({
           onAgentScoreConfirm={onQualityAgentScoreConfirm ?? onAgentScoreConfirm}
           onChange={onQualityChange}
         />
-      </Grid>
-      <Grid size={{ xs: 12, md: 6 }}>
+      </Grid>}
+      <Grid size={{ xs: 12, md: showQuality ? 6 : 12 }}>
         <EvaluationMetric
           title={interestTitle}
           score={relevanceScore}
+          scoreLabel={relevanceScoreLabel(relevanceScore)}
           ariaLabel="我的兴趣度评价"
           value={interestLevel}
           options={INTEREST_OPTIONS}

@@ -161,9 +161,10 @@ export function PaperCard({
           </Box>
         </Stack>
 
-        <Stack direction="row" alignItems="center" spacing={1} sx={{ mt: 1, pt: 1, borderTop: 1, borderColor: "divider" }}>
+        <Stack direction={{ xs: "column", sm: "row" }} alignItems={{ xs: "stretch", sm: "center" }} spacing={1} sx={{ mt: 1, pt: 1, borderTop: 1, borderColor: "divider" }}>
           <Box sx={{ flex: 1, minWidth: 0 }}>
             <PaperEvaluationToggleButtons
+              showQuality={false}
               researchScore={paper.research_score}
               relevanceScore={paper.relevance_score}
               qualityLevel={quality}
@@ -180,7 +181,7 @@ export function PaperCard({
             />
           </Box>
           <Tooltip title={paper.screening_feedback ? "编辑补充说明" : "补充偏好说明"}>
-            <IconButton aria-label="补充筛选说明" aria-expanded={Boolean(commentAnchor)} aria-haspopup="dialog" color={paper.screening_feedback ? "primary" : "default"} onClick={(event) => { setComment(paper.screening_feedback || ""); setCommentAnchor(event.currentTarget); }}><EditNoteRounded /></IconButton>
+            <IconButton aria-label="补充筛选说明" aria-expanded={Boolean(commentAnchor)} aria-haspopup="dialog" color={paper.screening_feedback ? "primary" : "default"} sx={{ alignSelf: { xs: "flex-end", sm: "center" } }} onClick={(event) => { setComment(paper.screening_feedback || ""); setCommentAnchor(event.currentTarget); }}><EditNoteRounded /></IconButton>
           </Tooltip>
         </Stack>
 

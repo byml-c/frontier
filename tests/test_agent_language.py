@@ -278,6 +278,23 @@ def test_daily_prompt_publishes_abstract_only_recommendations() -> None:
     assert "min(fulltext_limit, featured_limit, 10)" not in prompt
 
 
+@pytest.mark.parametrize("recovery", [False, True])
+def test_daily_prompt_rates_only_five_level_relevance_before_reading(recovery: bool) -> None:
+    payload: dict[str, object] = {"date": "2026-10-21"}
+    if recovery:
+        payload["recovery_source_task_ids"] = ["earlier-daily"]
+    prompt = build_prompt(TaskRun(id="daily-rating-task", kind="daily_brief", payload_json=payload))
+
+    assert "Assign only a five-level personal-relevance rating" in prompt
+    assert "0.0 (不相关), 0.25 (较不相关)" in prompt
+    assert "0.5 (一般), 0.75 (较相关), or 1.0 (高度相关)" in prompt
+    assert "do not predict quality or use quality scores for daily ranking" in prompt
+    assert "`research_score` null for abstract-only candidates" in prompt
+    assert "without changing\nthe stored level" in prompt
+    assert "both scores" not in prompt
+    assert "Score quality and relevance independently" not in prompt
+
+
 @pytest.mark.parametrize(
     ("kind", "payload"),
     [

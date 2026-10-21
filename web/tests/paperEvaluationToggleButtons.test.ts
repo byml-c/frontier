@@ -4,6 +4,7 @@ import test from "node:test";
 import {
   INTEREST_OPTIONS,
   QUALITY_OPTIONS,
+  relevanceScoreLabel,
 } from "../src/components/paperEvaluation.ts";
 
 const controlSource = readFileSync(new URL("../src/components/PaperEvaluationToggleButtons.tsx", import.meta.url), "utf8");
@@ -28,6 +29,23 @@ test("interest toggle exposes five levels", () => {
     { value: "high", label: "较相关" },
     { value: "interested", label: "高度相关" },
   ]);
+});
+
+test("Agent relevance shows the five labels, including older continuous scores", () => {
+  assert.deepEqual([0, .25, .5, .75, 1].map(relevanceScoreLabel), INTEREST_OPTIONS.map((option) => option.label));
+  assert.equal(relevanceScoreLabel(.9688), "高度相关");
+  assert.equal(relevanceScoreLabel(.683), "较相关");
+  for (const missing of [undefined, null, NaN, Infinity, -1, 1.1]) {
+    assert.equal(relevanceScoreLabel(missing), "待评估");
+  }
+});
+
+test("daily cards hide quality while reading feedback retains it", () => {
+  const cardSource = readFileSync(new URL("../src/components/PaperCard.tsx", import.meta.url), "utf8");
+  assert.match(cardSource, /showQuality=\{false\}/);
+  assert.match(controlSource, /showQuality = true/);
+  assert.match(controlSource, /showQuality && <Grid/);
+  assert.match(metadataSource, /showQuality=\{paper\.data\?\.status === "completed" \|\| paper\.data\?\.status === "feedback_pending"\}/);
 });
 
 test("all editable paper ratings use the shared compact toggle control", () => {

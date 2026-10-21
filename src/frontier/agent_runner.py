@@ -381,9 +381,10 @@ analysis. Never write `completion_summary` or `completion_summary_structured`; t
 user-reading conclusions owned exclusively by the paper main Agent after the user finishes reading.
 Use the context's `source_digest` when creating the brief as `interest_context_digest`. Adjust
 discovery and ranking using topic affinities, recent semantic attitude evidence, hit rates, and
-Brier scores. When feedback support is small, avoid overfitting and keep modest cross-domain
-exploration. If interest hit rate is weak, tighten personal relevance; if quality hit rate or its
-calibration is weak, raise the evidence threshold independently. The graph describes research
+Brier scores for interest. When feedback support is small, avoid overfitting and keep modest
+cross-domain exploration. If interest hit rate is weak, tighten personal relevance. Quality feedback
+belongs to post-reading evaluation; do not predict quality or use quality scores for daily ranking.
+The graph describes research
 questions and accumulated evidence; it is not by itself proof that the user likes a topic.
 Read `frontier setting list`. Broad discovery domains are `discovery_domains` (normally 3D vision,
 embodied intelligence, and AI agents). These alone define the semantic domain gate. In contrast,
@@ -416,30 +417,36 @@ Then narrow domain-qualified unread papers to about `abstract_limit` candidates 
 80-120) using personal interest. This setting is the POST-screening candidate target, not a cap on
 raw search results or how many abstracts you may inspect for domain screening. Prefer explicit user
 preferences, but reserve about 15% of this shortlist for promising or uncertain work elsewhere in the
-broad domains; VLA/WAM keyword absence must never by itself eliminate a paper. Author influence may
-modestly improve interest, but never bypass the broad domain gate. Do not fill shortages with off-domain
+broad domains; VLA/WAM keyword absence must never by itself eliminate a paper. Author influence must
+not change the personal-relevance rating or bypass the broad domain gate. Do not fill shortages with off-domain
 or already-read papers. Keep shortlist IDs and progress in task-scoped scratch files as needed.
 Save this intermediate pool with `frontier task candidate-pool {task.id} --data @data/tasks/{task.id}/candidate-pool.json`.
 The JSON contains `paper_ids`, `discovery_complete`, and `notes` explaining shortages or incomplete
 coverage. Read `frontier task get {task.id}` to verify persistence. Choose the final brief only from
 this saved pool. Create the brief with `task_id={task.id}` so the Server can validate pool membership.
-Score quality and relevance independently, rank these candidates, then choose a
+Assign only a five-level personal-relevance rating to these candidates, then choose a
 continuous final brief between 20 and 50 papers (never more than the
-configured brief limit). Rank the entire pool first. Store `topic_relevance_score`,
-`author_influence_score`, and independent quality `research_score`; fold author influence into
-relevance modestly without displaying it. Bibliographic metadata, research groups, and group tags
+configured brief limit). Store `relevance_score` as exactly one of 0.0 (不相关), 0.25 (较不相关),
+0.5 (一般), 0.75 (较相关), or 1.0 (高度相关). These are five discrete levels, not a continuous
+prediction: never add decimal precision or blend in author influence. Rank the entire pool by these
+relevance levels; break ties using the user's explicit topic preferences and recency without changing
+the stored level. Do not generate `research_score`, `topic_relevance_score`, or
+`author_influence_score` in this daily workflow. Quality is unknown before reading: leave
+`research_score` null for abstract-only candidates. Never reinterpret an old abstract-based quality
+prediction as a reading judgment. Preserve genuine full-text analysis and user-confirmed feedback.
+Bibliographic metadata, research groups, and group tags
 are owned by the ingestion metadata Agent. Do not repeat affiliation/group extraction or create
 groups in this daily scoring run; use the existing fields and leave missing values blank.
 For every paper that enters the final 20–50, save a concise Simplified-Chinese
 `catalog_summary` (not `Paper.summary`) and a concise, information-dense Agent comment for every
 final brief item; do not put the entire 100-paper intermediate pool in the brief. The comment must explain what the work does
 and its concrete methodological or empirical highlight, such as the proposed mechanism, benchmark,
-real-robot result, or a reported limitation. Never explain or repeat the numerical quality or
-relevance scores in `agent_comment`; scores belong only in their score fields and the ranking.
+real-robot result, or a reported limitation. Never present an abstract-only comment as a quality
+judgment. Do not repeat the relevance rating in `agent_comment`; it belongs in `relevance_score`.
 Before ranking or adding a paper, inspect its existing record and exclude every paper whose
 status is not `candidate`; papers in `reading`, `feedback_pending`, `completed`, or `ignored` status
 must never appear in the daily recommendations. Screen and score the pool from titles, abstracts,
-and authors only. Every selected paper needs a catalog summary, concise comment, both scores,
+and authors only. Every selected paper needs a catalog summary, concise comment, a five-level relevance rating,
 and a recommendation reason; abstract translations are queued by the publish endpoint. Do not publish
 a failure message as a one-paper brief. If fewer than 20 eligible papers exist after broad discovery,
 report the shortage explicitly and do not fabricate extra papers. Catalog summaries, Agent comments,

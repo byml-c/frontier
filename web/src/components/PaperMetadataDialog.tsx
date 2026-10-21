@@ -327,6 +327,7 @@ export function PaperMetadataDialog({
                       {field("agent_comment", "Agent 评语", { multiline: true, minRows: 2 })}
                       {field("recommendation_reason", "推荐理由", { multiline: true, minRows: 3 })}
                       <PaperEvaluationToggleButtons
+                        showQuality={paper.data?.status === "completed" || paper.data?.status === "feedback_pending"}
                         researchScore={paper.data?.research_score}
                         relevanceScore={paper.data?.relevance_score}
                         qualityLevel={qualityLevel}

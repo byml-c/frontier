@@ -34,7 +34,8 @@ candidate, using titles, abstracts, and authors only. It verifies the evidence a
 Frontier mutations itself. Daily candidates do not get a long-lived paper Conversation merely
 because they were screened.
 
-The daily Agent writes `Paper.catalog_summary`, comments, scores, and recommendation reasons.
+The daily Agent writes `Paper.catalog_summary`, comments, a five-level relevance rating, and
+recommendation reasons. Daily screening does not assess paper quality before reading.
 It must not download PDFs, read full texts, preprocess documents, or queue detailed analysis,
 regardless of rank or tier. Preserve existing detailed fields; do not write or clear `Paper.summary`,
 `problem`, `innovation`, `experiment`, `limitations`, `open_questions`, or `full_analysis`.
@@ -68,13 +69,17 @@ those belong exclusively to the paper main Agent after explicit reading completi
    Reserve about 15% for promising/uncertain work within the broad domains. Save IDs with
    `task candidate-pool TASK_ID --data @data/tasks/TASK_ID/candidate-pool.json`; supply `paper_ids`,
    `discovery_complete`, and `notes` for shortages/incomplete coverage. Verify with `task get TASK_ID`.
-5. Rank quality and relevance independently within the saved pool; select 20–50 for the final brief,
-   respecting `brief_limit`. Author influence may modestly inform relevance but cannot bypass domains.
+5. Rate personal relevance using exactly five levels: 不相关 / 较不相关 / 一般 / 较相关 / 高度相关,
+   stored as `relevance_score` 0.0 / 0.25 / 0.5 / 0.75 / 1.0. Rank by relevance, breaking ties by
+   explicit topic preferences and recency; select 20–50 for the final brief within `brief_limit`.
+   Do not generate quality, topic-relevance, or author-influence scores, or blend them into relevance.
+   Leave `research_score` null for abstract-only candidates; preserve genuine full-text analysis and
+   user-confirmed feedback. Quality belongs to post-reading evaluation, not daily ranking.
    Explain shortages rather than inventing candidates or refilling from already-ingested papers.
    Existing papers remain in the library for manual reading, but are not rediscovered in the daily batch.
 6. Assess every selected paper from its title, abstract, and authors. Do not read full PDFs or
    generate detailed analysis, even for the leading papers. `fulltext_limit` does not apply to daily runs.
-7. Record a concise `catalog_summary`, an informative comment, independent scores, and a
+7. Record a concise `catalog_summary`, an informative comment, the five-level relevance rating, and a
    recommendation reason. Do not infer detailed experimental results or limitations beyond the abstract.
 8. Do not attach daily or candidate papers to the graph. Record probable relevance in paper analysis or recommendation fields until the user completes reading and confirms feedback.
 9. Do not add paper-backed node progress during the daily workflow.
