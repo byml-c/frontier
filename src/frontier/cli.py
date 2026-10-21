@@ -589,7 +589,7 @@ def brief_publish(brief_id: str) -> None:
 
 @brief_app.command("recover-failed")
 def brief_recover_failed(brief_id: str) -> None:
-    """Recover an interrupted daily publication; analyzed briefs are protected."""
+    """Rebuild a failed daily draft; analyzed published briefs are protected."""
     emit(client.request("POST", f"/api/briefs/{brief_id}/recover-failed"))
 
 

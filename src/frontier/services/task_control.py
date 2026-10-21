@@ -113,7 +113,25 @@ def _daily_claim(
     if active is not None:
         return TaskClaim(task=active, created=False)
 
-    task = TaskRun(kind="daily_brief", payload_json={**payload, "date": target})
+    # A fresh run must retain the day's discovery provenance. Papers ingested by
+    # an interrupted run are already excluded from subsequent arXiv discovery.
+    previous_runs = session.scalars(
+        select(TaskRun)
+        .where(
+            TaskRun.kind == "daily_brief",
+            TaskRun.payload_json["date"].as_string() == target,
+        )
+        .order_by(TaskRun.created_at.asc(), TaskRun.id.asc())
+    ).all()
+    recovery_sources = [
+        previous.id
+        for previous in previous_runs
+        if (previous.payload_json or {}).get("candidate_pool", {}).get("paper_ids")
+    ]
+    task_payload = {**payload, "date": target}
+    if recovery_sources:
+        task_payload["recovery_source_task_ids"] = recovery_sources
+    task = TaskRun(kind="daily_brief", payload_json=task_payload)
     session.add(task)
     session.flush()
     return TaskClaim(task=task, created=True)

@@ -311,6 +311,27 @@ JSON summary of papers processed, group matches, groups created, and unresolved 
         run_date = (
             payload.get("date") or datetime.now(ZoneInfo(settings.timezone)).date().isoformat()
         )
+        recovery_sources = payload.get("recovery_source_task_ids") or []
+        if recovery_sources:
+            discovery_start = f"""This is recovery of an interrupted or explicitly regenerated daily brief.
+Read `frontier task get SOURCE_TASK_ID` for each of these same-date source tasks:
+{json.dumps(recovery_sources)}.
+Union and deduplicate their saved candidate_pool.paper_ids. Recheck the current paper records;
+retain only status=candidate papers, respecting current user feedback. These are this day's
+previously discovered candidates, not arbitrary old-library refill. Reuse evidence-backed analyses
+already saved, without changing user feedback or reading-completion fields.
+Do NOT run arxiv-discover again in this recovery: library deduplication would hide these papers.
+Use the recovered union as the discovery batch, screen/rank it using the current interests, and
+save the resulting candidate pool under the CURRENT task ID before creating or publishing the brief.
+Keep discovery_complete false if any source pool had incomplete coverage; preserve its scan/prefilter
+limits in the new pool notes. Explain recovery and the number of recovered candidates in the brief.
+The following discovery rules describe normal fresh runs; for this recovery, the saved same-date
+batch replaces external discovery and ingestion. All remaining scoring and publication rules apply."""
+        else:
+            discovery_start = (
+                f"Start discovery with `frontier source arxiv-discover --date {run_date} "
+                "--offset 0 --page-size 100`."
+            )
         return f"""{workflow_common}
 
 Run the daily paper workflow for {run_date}. Start with
@@ -369,7 +390,7 @@ embodied intelligence, and AI agents). These alone define the semantic domain ga
 `initial_interest_domains` (VLA, WAM, etc.), explicit interests, and learned preferences guide interest
 selection and ranking, never the initial retrieval query or the domain gate. General AI agents include
 tool use, planning, multi-agent collaboration, memory, and computer use, not just embodied agents.
-Start discovery with `frontier source arxiv-discover --date {run_date} --offset 0 --page-size 100`.
+{discovery_start}
 This read-only tool scans the configured broad arXiv categories over the recent candidate_lookback_days
 (default 3; Monday through Wednesday use up to 7 days in a single request to cover weekend or holiday
 announcement delays), then applies a high-recall server-side prefilter to obvious vision, robotics, embodied,

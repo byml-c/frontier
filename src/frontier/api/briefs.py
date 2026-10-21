@@ -488,23 +488,28 @@ def recover_failed_brief(
     background_tasks: BackgroundTasks,
     session: Annotated[Session, Depends(get_session)],
 ) -> dict:
-    """Recover an interrupted, accidentally published brief without losing its audit history."""
+    """Rebuild a failed daily draft, or recover an accidental publication, with an audit."""
     from ..config import settings
 
     if not settings.enable_codex_runs:
         raise HTTPException(status_code=503, detail="Agent 运行已在服务器设置中停用")
     brief = _brief_or_404(session, brief_id)
     previous_task = session.get(TaskRun, brief.task_id) if brief.task_id else None
-    if brief.status != "published" or not previous_task or previous_task.status != "failed":
+    if (
+        brief.status not in {"draft", "published"}
+        or not previous_task
+        or previous_task.kind != "daily_brief"
+        or previous_task.status != "failed"
+    ):
         raise HTTPException(
-            status_code=409, detail="Only briefs from failed daily tasks can be recovered"
+            status_code=409, detail="Only drafts or publications from failed daily tasks can recover"
         )
     rows = session.execute(
         select(BriefItem, Paper)
         .join(Paper, Paper.id == BriefItem.paper_id)
         .where(BriefItem.brief_id == brief_id)
     ).all()
-    if any(
+    if brief.status == "published" and any(
         item.tier != "manual"
         and (
             paper.status != "candidate"
@@ -523,7 +528,7 @@ def recover_failed_brief(
         background_tasks=background_tasks,
         session=session,
         action="brief.failed_publication_recovered",
-        reason="恢复意外发布且任务失败的日报",
+        reason="重建失败任务的日报草稿" if brief.status == "draft" else "恢复意外发布且任务失败的日报",
     )
 
 
