@@ -245,7 +245,7 @@ def test_finish_prompt_requires_the_structured_completion_schema() -> None:
     assert "do not reload the complete paper" in prompt
 
 
-def test_daily_prompt_owns_candidate_metadata_and_can_delegate_reading() -> None:
+def test_daily_prompt_publishes_abstract_only_recommendations() -> None:
     prompt = build_prompt(
         TaskRun(
             id="task-daily",
@@ -256,8 +256,8 @@ def test_daily_prompt_owns_candidate_metadata_and_can_delegate_reading() -> None
 
     assert "single daily-workflow root Agent" in prompt
     assert "candidate discovery, bibliographic" in prompt
-    assert "canonical summary and analysis fields" in prompt
-    assert "delegate independent full-text evidence extraction" in prompt
+    assert "catalog summaries and comments" in prompt
+    assert "Use an abstract-only workflow" in prompt
     assert "must not use or create a paper-reading Conversation" in prompt
     assert "Never write `completion_summary` or `completion_summary_structured`" in prompt
     assert "without user-confirmed feedback as missing data" in prompt
@@ -268,7 +268,14 @@ def test_daily_prompt_owns_candidate_metadata_and_can_delegate_reading() -> None
     assert "are storage defaults, not user judgments" in prompt
     assert "owned by the ingestion metadata Agent" in prompt
     assert "`Paper.catalog_summary`" in prompt
-    assert "`Paper.summary` is reserved" in prompt
+    assert "do not download PDFs, read full texts, preprocess documents" in prompt
+    assert "regardless of rank, tier, `fulltext_limit`, or `featured_limit`" in prompt
+    assert "Do not write or clear `Paper.summary`" in prompt
+    assert "preserve any existing" in prompt
+    assert "only when the user explicitly requests it" in prompt
+    assert "Finish immediately after publication" in prompt
+    assert "Phase 2" not in prompt
+    assert "min(fulltext_limit, featured_limit, 10)" not in prompt
 
 
 @pytest.mark.parametrize(
@@ -287,6 +294,9 @@ def test_catalog_analysis_does_not_use_paper_reading_agent(
     assert "stateless catalog/brief analysis run" in prompt
     assert "create or resume a paper Conversation" in prompt
     assert "do not infer the user's attitude" in prompt
+    assert "read the complete extracted full text" in prompt
+    assert "problem, innovation" in prompt
+    assert "experiment evidence, limitations, open_questions" in prompt
 
 
 def test_finish_cli_rejects_english_structured_summary(

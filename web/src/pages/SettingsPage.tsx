@@ -32,7 +32,6 @@ import type { Setting } from "../types";
 const LABELS: Record<string, { label: string; help: string }> = {
   daily_time: { label: "日报启动时间", help: "北京时间，默认 09:05；保存后重新加载运行计划" },
   abstract_limit: { label: "兴趣初筛候选目标", help: "领域筛选后按兴趣收敛到约 100 篇；允许上下浮动 20%，不限制最初浏览的摘要数量" },
-  fulltext_limit: { label: "全文阅读上限", help: "最终排名靠前的论文生成完整分析，最多 10 篇" },
   brief_limit: { label: "简报论文上限", help: "从候选池选出 20–50 篇供速览，最多 50 篇" },
   featured_limit: { label: "重点推荐上限", help: "重点推荐数量必须小于简报总量" },
   candidate_lookback_days: { label: "广泛抓取时间窗口", help: "按 arXiv 提交日期扫描最近文章（UTC）；默认 3 天" },

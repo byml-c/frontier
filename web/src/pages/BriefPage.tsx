@@ -45,7 +45,7 @@ export function BriefPage() {
   return <Container maxWidth="lg" sx={{ py: { xs: 4, md: 5 } }}>
     <PageHeader title={data.title} tabs={<BriefTabs value={briefId ? "archive" : "today"} />} />
     <Stack spacing={1} sx={{ mb: 2 }}>
-      <Typography variant="body2" color="text.secondary">共 {data.items.length} 篇论文，前 10 篇附详细分析。</Typography>
+      <Typography variant="body2" color="text.secondary">共 {data.items.length} 篇论文，详细分析可在论文信息中按需生成。</Typography>
       <Tabs value={view} onChange={(_, next: ViewTab) => setView(next)} variant="scrollable" scrollButtons="auto" aria-label="日报筛选" sx={{ borderBottom: 1, borderColor: "divider" }}>
         <Tab value="all" label={`全部 ${data.items.length}`} />
         <Tab value="top" label="前 10 篇" />

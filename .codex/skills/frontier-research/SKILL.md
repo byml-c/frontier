@@ -28,9 +28,19 @@ Use the `frontier` CLI as the only application-data interface. Let the Server ow
 
 ## Daily brief
 
-The `daily_brief` run is the root Agent for the whole daily ingestion workflow. It owns candidate discovery, bibliographic verification, ranking, and the canonical summary/analysis written for each candidate. It may delegate independent per-paper evidence extraction to read-only subagents, but it verifies their outputs and performs all Frontier mutations itself. Daily candidates do not get a long-lived paper Conversation merely because they were screened.
+The `daily_brief` run is the root Agent for the whole daily ingestion workflow. It owns candidate
+discovery, bibliographic verification, ranking, and the catalog summaries/comments written for each
+candidate, using titles, abstracts, and authors only. It verifies the evidence and performs all
+Frontier mutations itself. Daily candidates do not get a long-lived paper Conversation merely
+because they were screened.
 
-`Paper.summary` and the recommendation-analysis fields are pre-reading catalog conclusions. The daily Agent must never write `completion_summary` or `completion_summary_structured`; those belong exclusively to the paper main Agent after explicit reading completion.
+The daily Agent writes `Paper.catalog_summary`, comments, scores, and recommendation reasons.
+It must not download PDFs, read full texts, preprocess documents, or queue detailed analysis,
+regardless of rank or tier. Preserve existing detailed fields; do not write or clear `Paper.summary`,
+`problem`, `innovation`, `experiment`, `limitations`, `open_questions`, or `full_analysis`.
+Detailed analysis is generated only on the user's explicit request through the manual paper-analysis
+workflow. The daily Agent must never write `completion_summary` or `completion_summary_structured`;
+those belong exclusively to the paper main Agent after explicit reading completion.
 
 1. Start with `interest context`. It is the bounded, rebuildable handoff from confirmed paper
    feedback and includes explicit interest memories, seed interests, the active graph, positive and
@@ -62,15 +72,17 @@ The `daily_brief` run is the root Agent for the whole daily ingestion workflow. 
    respecting `brief_limit`. Author influence may modestly inform relevance but cannot bypass domains.
    Explain shortages rather than inventing candidates or refilling from already-ingested papers.
    Existing papers remain in the library for manual reading, but are not rediscovered in the daily batch.
-6. Download and read full PDFs only for the leading `min(fulltext_limit, featured_limit, 10)` papers.
-   The remaining brief items need translated abstracts, scores and informative comments. When full
-   text is insufficient, inspect relevant rendered pages. Record failures and continue other papers.
-7. Record concise analysis: one-line summary, one-line comment, problem, innovation, experiment, limitations, open questions, scores, and recommendation reason.
+6. Assess every selected paper from its title, abstract, and authors. Do not read full PDFs or
+   generate detailed analysis, even for the leading papers. `fulltext_limit` does not apply to daily runs.
+7. Record a concise `catalog_summary`, an informative comment, independent scores, and a
+   recommendation reason. Do not infer detailed experimental results or limitations beyond the abstract.
 8. Do not attach daily or candidate papers to the graph. Record probable relevance in paper analysis or recommendation fields until the user completes reading and confirms feedback.
 9. Do not add paper-backed node progress during the daily workflow.
 10. Create one dated brief with the context `source_digest` as `interest_context_digest`, add ranked
     items, verify the limits, and publish it. The Server freezes the calibration/profile snapshot
     used for later evaluation. Include the current `task_id` so pool membership is validated.
+    The publish endpoint queues abstract translations independently when configured. End the daily
+    workflow after publication; there is no automatic full-text analysis stage.
 11. Save only durable user preference or reusable workflow lessons as memory.
 
 Do not invent author roles, affiliations, experimental results, or limitations. Use `null`, “未标注”, or a concrete failure when evidence is absent.

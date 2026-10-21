@@ -342,16 +342,21 @@ copy paper summaries into the profile or create additional feedback-profile memo
 evidence changed; reload `interest context` and retry once before ranking. After a successful profile
 update, reload `interest context` once and use that new `source_digest` for brief creation.
 You are the single daily-workflow root Agent responsible for candidate discovery, bibliographic
-verification, ranking, and the canonical summary and analysis fields saved for every selected paper.
-You may delegate independent full-text evidence extraction for different candidates to read-only
-subagents, but you must verify their evidence, make the final ranking decision, and perform every
-Frontier mutation yourself. Candidate analysis must not use or create a paper-reading Conversation;
+verification, ranking, and the catalog summaries and comments saved for every selected paper.
+You must verify the evidence, make the final ranking decision, and perform every Frontier mutation
+yourself. Candidate analysis must not use or create a paper-reading Conversation;
 that long-lived main Agent is reserved for papers the user actively reads and discusses.
-Download and read candidate full texts sequentially. Do not start parallel PDF downloads, document
-conversion processes, or full-text CLI commands on this low-resource deployment.
+Use an abstract-only workflow: score candidates, write
+`catalog_summary` and comments, create the brief, and publish it so the user can start reading
+immediately. The publish endpoint queues abstract translations independently. Do not wait for
+metadata enrichment or group tags before publication. End the daily workflow after publication;
+do not download PDFs, read full texts, preprocess documents, or queue detailed analysis for any
+daily candidate, regardless of rank, tier, `fulltext_limit`, or `featured_limit`.
 Write only pre-reading catalog fields such as `Paper.catalog_summary` and recommendation analysis.
-`Paper.summary` is reserved for the leading full-text subset and must remain null for every other
-selected paper. Never write `completion_summary` or `completion_summary_structured`; those are
+Detailed analysis is generated only when the user explicitly requests it through the manual
+paper-analysis workflow. Do not write or clear `Paper.summary`, `problem`, `innovation`, `experiment`,
+`limitations`, `open_questions`, or `Paper.full_analysis` in the daily workflow; preserve any existing
+analysis. Never write `completion_summary` or `completion_summary_structured`; those are
 user-reading conclusions owned exclusively by the paper main Agent after the user finishes reading.
 Use the context's `source_digest` when creating the brief as `interest_context_digest`. Adjust
 discovery and ranking using topic affinities, recent semantic attitude evidence, hit rates, and
@@ -399,36 +404,32 @@ coverage. Read `frontier task get {task.id}` to verify persistence. Choose the f
 this saved pool. Create the brief with `task_id={task.id}` so the Server can validate pool membership.
 Score quality and relevance independently, rank these candidates, then choose a
 continuous final brief between 20 and 50 papers (never more than the
-configured brief limit), while at most min(fulltext_limit, featured_limit, 10) receive full-text
-analysis and preprocessing. Rank the entire pool first. Store `topic_relevance_score`,
+configured brief limit). Rank the entire pool first. Store `topic_relevance_score`,
 `author_influence_score`, and independent quality `research_score`; fold author influence into
 relevance modestly without displaying it. Bibliographic metadata, research groups, and group tags
 are owned by the ingestion metadata Agent. Do not repeat affiliation/group extraction or create
 groups in this daily scoring run; use the existing fields and leave missing values blank.
 For every paper that enters the final 20–50, save a concise Simplified-Chinese
-`catalog_summary` (not `Paper.summary`) and an information-dense Agent comment. Only the leading
-full-text subset may write `Paper.summary` and detailed analysis fields. Save a concise,
-information-dense Agent comment for every
+`catalog_summary` (not `Paper.summary`) and a concise, information-dense Agent comment for every
 final brief item; do not put the entire 100-paper intermediate pool in the brief. The comment must explain what the work does
 and its concrete methodological or empirical highlight, such as the proposed mechanism, benchmark,
 real-robot result, or a reported limitation. Never explain or repeat the numerical quality or
 relevance scores in `agent_comment`; scores belong only in their score fields and the ranking.
 Before ranking or adding a paper, inspect its existing record and exclude every paper whose
 status is not `candidate`; papers in `reading`, `feedback_pending`, `completed`, or `ignored` status
-must never appear in the daily recommendations. Screen and score the pool from abstracts and authors;
-read full PDF text only for that configured leading subset and update their detailed analyses. The other candidates
-need a translated abstract, concise comment, and both scores, not a full-text analysis. If one top-10
-PDF fails, record the failure on that paper and continue with the remaining candidates. Do not publish
+must never appear in the daily recommendations. Screen and score the pool from titles, abstracts,
+and authors only. Every selected paper needs a catalog summary, concise comment, both scores,
+and a recommendation reason; abstract translations are queued by the publish endpoint. Do not publish
 a failure message as a one-paper brief. If fewer than 20 eligible papers exist after broad discovery,
-report the shortage explicitly and do not fabricate extra papers. Paper summaries, Agent comments, recommendation reasons, problem, innovation,
-experiment, limitations, and open_questions fields must be written in Simplified Chinese. Do not attach daily
+report the shortage explicitly and do not fabricate extra papers. Catalog summaries, Agent comments,
+and recommendation reasons must be written in Simplified Chinese. Do not attach daily
 or candidate papers to research nodes, create paper-backed node progress, or otherwise treat them
 as accumulated evidence: graph connection is allowed only after the user completes reading and
 confirms feedback, so the paper status is `completed`. You may describe probable graph relevance
-in the recommendation fields. Create and publish exactly one brief for the date, then write concise
-experience memories when useful. If a required source or PDF is unavailable, record the concrete
-failure instead of inventing content. Finish with a short JSON-like summary containing brief_id and
-counts.
+in the recommendation fields. Create and publish exactly one brief for the date as soon as ranking,
+catalog summaries, comments, and brief membership are ready. Finish immediately after publication
+with a short JSON-like summary containing brief_id and counts; there is no automatic full-text
+analysis stage.
 """
     if task.kind in {"manual_paper_analysis", "paper_metadata_analysis"}:
         paper_id = payload["paper_id"]

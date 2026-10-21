@@ -67,7 +67,7 @@ Browser ──HTTP/NDJSON stream──> FastAPI Server ──SQLite / data files
 
 ## Agent 任务
 
-- `daily_brief`：采集、筛选、全文分析和日报发布，只记录潜在节点关联，不建立正式图谱连接；
+- `daily_brief`：采集、基于摘要筛选评分和日报发布，发布后结束；详细分析由用户按需手动生成，只记录潜在节点关联，不建立正式图谱连接；
 - `manual_paper_analysis`：只处理用户刚添加的一篇论文，阅读全文、补全可靠 metadata 和推荐分析，不采集其他候选且不占日报额度；
 - `paper_metadata_analysis`：由用户在论文信息窗口显式触发，重新阅读全文并更新分析字段和标签建议，不改变日报或图谱归属；
 - `paper_chat`：围绕单篇论文回答并引用页码；
