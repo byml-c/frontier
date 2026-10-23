@@ -155,6 +155,32 @@ def _paper_or_404(session: Session, paper_id: str) -> Paper:
     return paper
 
 
+def _normalize_model_identity_fields(changes: dict) -> None:
+    if "model_short_name" in changes:
+        raw = changes["model_short_name"]
+        changes["model_short_name"] = (
+            " ".join(str(raw).split())[:255]
+            if isinstance(raw, str) and raw.strip()
+            else None
+        )
+    if "search_aliases" in changes:
+        aliases = changes["search_aliases"]
+        if not isinstance(aliases, list):
+            changes["search_aliases"] = []
+            return
+        normalized = []
+        seen = set()
+        for value in aliases:
+            if not isinstance(value, str):
+                continue
+            alias = " ".join(value.split())[:255]
+            key = alias.casefold()
+            if alias and key not in seen:
+                seen.add(key)
+                normalized.append(alias)
+        changes["search_aliases"] = normalized[:20]
+
+
 def _podcast_content_error(exc: PodcastContentError) -> HTTPException:
     if isinstance(exc, PodcastContentNotFoundError):
         return HTTPException(status_code=404, detail=str(exc))
@@ -541,6 +567,7 @@ def list_papers(
     filters = []
     if q and (query := q.strip()):
         token = f"%{query}%"
+        json_token = f"%{json.dumps(query, ensure_ascii=True)[1:-1]}%"
         identifier = query.removeprefix("arXiv:").removeprefix("arxiv:").strip()
         identifier_token = f"%{identifier}%"
         compact_key = compact_search_key(query)
@@ -550,11 +577,18 @@ def list_papers(
         search_clauses = [
             Paper.title.ilike(token),
             Paper.abstract.ilike(token),
+            Paper.model_short_name.ilike(token),
+            cast(Paper.search_aliases, Text).ilike(token),
+            cast(Paper.search_aliases, Text).ilike(json_token),
+            cast(Paper.screening_feedback, Text).ilike(token),
+            cast(Paper.screening_feedback, Text).ilike(json_token),
             Paper.first_author.ilike(token),
             Paper.corresponding_author.ilike(token),
             Paper.primary_affiliation.ilike(token),
             cast(Paper.authors, Text).ilike(token),
+            cast(Paper.authors, Text).ilike(json_token),
             cast(Paper.metadata_json, Text).ilike(token),
+            cast(Paper.metadata_json, Text).ilike(json_token),
             Paper.doi.ilike(token),
         ]
         if identifier:
@@ -886,6 +920,7 @@ def update_paper(
 ) -> dict:
     paper = _paper_or_404(session, paper_id)
     changes = payload.model_dump(exclude_unset=True)
+    _normalize_model_identity_fields(changes)
     suggested_tags = changes.pop("suggested_tags", None)
     research_group_summary = changes.pop("research_group_summary", None)
     update_research_group_summary = "research_group_summary" in payload.model_fields_set
@@ -981,6 +1016,7 @@ def update_paper_metadata(
 ) -> dict:
     paper = _paper_or_404(session, paper_id)
     changes = payload.model_dump(exclude_unset=True)
+    _normalize_model_identity_fields(changes)
     tag_ids = changes.pop("tag_ids", None)
     new_tags = changes.pop("new_tags", [])
     structured = changes.pop("completion_summary_structured", None)

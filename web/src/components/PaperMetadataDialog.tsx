@@ -42,6 +42,8 @@ type MetadataForm = {
   doi: string;
   published_at: string;
   abstract: string;
+  model_short_name: string;
+  search_aliases: string;
   summary: string;
   agent_comment: string;
   problem: string;
@@ -66,6 +68,8 @@ const emptyForm: MetadataForm = {
   doi: "",
   published_at: "",
   abstract: "",
+  model_short_name: "",
+  search_aliases: "",
   summary: "",
   agent_comment: "",
   problem: "",
@@ -92,6 +96,8 @@ function paperToForm(paper: Paper): MetadataForm {
     doi: paper.doi || "",
     published_at: paper.published_at || "",
     abstract: paper.abstract || "",
+    model_short_name: paper.model_short_name || "",
+    search_aliases: (paper.search_aliases ?? []).join(", "),
     summary: paper.summary || "",
     agent_comment: paper.agent_comment || "",
     problem: paper.problem || "",
@@ -180,6 +186,8 @@ export function PaperMetadataDialog({
           doi: form.doi.trim() || null,
           published_at: form.published_at || null,
           abstract: form.abstract.trim() || null,
+          model_short_name: form.model_short_name.trim() || null,
+          search_aliases: form.search_aliases.split(/[,，\n]+/).map((value) => value.trim()).filter(Boolean),
           summary: form.summary.trim() || null,
           agent_comment: form.agent_comment.trim() || null,
           problem: form.problem.trim() || null,
@@ -323,6 +331,8 @@ export function PaperMetadataDialog({
                   <CardContent>
                     <Stack spacing={2}>
                       <Typography variant="h3">核心判断</Typography>
+                      {field("model_short_name", "模型简名")}
+                      {field("search_aliases", "搜索别名（逗号分隔）")}
                       {field("summary", "一句话简介", { multiline: true, minRows: 2 })}
                       {field("agent_comment", "Agent 评语", { multiline: true, minRows: 2 })}
                       {field("recommendation_reason", "推荐理由", { multiline: true, minRows: 3 })}
@@ -330,6 +340,9 @@ export function PaperMetadataDialog({
                         showQuality={paper.data?.status === "completed" || paper.data?.status === "feedback_pending"}
                         researchScore={paper.data?.research_score}
                         relevanceScore={paper.data?.relevance_score}
+                        modelScore={paper.data?.model_relevance_score}
+                        modelConfidence={paper.data?.model_relevance_confidence}
+                        modelReviewRequired={paper.data?.model_review_required}
                         qualityLevel={qualityLevel}
                         interestLevel={interestLevel}
                         disabled={paper.data?.status !== "completed"}

@@ -90,10 +90,16 @@ UI event through the paper conversation stream; it does not mutate the Scene.
 ## arXiv
 
 ```bash
+uv run frontier source arxiv-sync
 uv run frontier source arxiv-discover --date 2026-10-10 --offset 0 --page-size 100
 uv run frontier task candidate-pool TASK_ID --data @data/tasks/TASK_ID/candidate-pool.json
 uv run frontier source arxiv-search 'ti:"exact paper title" AND au:"author surname"' --max-results 10 --no-ingest
 ```
+
+`source arxiv-sync` is the daily cursor workflow. It trains the current metadata relevance model,
+fetches every update since the durable cursor, stages and domain-filters the batch, and returns
+confident relevant IDs plus the low-confidence IDs that need Agent review. It advances the cursor
+only after every reported result page has been fetched.
 
 Daily discovery retrieves category/date pages internally, without narrow interest keywords or ingestion.
 One call scans up to 300 raw metadata records (3 days by default, expanding to 7 days from Monday

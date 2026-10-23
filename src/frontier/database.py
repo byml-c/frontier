@@ -145,6 +145,79 @@ def run_schema_migrations() -> None:
                 "INSERT INTO schema_migrations(version, applied_at) "
                 "VALUES (3, CURRENT_TIMESTAMP)"
             )
+        if 4 not in applied:
+            if connection.dialect.name == "sqlite":
+                columns = {
+                    str(row[1])
+                    for row in connection.exec_driver_sql("PRAGMA table_info(papers)").fetchall()
+                }
+                additions = {
+                    "model_relevance_score": "FLOAT",
+                    "model_relevance_confidence": "FLOAT",
+                    "model_version": "VARCHAR(80)",
+                    "model_review_required": "BOOLEAN NOT NULL DEFAULT 0",
+                }
+                for name, column_type in additions.items():
+                    if name not in columns:
+                        connection.exec_driver_sql(
+                            f"ALTER TABLE papers ADD COLUMN {name} {column_type}"
+                        )
+            else:
+                connection.exec_driver_sql(
+                    "ALTER TABLE papers ADD COLUMN IF NOT EXISTS model_relevance_score FLOAT"
+                )
+                connection.exec_driver_sql(
+                    "ALTER TABLE papers ADD COLUMN IF NOT EXISTS model_relevance_confidence FLOAT"
+                )
+                connection.exec_driver_sql(
+                    "ALTER TABLE papers ADD COLUMN IF NOT EXISTS model_version VARCHAR(80)"
+                )
+                connection.exec_driver_sql(
+                    "ALTER TABLE papers ADD COLUMN IF NOT EXISTS model_review_required "
+                    "BOOLEAN NOT NULL DEFAULT FALSE"
+                )
+            connection.exec_driver_sql(
+                "CREATE INDEX IF NOT EXISTS ix_papers_model_version ON papers(model_version)"
+            )
+            connection.exec_driver_sql(
+                "CREATE INDEX IF NOT EXISTS ix_papers_model_review_required "
+                "ON papers(model_review_required)"
+            )
+            connection.exec_driver_sql(
+                "INSERT INTO schema_migrations(version, applied_at) "
+                "VALUES (4, CURRENT_TIMESTAMP)"
+            )
+        if 5 not in applied:
+            if connection.dialect.name == "sqlite":
+                columns = {
+                    str(row[1])
+                    for row in connection.exec_driver_sql("PRAGMA table_info(papers)").fetchall()
+                }
+                additions = {
+                    "model_short_name": "VARCHAR(255)",
+                    "search_aliases": "JSON",
+                }
+                for name, column_type in additions.items():
+                    if name not in columns:
+                        connection.exec_driver_sql(
+                            f"ALTER TABLE papers ADD COLUMN {name} {column_type}"
+                        )
+            else:
+                connection.exec_driver_sql(
+                    "ALTER TABLE papers ADD COLUMN IF NOT EXISTS "
+                    "model_short_name VARCHAR(255)"
+                )
+                connection.exec_driver_sql(
+                    "ALTER TABLE papers ADD COLUMN IF NOT EXISTS search_aliases JSON"
+                )
+            connection.exec_driver_sql(
+                "CREATE INDEX IF NOT EXISTS ix_papers_model_short_name "
+                "ON papers(model_short_name)"
+            )
+            connection.exec_driver_sql(
+                "INSERT INTO schema_migrations(version, applied_at) "
+                "VALUES (5, CURRENT_TIMESTAMP)"
+            )
 
 
 def get_session() -> Generator[Session, None, None]:

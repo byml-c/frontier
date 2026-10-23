@@ -18,6 +18,7 @@ from ..interactive_stream import encode_stream_event, stream_codex_prompt
 from ..models import AppSetting, Conversation, Memory, OperationLog, Paper, TaskRun, utcnow
 from ..schemas import CandidatePoolUpdate, MemoryCreate, MemoryUpdate, SettingUpdate, TaskCreate
 from ..services.architecture_scene import release_agent_lock_for_task
+from ..services.arxiv_sync import sync_arxiv as sync_arxiv_cursor
 from ..services.backup import create_local_git_backup
 from ..services.bootstrap import import_bibtex
 from ..services.common import (
@@ -688,11 +689,16 @@ def run_daily(
     background_tasks: BackgroundTasks,
     session: Annotated[Session, Depends(get_session)],
     target_date: date | None = None,
+    fresh: bool = False,
 ) -> dict:
     if not settings.enable_codex_runs:
         raise HTTPException(status_code=503, detail="Agent 运行已在服务器设置中停用")
     run_date = target_date or current_research_date(session)
-    claim = get_or_create_daily_task(session, run_date)
+    claim = get_or_create_daily_task(
+        session,
+        run_date,
+        payload={"trigger": "manual", "fresh_discovery": True} if fresh else None,
+    )
     if claim.published_brief_id:
         raise HTTPException(status_code=409, detail="该日期的日报已经发布")
     assert claim.task is not None
@@ -764,6 +770,14 @@ def arxiv_discover(
         raise HTTPException(status_code=502, detail=f"arXiv discovery failed: {exc}") from exc
 
 
+@router.post("/sources/arxiv/sync")
+def arxiv_sync(session: Annotated[Session, Depends(get_session)]) -> dict:
+    try:
+        return sync_arxiv_cursor(session)
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"arXiv cursor sync failed: {exc}") from exc
+
+
 @router.put("/tasks/{task_id}/candidate-pool")
 @serialized_task_claim
 def save_candidate_pool(
@@ -779,8 +793,6 @@ def save_candidate_pool(
     if len(set(payload.paper_ids)) != len(payload.paper_ids):
         raise HTTPException(status_code=422, detail="Candidate pool contains duplicate papers")
     target = int(get_setting(session, "abstract_limit", 100))
-    if len(payload.paper_ids) > (target * 6 + 4) // 5:
-        raise HTTPException(status_code=422, detail="Candidate pool exceeds 120% of the target")
     if (
         len(payload.paper_ids) < target * 0.8 or not payload.discovery_complete
     ) and not payload.notes.strip():

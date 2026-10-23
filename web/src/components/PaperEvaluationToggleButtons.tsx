@@ -142,6 +142,9 @@ function EvaluationMetric<Value extends string>({
 export function PaperEvaluationToggleButtons({
   researchScore,
   relevanceScore,
+  modelScore,
+  modelConfidence,
+  modelReviewRequired = false,
   qualityLevel,
   interestLevel,
   onQualityChange,
@@ -159,6 +162,9 @@ export function PaperEvaluationToggleButtons({
 }: {
   researchScore?: number | null;
   relevanceScore?: number | null;
+  modelScore?: number | null;
+  modelConfidence?: number | null;
+  modelReviewRequired?: boolean;
   qualityLevel: QualityLevel | false;
   interestLevel: InterestLevel | false;
   onQualityChange: (value: QualityLevel) => void;
@@ -194,7 +200,11 @@ export function PaperEvaluationToggleButtons({
         <EvaluationMetric
           title={interestTitle}
           score={relevanceScore}
-          scoreLabel={relevanceScoreLabel(relevanceScore)}
+          scoreLabel={
+            relevanceScore == null
+              ? undefined
+              : `${relevanceScore.toFixed(2)} · ${relevanceScoreLabel(relevanceScore)}`
+          }
           ariaLabel="我的兴趣度评价"
           value={interestLevel}
           options={INTEREST_OPTIONS}
@@ -204,6 +214,13 @@ export function PaperEvaluationToggleButtons({
           onAgentScoreConfirm={onInterestAgentScoreConfirm ?? onAgentScoreConfirm}
           onChange={onInterestChange}
         />
+        {modelScore != null && (
+          <Typography variant="caption" color="text.secondary" sx={{ display: "block", mt: .75 }}>
+            模型 {modelScore.toFixed(2)}
+            {modelConfidence != null ? ` · 置信度 ${modelConfidence.toFixed(2)}` : ""}
+            {modelReviewRequired ? " · 待 Agent 复核" : " · 高置信度"}
+          </Typography>
+        )}
       </Grid>
     </Grid>
   );

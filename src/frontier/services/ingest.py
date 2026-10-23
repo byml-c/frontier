@@ -275,7 +275,14 @@ def _arxiv_get(params: dict) -> httpx.Response:
             _ARXIV_QUERY_LOCK.release()
 
 
-def search_arxiv_page(query: str, *, max_results: int = 100, start: int = 0) -> dict:
+def search_arxiv_page(
+    query: str,
+    *,
+    max_results: int = 100,
+    start: int = 0,
+    sort_by: str = "submittedDate",
+    sort_order: str = "descending",
+) -> dict:
     """Read one metadata page without ingestion, retaining upstream pagination."""
     max_results = max(1, min(max_results, 100))
     if start < 0:
@@ -285,8 +292,8 @@ def search_arxiv_page(query: str, *, max_results: int = 100, start: int = 0) -> 
             "search_query": query,
             "start": start,
             "max_results": max_results,
-            "sortBy": "submittedDate",
-            "sortOrder": "descending",
+            "sortBy": sort_by,
+            "sortOrder": sort_order,
         }
     )
     feed = feedparser.parse(response.text)
@@ -299,8 +306,20 @@ def search_arxiv_page(query: str, *, max_results: int = 100, start: int = 0) -> 
         parsed = parse_arxiv_id(entry.id)
         arxiv_id, version = parsed if parsed else (None, None)
         links = {link.get("type"): link.get("href") for link in entry.get("links", [])}
-        authors = [{"name": item.get("name", "")} for item in entry.get("authors", [])]
+        authors = []
+        for item in entry.get("authors", []):
+            author = {"name": item.get("name", "")}
+            affiliation = item.get("arxiv_affiliation")
+            if isinstance(affiliation, str) and affiliation.strip():
+                author["affiliation"] = " ".join(affiliation.split())
+            authors.append(author)
         published = datetime.fromisoformat(entry.published).date()
+        primary_category = entry.get("arxiv_primary_category")
+        primary_term = (
+            primary_category.get("term")
+            if isinstance(primary_category, dict)
+            else primary_category
+        )
         results.append(
             PaperCreate(
                 title=" ".join(entry.title.split()),
@@ -313,11 +332,15 @@ def search_arxiv_page(query: str, *, max_results: int = 100, start: int = 0) -> 
                 or (f"https://arxiv.org/pdf/{arxiv_id}" if arxiv_id else None),
                 arxiv_id=arxiv_id,
                 arxiv_version=version or 1,
+                doi=entry.get("arxiv_doi"),
                 published_at=published,
                 metadata_json={
                     "categories": [tag.get("term") for tag in entry.get("tags", [])],
+                    "primary_category": primary_term,
                     "comment": entry.get("arxiv_comment"),
                     "journal_ref": entry.get("arxiv_journal_ref"),
+                    "arxiv_updated_at": entry.get("updated"),
+                    "arxiv_published_at": entry.get("published"),
                 },
             )
         )

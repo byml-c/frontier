@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -14,6 +15,12 @@ from ..services.interest_evidence import (
     active_feedback_evidence_keys,
     build_interest_context,
 )
+from ..services.interest_ranker import (
+    load_model_run,
+    load_ranker,
+    rescore_candidate_papers,
+    train_daily_ranker,
+)
 
 router = APIRouter(prefix="/api/interests", tags=["interests"])
 
@@ -24,6 +31,52 @@ def get_interest_context(
     recent_limit: int = Query(default=20, ge=1, le=100),
 ) -> dict:
     return build_interest_context(session, recent_limit=recent_limit)
+
+
+@router.get("/model")
+def get_interest_model(session: Annotated[Session, Depends(get_session)]) -> dict:
+    run = load_model_run(session)
+    if run is None:
+        return {"status": "missing", "model": None}
+    return {
+        "status": run.status,
+        "model": {
+            **model_dict(run),
+            "artifact_exists": Path(run.artifact_path).exists(),
+        },
+    }
+
+
+@router.post("/model/rescore")
+def rescore_interest_model(session: Annotated[Session, Depends(get_session)]) -> dict:
+    model_run = load_model_run(session)
+    ranker = load_ranker(model_run)
+    if ranker is None:
+        raise HTTPException(status_code=409, detail="No active interest model artifact")
+    result = rescore_candidate_papers(session, ranker)
+    log_operation(
+        session,
+        actor="system",
+        action="interest_model.rescored_candidates",
+        detail=result,
+    )
+    session.commit()
+    return result
+
+
+@router.post("/model/train")
+def train_interest_model(session: Annotated[Session, Depends(get_session)]) -> dict:
+    ranker, run, metrics = train_daily_ranker(session)
+    log_operation(
+        session,
+        actor="system",
+        action="interest_model.trained",
+        entity_type="interest_model",
+        entity_id=run.id,
+        detail={"version": run.version, **metrics},
+    )
+    session.commit()
+    return {"version": ranker.version, "model_run_id": run.id, "metrics": metrics}
 
 
 @router.put("/profile")

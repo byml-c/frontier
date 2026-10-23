@@ -605,6 +605,9 @@ function FeedbackModal({ open, paper, processing, activities, processError, onCl
                 <PaperEvaluationToggleButtons
                   researchScore={paper.research_score}
                   relevanceScore={paper.relevance_score}
+                  modelScore={paper.model_relevance_score}
+                  modelConfidence={paper.model_relevance_confidence}
+                  modelReviewRequired={paper.model_review_required}
                   qualityLevel={qualityLevel}
                   interestLevel={interestLevel}
                   onQualityChange={setQualityLevel}

@@ -63,6 +63,8 @@ class Paper(Base, TimestampMixin):
     status: Mapped[str] = mapped_column(String(32), default="candidate", index=True)
     ignored_reason: Mapped[str | None] = mapped_column(Text)
     catalog_summary: Mapped[str | None] = mapped_column(Text)
+    model_short_name: Mapped[str | None] = mapped_column(String(255), index=True)
+    search_aliases: Mapped[list[str]] = mapped_column(JSON, default=list)
     summary: Mapped[str | None] = mapped_column(Text)
     agent_comment: Mapped[str | None] = mapped_column(Text)
     problem: Mapped[str | None] = mapped_column(Text)
@@ -72,6 +74,10 @@ class Paper(Base, TimestampMixin):
     full_analysis: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
     research_score: Mapped[float | None] = mapped_column(Float)
     relevance_score: Mapped[float | None] = mapped_column(Float)
+    model_relevance_score: Mapped[float | None] = mapped_column(Float)
+    model_relevance_confidence: Mapped[float | None] = mapped_column(Float)
+    model_version: Mapped[str | None] = mapped_column(String(80), index=True)
+    model_review_required: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
     topic_relevance_score: Mapped[float | None] = mapped_column(Float)
     author_influence_score: Mapped[float | None] = mapped_column(Float)
     recommendation_reason: Mapped[str | None] = mapped_column(Text)
@@ -517,6 +523,82 @@ class TaskRun(Base, TimestampMixin):
     codex_session_id: Mapped[str | None] = mapped_column(String(255))
     started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class InterestModelRun(Base):
+    __tablename__ = "interest_model_runs"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    version: Mapped[str] = mapped_column(String(80), unique=True, index=True)
+    status: Mapped[str] = mapped_column(String(32), default="active", index=True)
+    sample_count: Mapped[int] = mapped_column(Integer, default=0)
+    validation_mae: Mapped[float | None] = mapped_column(Float)
+    residual_scale: Mapped[float | None] = mapped_column(Float)
+    relevance_threshold: Mapped[float] = mapped_column(Float, default=0.5)
+    confidence_threshold: Mapped[float] = mapped_column(Float, default=0.55)
+    artifact_path: Mapped[str] = mapped_column(Text)
+    label_digest: Mapped[str] = mapped_column(String(80), index=True)
+    metadata_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    trained_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class DiscoveryCursor(Base, TimestampMixin):
+    __tablename__ = "discovery_cursors"
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    committed_through: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    last_attempt_started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    last_success_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    last_error: Mapped[str | None] = mapped_column(Text)
+
+
+class DiscoveryRun(Base):
+    __tablename__ = "discovery_runs"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    status: Mapped[str] = mapped_column(String(32), default="running", index=True)
+    window_start: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    window_end: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    query: Mapped[str] = mapped_column(Text)
+    model_version: Mapped[str | None] = mapped_column(String(80), index=True)
+    total_results: Mapped[int] = mapped_column(Integer, default=0)
+    fetched_count: Mapped[int] = mapped_column(Integer, default=0)
+    skipped_existing_count: Mapped[int] = mapped_column(Integer, default=0)
+    duplicate_count: Mapped[int] = mapped_column(Integer, default=0)
+    domain_rejected_count: Mapped[int] = mapped_column(Integer, default=0)
+    promoted_count: Mapped[int] = mapped_column(Integer, default=0)
+    review_required_count: Mapped[int] = mapped_column(Integer, default=0)
+    result_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    error: Mapped[str | None] = mapped_column(Text)
+
+
+class DiscoveryItem(Base):
+    __tablename__ = "discovery_items"
+    __table_args__ = (UniqueConstraint("run_id", "arxiv_id", name="uq_discovery_run_arxiv"),)
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    run_id: Mapped[str] = mapped_column(
+        ForeignKey("discovery_runs.id", ondelete="CASCADE"), index=True
+    )
+    arxiv_id: Mapped[str | None] = mapped_column(String(32), index=True)
+    arxiv_version: Mapped[int | None] = mapped_column(Integer)
+    title: Mapped[str] = mapped_column(Text)
+    abstract: Mapped[str | None] = mapped_column(Text)
+    authors: Mapped[list[dict[str, Any]]] = mapped_column(JSON, default=list)
+    categories: Mapped[list[str]] = mapped_column(JSON, default=list)
+    published_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    updated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    status: Mapped[str] = mapped_column(String(32), index=True)
+    reason: Mapped[str | None] = mapped_column(Text)
+    model_score: Mapped[float | None] = mapped_column(Float)
+    model_confidence: Mapped[float | None] = mapped_column(Float)
+    review_required: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
+    paper_id: Mapped[str | None] = mapped_column(
+        ForeignKey("papers.id", ondelete="SET NULL"), index=True
+    )
+    source_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
 
 
 class OperationLog(Base):

@@ -34,8 +34,11 @@ candidate, using titles, abstracts, and authors only. It verifies the evidence a
 Frontier mutations itself. Daily candidates do not get a long-lived paper Conversation merely
 because they were screened.
 
-The daily Agent writes `Paper.catalog_summary`, comments, a five-level relevance rating, and
-recommendation reasons. Daily screening does not assess paper quality before reading.
+The Server trains a daily personal-relevance model, stores a continuous model score and confidence,
+and routes low-confidence papers to the Agent. The daily Agent independently reviews only those
+uncertain papers, writes a continuous Agent relevance score, catalog summaries, comments, and
+recommendation reasons. Human relevance ratings remain five-level. Daily screening does not assess
+paper quality before reading.
 It must not download PDFs, read full texts, preprocess documents, or queue detailed analysis,
 regardless of rank or tier. Preserve existing detailed fields; do not write or clear `Paper.summary`,
 `problem`, `innovation`, `experiment`, `limitations`, `open_questions`, or `full_analysis`.
@@ -51,27 +54,23 @@ those belong exclusively to the paper main Agent after explicit reading completi
    When confirmed evidence changed, use `interest profile-update` to refresh the one derived semantic
    profile with evidence-key citations, then reload `interest context` once before creating the
    brief. It is a rebuildable cache, not a second owner of paper facts.
-2. Read `setting list`. Use `source arxiv-discover --date YYYY-MM-DD --offset 0 --page-size 100`
-   once for category/date retrieval. The Server scans up to 300 raw records over 3 days, expanding
-   to 7 days from Monday through Wednesday to cover announcement delays, then deduplicates
-   against ALL library papers and within the batch, then returns up to 120 coarse-filtered new papers.
-   Pagination is internal; do not request more batches or library papers to fill a numerical target.
-   This command never ingests papers. Retry failed discovery with the same date; report scan_capped
-   and prefilter_capped in notes, and copy coverage_complete into discovery_complete. Keyword searches are supplemental
-   verification only and must not replace broad retrieval.
-3. Judge domain membership from titles, abstracts and authors against `discovery_domains` (normally
-   3D vision, embodied intelligence, AI agents). Categories are recall sources, not domain proof.
-   Reject off-domain papers without ingestion. Ingest new domain matches, even if they will not enter
-   today's shortlist. Server ingestion still deduplicates concurrent additions.
-   `initial_interest_domains` such as VLA/WAM are preference seeds, never domain gates.
-4. Use user preferences to narrow domain-qualified unread papers to about `abstract_limit` (default
-   100, normally 80–120). This is the interest-screened target, NOT a limit on raw abstracts viewed.
-   Reserve about 15% for promising/uncertain work within the broad domains. Save IDs with
-   `task candidate-pool TASK_ID --data @data/tasks/TASK_ID/candidate-pool.json`; supply `paper_ids`,
-   `discovery_complete`, and `notes` for shortages/incomplete coverage. Verify with `task get TASK_ID`.
-5. Rate personal relevance using exactly five levels: 不相关 / 较不相关 / 一般 / 较相关 / 高度相关,
-   stored as `relevance_score` 0.0 / 0.25 / 0.5 / 0.75 / 1.0. Rank by relevance, breaking ties by
-   explicit topic preferences and recency; select 20–50 for the final brief within `brief_limit`.
+2. Read `setting list`, then run `source arxiv-sync` once. The Server trains the current relevance
+   model from human five-level labels, fetches every arXiv update between the durable
+   `lastUpdatedDate` cursor and the safe current cutoff, records every fetched item in staging,
+   deduplicates against the whole library, and applies the embodied-intelligence domain gate.
+   There is no raw-scan or prefilter numeric cap, and `totalResults` must equal the verified fetched
+   count for complete coverage. Retry a failed sync unchanged.
+3. Use the sync routing. `paper_ids` contains confident relevant and low-confidence review papers;
+   `agent_review_paper_ids` requires Agent abstract review; `model_filtered_paper_ids` are
+   high-confidence low-relevance papers retained in the library but excluded from today's pool.
+   Do not rescreen every confident candidate or use author prestige to override the model.
+4. Score each Agent-review paper with a continuous `relevance_score` in `[0,1]`, save exactly two
+   decimals, and clear `model_review_required`. Human ratings remain five levels; the five values
+   are only calibration anchors for Agent scores. Save the verified eligible IDs with
+   `task candidate-pool TASK_ID --data @data/tasks/TASK_ID/candidate-pool.json`; there is no 120-item
+   cap. Supply `discovery_complete` from sync and notes for shortages, review exceptions, or failures.
+5. Rank by continuous relevance, breaking ties by explicit topic preferences and recency; select
+   20–50 for the final brief within `brief_limit`.
    Do not generate quality, topic-relevance, or author-influence scores, or blend them into relevance.
    Leave `research_score` null for abstract-only candidates; preserve genuine full-text analysis and
    user-confirmed feedback. Quality belongs to post-reading evaluation, not daily ranking.
@@ -79,8 +78,11 @@ those belong exclusively to the paper main Agent after explicit reading completi
    Existing papers remain in the library for manual reading, but are not rediscovered in the daily batch.
 6. Assess every selected paper from its title, abstract, and authors. Do not read full PDFs or
    generate detailed analysis, even for the leading papers. `fulltext_limit` does not apply to daily runs.
-7. Record a concise `catalog_summary`, an informative comment, the five-level relevance rating, and a
-   recommendation reason. Do not infer detailed experimental results or limitations beyond the abstract.
+7. Record a concise `catalog_summary`, an informative comment, a continuous relevance score, and a
+   recommendation reason. For every final item, extract `model_short_name` and one to four
+   `search_aliases` only when title or abstract gives a stable method/model name; these are
+   paper-level search fields, never topic tags. Never overwrite the user's screening note. Do not
+   infer detailed experimental results or limitations beyond the abstract.
 8. Do not attach daily or candidate papers to the graph. Record probable relevance in paper analysis or recommendation fields until the user completes reading and confirms feedback.
 9. Do not add paper-backed node progress during the daily workflow.
 10. Create one dated brief with the context `source_digest` as `interest_context_digest`, add ranked

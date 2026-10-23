@@ -42,6 +42,8 @@ class PaperUpdate(BaseModel):
     doi: str | None = None
     published_at: date | None = None
     catalog_summary: str | None = None
+    model_short_name: str | None = Field(default=None, max_length=255)
+    search_aliases: list[str] | None = None
     summary: str | None = None
     agent_comment: str | None = None
     problem: str | None = None
@@ -52,6 +54,10 @@ class PaperUpdate(BaseModel):
     full_analysis: dict[str, Any] | None = None
     research_score: float | None = Field(default=None, ge=0, le=1)
     relevance_score: float | None = Field(default=None, ge=0, le=1)
+    model_relevance_score: float | None = Field(default=None, ge=0, le=1)
+    model_relevance_confidence: float | None = Field(default=None, ge=0, le=1)
+    model_version: str | None = None
+    model_review_required: bool | None = None
     topic_relevance_score: float | None = Field(default=None, ge=0, le=1)
     author_influence_score: float | None = Field(default=None, ge=0, le=1)
     recommendation_reason: str | None = None
@@ -118,6 +124,8 @@ class PaperMetadataUpdate(BaseModel):
     doi: str | None = None
     published_at: date | None = None
     catalog_summary: str | None = None
+    model_short_name: str | None = Field(default=None, max_length=255)
+    search_aliases: list[str] | None = None
     summary: str | None = None
     agent_comment: str | None = None
     problem: str | None = None

@@ -421,7 +421,7 @@ def test_candidate_pool_requires_unique_unread_papers_and_explanations(client, d
     assert client.put(url, json=data).status_code == 409
 
 
-def test_candidate_pool_target_allows_20_percent_variation(client, discovery_db):
+def test_candidate_pool_has_no_artificial_target_cap(client, discovery_db):
     discovery_db.get(AppSetting, "abstract_limit").value_json = 5
     task = TaskRun(kind="daily_brief", status="running", payload_json={})
     papers = [Paper(title=str(i), normalized_title=str(i)) for i in range(7)]
@@ -430,7 +430,7 @@ def test_candidate_pool_target_allows_20_percent_variation(client, discovery_db)
     data = {"paper_ids": [p.id for p in papers[:6]], "discovery_complete": True}
     assert client.put(f"/api/tasks/{task.id}/candidate-pool", json=data).status_code == 200
     data["paper_ids"] = [p.id for p in papers]
-    assert client.put(f"/api/tasks/{task.id}/candidate-pool", json=data).status_code == 422
+    assert client.put(f"/api/tasks/{task.id}/candidate-pool", json=data).status_code == 200
 
 
 @pytest.mark.parametrize("old_limit, expected", [(50, 100), (27, 27)])
@@ -522,11 +522,10 @@ def test_daily_prompt_separates_recall_pool_and_brief():
             TaskRun(id="daily", kind="daily_brief", payload_json={"date": "2026-10-10"})
         ).split()
     )
-    assert "arxiv-discover --date 2026-10-10" in prompt
-    assert "Pagination happens inside the Server" in prompt
-    assert "including candidate" in prompt
-    assert "POST-screening candidate target" in prompt
-    assert "about 15%" in prompt
+    assert "frontier source arxiv-sync" in prompt
+    assert "There is no raw scan or prefilter numeric cap" in prompt
+    assert "agent_review_paper_ids" in prompt
+    assert "continuous value in `[0,1]`" in prompt
     assert "frontier task candidate-pool daily" in prompt
     assert "Choose the final brief only from this saved pool" in prompt
-    assert "initial domains and apply them as a hard gate" not in prompt
+    assert "Assign only a five-level personal-relevance rating" not in prompt

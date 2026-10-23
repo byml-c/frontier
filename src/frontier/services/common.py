@@ -22,12 +22,13 @@ BRIEF_LIMIT_DEFAULT_MIGRATION_ACTION = "setting.default.brief_limit.8"
 BRIEF_LIMIT_NEW_DEFAULT_MIGRATION_ACTION = "setting.default.brief_limit.50"
 BROAD_DISCOVERY_MIGRATION_ACTION = "setting.discovery.broad_domains.v1"
 BROAD_DISCOVERY_WINDOW_MIGRATION_ACTION = "setting.discovery.window_prefilter.v1"
+EMBODIED_DISCOVERY_SCOPE_MIGRATION_ACTION = "setting.discovery.embodied_scope.v1"
 DAILY_TIME_MIGRATION_ACTION = "setting.default.daily_time.0905.v1"
 AGENT_BIBLIOGRAPHY_KEY = "agent_bibliography"
 RESEARCH_GROUP_SUMMARY_KEY = "research_group_summary"
 RESEARCH_GROUP_PROFILE_KEY = "research_group_profile"
 BROAD_DISCOVERY_DOMAINS = ["3D vision", "embodied intelligence", "AI agents"]
-DISCOVERY_CATEGORIES = ["cs.CV", "cs.RO", "cs.AI", "cs.LG", "cs.CL", "cs.MA", "cs.HC", "cs.SE"]
+DISCOVERY_CATEGORIES = ["cs.RO", "cs.CV", "cs.AI", "cs.LG", "cs.CL", "cs.MA"]
 
 DEFAULT_SETTINGS: dict[str, Any] = {
     "daily_hour": 9,
@@ -191,6 +192,29 @@ def ensure_default_settings(session: Session) -> None:
             session,
             action=BROAD_DISCOVERY_WINDOW_MIGRATION_ACTION,
             detail={"previous": previous, "lookback_days": 3, "scan_limit": 300},
+        )
+    if not session.scalar(
+        select(OperationLog.id).where(
+            OperationLog.action == EMBODIED_DISCOVERY_SCOPE_MIGRATION_ACTION
+        )
+    ):
+        categories = session.get(AppSetting, "discovery_arxiv_categories")
+        previous = categories.value_json if categories else None
+        if categories and set(previous or []) == {
+            "cs.CV",
+            "cs.RO",
+            "cs.AI",
+            "cs.LG",
+            "cs.CL",
+            "cs.MA",
+            "cs.HC",
+            "cs.SE",
+        }:
+            categories.value_json = DISCOVERY_CATEGORIES
+        log_operation(
+            session,
+            action=EMBODIED_DISCOVERY_SCOPE_MIGRATION_ACTION,
+            detail={"previous": previous, "categories": DISCOVERY_CATEGORIES},
         )
     if not session.scalar(
         select(OperationLog.id).where(OperationLog.action == DAILY_TIME_MIGRATION_ACTION)

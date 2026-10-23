@@ -43,7 +43,7 @@ class Settings(BaseSettings):
     agent_max_concurrent_runs: int = Field(default=6, ge=1)
     # Metadata enrichment has its own dispatcher lane and root-Agent budget so it
     # can run alongside daily scoring without consuming the whole pool.
-    metadata_agent_max_concurrent_runs: int = Field(default=2, ge=1)
+    metadata_agent_max_concurrent_runs: int = Field(default=1, ge=1)
     agent_task_timeout_seconds: int = Field(default=10_800, ge=1)
     agent_interactive_timeout_seconds: int = Field(default=3600, ge=1)
     agent_app_server_start_timeout_seconds: int = Field(default=30, ge=1)

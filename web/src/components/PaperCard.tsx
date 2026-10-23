@@ -60,6 +60,8 @@ export function PaperCard({
   const [metadataOpen, setMetadataOpen] = useState(false);
   const [commentAnchor, setCommentAnchor] = useState<HTMLButtonElement | null>(null);
   const [comment, setComment] = useState(paper.screening_feedback || "");
+  const [modelShortName, setModelShortName] = useState(paper.model_short_name || "");
+  const [searchAliases, setSearchAliases] = useState((paper.search_aliases || []).join(", "));
   const [language, setLanguage] = useState<"zh" | "en">("zh");
   const [quality, setQuality] = useState<QualityLevel | false>(
     paper.quality_level || paper.screening_quality_level || false,
@@ -74,15 +76,20 @@ export function PaperCard({
     Boolean(paper.agent_interest_confirmed ?? paper.agent_score_confirmed),
   );
   const saveScreening = useMutation({
-    mutationFn: (body: { quality_level?: QualityLevel; interest_level?: InterestLevel; screening_feedback?: string; agent_quality_confirmed?: boolean; agent_interest_confirmed?: boolean }) =>
+    mutationFn: (body: { quality_level?: QualityLevel; interest_level?: InterestLevel; screening_feedback?: string; model_short_name?: string | null; search_aliases?: string[]; agent_quality_confirmed?: boolean; agent_interest_confirmed?: boolean }) =>
       api<Paper>(`/api/papers/${paper.id}/metadata`, { ...jsonBody(body), method: "PATCH" }),
     onError: () => {
       setQuality(paper.quality_level || paper.screening_quality_level || false);
       setInterest(paper.interest_level || paper.screening_interest_level || false);
+      setModelShortName(paper.model_short_name || "");
+      setSearchAliases((paper.search_aliases || []).join(", "));
       setAgentQualityConfirmed(Boolean(paper.agent_quality_confirmed ?? paper.agent_score_confirmed));
       setAgentInterestConfirmed(Boolean(paper.agent_interest_confirmed ?? paper.agent_score_confirmed));
     },
-    onSuccess: () => {
+    onSuccess: (saved) => {
+      setModelShortName(saved.model_short_name || "");
+      setSearchAliases((saved.search_aliases || []).join(", "));
+      setComment(saved.screening_feedback || "");
       queryClient.invalidateQueries({ queryKey: ["brief"] });
       queryClient.invalidateQueries({ queryKey: ["paper", paper.id] });
       setCommentAnchor(null);
@@ -123,6 +130,7 @@ export function PaperCard({
         <Stack direction="row" alignItems="center" justifyContent="space-between" spacing={2} sx={{ mb: 1 }}>
           <Stack direction="row" spacing={1} alignItems="center">
             <Chip size="small" label={rank ? `#${rank}` : paper.source.toUpperCase()} color={featured ? "primary" : "default"} />
+            {paper.model_short_name && <Chip size="small" color="secondary" variant="outlined" label={paper.model_short_name} />}
             <Typography variant="caption" color="text.secondary">{paper.source.toUpperCase()} · {formatDate(paper.published_at)}</Typography>
           </Stack>
           <Chip size="small" variant="outlined" label={statusLabel(paper.status)} />
@@ -152,6 +160,12 @@ export function PaperCard({
         </Stack>
         {(saveScreening.error || retryTranslation.error || startReading.error) && <Alert severity="error" sx={{ mt: 1 }}>{(saveScreening.error || retryTranslation.error || startReading.error)?.message}</Alert>}
         <Typography component="div" variant="body2" color="text.secondary" sx={{ mt: 1 }}><MarkdownMessage content={abstract} /></Typography>
+        {(paper.model_short_name || !!paper.search_aliases?.length || paper.screening_feedback) && (
+          <Stack direction="row" flexWrap="wrap" alignItems="center" gap={.75} sx={{ mt: 1 }}>
+            {paper.search_aliases?.map((alias) => <Chip key={alias} size="small" variant="outlined" label={alias} />)}
+            {paper.screening_feedback && <Typography variant="caption" color="text.secondary">我的简记：{paper.screening_feedback}</Typography>}
+          </Stack>
+        )}
 
         <Stack direction="row" spacing={1} alignItems="flex-start" sx={{ mt: 2 }}>
           <AutoAwesomeRounded color="action" sx={{ fontSize: 17, mt: .15 }} />
@@ -167,6 +181,9 @@ export function PaperCard({
               showQuality={false}
               researchScore={paper.research_score}
               relevanceScore={paper.relevance_score}
+              modelScore={paper.model_relevance_score}
+              modelConfidence={paper.model_relevance_confidence}
+              modelReviewRequired={paper.model_review_required}
               qualityLevel={quality}
               interestLevel={interest}
               qualityTitle="质量"
@@ -180,8 +197,8 @@ export function PaperCard({
               onInterestChange={(value) => updateMetric({ interest: value })}
             />
           </Box>
-          <Tooltip title={paper.screening_feedback ? "编辑补充说明" : "补充偏好说明"}>
-            <IconButton aria-label="补充筛选说明" aria-expanded={Boolean(commentAnchor)} aria-haspopup="dialog" color={paper.screening_feedback ? "primary" : "default"} sx={{ alignSelf: { xs: "flex-end", sm: "center" } }} onClick={(event) => { setComment(paper.screening_feedback || ""); setCommentAnchor(event.currentTarget); }}><EditNoteRounded /></IconButton>
+          <Tooltip title={paper.screening_feedback || paper.model_short_name ? "编辑模型简记" : "补充模型简记与偏好说明"}>
+            <IconButton aria-label="补充模型简记与筛选说明" aria-expanded={Boolean(commentAnchor)} aria-haspopup="dialog" color={paper.screening_feedback || paper.model_short_name ? "primary" : "default"} sx={{ alignSelf: { xs: "flex-end", sm: "center" } }} onClick={(event) => { setComment(paper.screening_feedback || ""); setModelShortName(paper.model_short_name || ""); setSearchAliases((paper.search_aliases || []).join(", ")); setCommentAnchor(event.currentTarget); }}><EditNoteRounded /></IconButton>
           </Tooltip>
         </Stack>
 
@@ -205,9 +222,13 @@ export function PaperCard({
         {paper.source_url && <Button size="small" component={Link} href={paper.source_url} target="_blank" rel="noreferrer" endIcon={<ArrowOutwardRounded />} sx={{ whiteSpace: "nowrap" }}>查看原文</Button>}
       </CardActions>
       <Popover open={Boolean(commentAnchor)} anchorEl={commentAnchor} onClose={() => setCommentAnchor(null)} anchorOrigin={{ vertical: "bottom", horizontal: "right" }} transformOrigin={{ vertical: "top", horizontal: "right" }} slotProps={{ paper: { sx: { p: 2, mt: 1, width: 360, maxWidth: "calc(100vw - 32px)" } } }}>
-        <Box component="form" role="dialog" aria-label="补充筛选说明" onSubmit={(event) => { event.preventDefault(); saveScreening.mutate({ screening_feedback: comment }); }}>
-          <Typography variant="subtitle2" sx={{ mb: 1.5 }}>补充偏好说明</Typography>
-          <TextField fullWidth autoFocus multiline minRows={3} label="说明（可选）" value={comment} onChange={(event) => setComment(event.target.value)} placeholder="例如：更关注真实机器人验证，暂不考虑纯仿真工作。" />
+        <Box component="form" role="dialog" aria-label="补充模型简记与筛选说明" onSubmit={(event) => { event.preventDefault(); saveScreening.mutate({ screening_feedback: comment, model_short_name: modelShortName.trim() || null, search_aliases: searchAliases.split(/[,，\n]+/).map((value) => value.trim()).filter(Boolean) }); }}>
+          <Typography variant="subtitle2" sx={{ mb: 1.5 }}>模型简记</Typography>
+          <Stack spacing={1.25}>
+            <TextField fullWidth autoFocus label="模型简名（可选）" value={modelShortName} onChange={(event) => setModelShortName(event.target.value)} placeholder="例如：CW-WAM" />
+            <TextField fullWidth label="搜索别名（可选）" value={searchAliases} onChange={(event) => setSearchAliases(event.target.value)} placeholder="逗号分隔，例如：CW-WAM, 接触力世界动作模型" />
+            <TextField fullWidth multiline minRows={3} label="我的简记（可选）" value={comment} onChange={(event) => setComment(event.target.value)} placeholder="例如：接触力/力矩世界动作模型，关注力控操作。" />
+          </Stack>
           {saveScreening.error && <Alert severity="error" sx={{ mt: 2 }}>{saveScreening.error.message}</Alert>}
           <Stack direction="row" justifyContent="flex-end" spacing={1} sx={{ mt: 2 }}><Button size="small" onClick={() => setCommentAnchor(null)}>取消</Button><Button size="small" variant="contained" type="submit" disabled={saveScreening.isPending}>保存</Button></Stack>
         </Box>

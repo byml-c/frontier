@@ -744,6 +744,24 @@ def interest_profile_update(data: str = typer.Option(..., help="JSON string or @
     emit(client.request("PUT", "/api/interests/profile", json=parse_json(data)))
 
 
+@interest_app.command("model")
+def interest_model() -> None:
+    """Read the active daily metadata relevance model and validation metrics."""
+    emit(client.request("GET", "/api/interests/model"))
+
+
+@interest_app.command("rescore")
+def interest_rescore() -> None:
+    """Rescore all unread candidates with the active daily model."""
+    emit(client.request("POST", "/api/interests/model/rescore", timeout=660))
+
+
+@interest_app.command("train")
+def interest_train() -> None:
+    """Train a fresh daily model from the current human five-level labels."""
+    emit(client.request("POST", "/api/interests/model/train", timeout=660))
+
+
 @task_app.command("list")
 def task_list(status: str | None = None, limit: int = 50) -> None:
     emit(client.request("GET", "/api/tasks", params={"status": status, "limit": limit}))
@@ -755,14 +773,26 @@ def task_get(task_id: str) -> None:
 
 
 @task_app.command("run-daily")
-def task_run_daily(target_date: str | None = None) -> None:
-    params = {"target_date": target_date} if target_date else None
+def task_run_daily(
+    target_date: str | None = None,
+    fresh: bool = typer.Option(False, "--fresh"),
+) -> None:
+    params: dict[str, str] = {}
+    if target_date:
+        params["target_date"] = target_date
+    if fresh:
+        params["fresh"] = "true"
     emit(client.request("POST", "/api/tasks/run-daily", params=params))
 
 
 @task_app.command("retry")
 def task_retry(task_id: str) -> None:
     emit(client.request("POST", f"/api/tasks/{task_id}/retry"))
+
+
+@task_app.command("cancel")
+def task_cancel(task_id: str) -> None:
+    emit(client.request("POST", f"/api/tasks/{task_id}/cancel"))
 
 
 @setting_app.command("list")
@@ -785,6 +815,12 @@ def source_arxiv_search(query: str, max_results: int = 50, ingest: bool = True) 
             timeout=660,
         )
     )
+
+
+@source_app.command("arxiv-sync")
+def source_arxiv_sync() -> None:
+    """Fetch all arXiv updates since the durable cursor and score them locally."""
+    emit(client.request("POST", "/api/sources/arxiv/sync", timeout=660))
 
 
 @source_app.command("arxiv-discover")

@@ -31,13 +31,16 @@ test("interest toggle exposes five levels", () => {
   ]);
 });
 
-test("Agent relevance shows the five labels, including older continuous scores", () => {
+test("human relevance remains five-level while Agent relevance keeps precision", () => {
   assert.deepEqual([0, .25, .5, .75, 1].map(relevanceScoreLabel), INTEREST_OPTIONS.map((option) => option.label));
   assert.equal(relevanceScoreLabel(.9688), "高度相关");
   assert.equal(relevanceScoreLabel(.683), "较相关");
   for (const missing of [undefined, null, NaN, Infinity, -1, 1.1]) {
     assert.equal(relevanceScoreLabel(missing), "待评估");
   }
+  assert.match(controlSource, /relevanceScore\.toFixed\(2\)/);
+  assert.match(controlSource, /模型 \{modelScore\.toFixed\(2\)\}/);
+  assert.ok(controlSource.includes("置信度 ${modelConfidence.toFixed(2)}"));
 });
 
 test("daily cards hide quality while reading feedback retains it", () => {
@@ -46,6 +49,15 @@ test("daily cards hide quality while reading feedback retains it", () => {
   assert.match(controlSource, /showQuality = true/);
   assert.match(controlSource, /showQuality && <Grid/);
   assert.match(metadataSource, /showQuality=\{paper\.data\?\.status === "completed" \|\| paper\.data\?\.status === "feedback_pending"\}/);
+});
+
+test("paper cards expose editable model short names and search aliases", () => {
+  const cardSource = readFileSync(new URL("../src/components/PaperCard.tsx", import.meta.url), "utf8");
+  assert.match(cardSource, /model_short_name/);
+  assert.match(cardSource, /search_aliases/);
+  assert.match(cardSource, /模型简名/);
+  assert.match(cardSource, /搜索别名/);
+  assert.match(cardSource, /我的简记/);
 });
 
 test("all editable paper ratings use the shared compact toggle control", () => {

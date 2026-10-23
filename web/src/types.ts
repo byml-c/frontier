@@ -63,6 +63,8 @@ export type Paper = {
   created_at?: string | null;
   status: string;
   catalog_summary?: string | null;
+  model_short_name?: string | null;
+  search_aliases?: string[];
   summary?: string | null;
   agent_comment?: string | null;
   problem?: string | null;
@@ -72,6 +74,10 @@ export type Paper = {
   open_questions?: string | null;
   research_score?: number | null;
   relevance_score?: number | null;
+  model_relevance_score?: number | null;
+  model_relevance_confidence?: number | null;
+  model_version?: string | null;
+  model_review_required?: boolean;
   topic_relevance_score?: number | null;
   author_influence_score?: number | null;
   recommendation_reason?: string | null;

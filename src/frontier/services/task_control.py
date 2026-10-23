@@ -123,11 +123,15 @@ def _daily_claim(
         )
         .order_by(TaskRun.created_at.asc(), TaskRun.id.asc())
     ).all()
-    recovery_sources = [
-        previous.id
-        for previous in previous_runs
-        if (previous.payload_json or {}).get("candidate_pool", {}).get("paper_ids")
-    ]
+    recovery_sources = (
+        []
+        if payload.get("fresh_discovery")
+        else [
+            previous.id
+            for previous in previous_runs
+            if (previous.payload_json or {}).get("candidate_pool", {}).get("paper_ids")
+        ]
+    )
     task_payload = {**payload, "date": target}
     if recovery_sources:
         task_payload["recovery_source_task_ids"] = recovery_sources

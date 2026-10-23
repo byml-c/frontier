@@ -255,7 +255,7 @@ def test_daily_prompt_publishes_abstract_only_recommendations() -> None:
     )
 
     assert "single daily-workflow root Agent" in prompt
-    assert "candidate discovery, bibliographic" in prompt
+    assert "reviewing model-uncertain candidates" in prompt
     assert "catalog summaries and comments" in prompt
     assert "Use an abstract-only workflow" in prompt
     assert "must not use or create a paper-reading Conversation" in prompt
@@ -279,18 +279,23 @@ def test_daily_prompt_publishes_abstract_only_recommendations() -> None:
 
 
 @pytest.mark.parametrize("recovery", [False, True])
-def test_daily_prompt_rates_only_five_level_relevance_before_reading(recovery: bool) -> None:
+def test_daily_prompt_uses_continuous_agent_relevance_and_model_review(recovery: bool) -> None:
     payload: dict[str, object] = {"date": "2026-10-21"}
     if recovery:
         payload["recovery_source_task_ids"] = ["earlier-daily"]
     prompt = build_prompt(TaskRun(id="daily-rating-task", kind="daily_brief", payload_json=payload))
 
-    assert "Assign only a five-level personal-relevance rating" in prompt
-    assert "0.0 (不相关), 0.25 (较不相关)" in prompt
-    assert "0.5 (一般), 0.75 (较相关), or 1.0 (高度相关)" in prompt
+    assert "continuous value in `[0,1]`" in prompt
+    assert "0.00 (不相关), 0.25 (较不相关), 0.50 (一般)" in prompt
+    assert "Agent scores may interpolate between them" in prompt
+    assert "agent_review_paper_ids" in prompt
+    if recovery:
+        assert "Do NOT run arxiv-discover again in this recovery" in prompt
+    else:
+        assert "frontier source arxiv-sync" in prompt
+        assert "frontier source arxiv-discover" not in prompt
     assert "do not predict quality or use quality scores for daily ranking" in prompt
     assert "`research_score` null for abstract-only candidates" in prompt
-    assert "without changing\nthe stored level" in prompt
     assert "both scores" not in prompt
     assert "Score quality and relevance independently" not in prompt
 

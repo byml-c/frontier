@@ -41,6 +41,28 @@ def create_paper(client: TestClient, title: str = "Tactile VLA for Fine Manipula
     return response.json()["paper"]
 
 
+def test_paper_search_includes_model_names_aliases_and_screening_notes(
+    client: TestClient,
+) -> None:
+    paper = create_paper(client, "Contact-wrench world action model")
+    updated = client.patch(
+        f"/api/papers/{paper['id']}/metadata",
+        json={
+            "model_short_name": "CW-WAM",
+            "search_aliases": ["contact wrench WAM", "接触力世界动作模型"],
+            "screening_feedback": "我的简记：力控操作主线",
+        },
+    )
+    assert updated.status_code == 200, updated.text
+    body = updated.json()
+    assert body["model_short_name"] == "CW-WAM"
+    assert body["search_aliases"] == ["contact wrench WAM", "接触力世界动作模型"]
+    for query in ("CW-WAM", "contact wrench", "接触力世界动作模型", "力控操作主线"):
+        result = client.get("/api/papers", params={"q": query, "limit": 20})
+        assert result.status_code == 200, result.text
+        assert paper["id"] in {item["id"] for item in result.json()["items"]}, query
+
+
 def test_stream_close_after_metadata_marks_task_interrupted(client: TestClient) -> None:
     from frontier.api.system import stream_task
     from frontier.database import SessionLocal

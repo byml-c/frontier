@@ -312,7 +312,7 @@ JSON summary of papers processed, group matches, groups created, and unresolved 
             payload.get("date") or datetime.now(ZoneInfo(settings.timezone)).date().isoformat()
         )
         recovery_sources = payload.get("recovery_source_task_ids") or []
-        if recovery_sources:
+        if recovery_sources and not payload.get("fresh_discovery"):
             discovery_start = f"""This is recovery of an interrupted or explicitly regenerated daily brief.
 Read `frontier task get SOURCE_TASK_ID` for each of these same-date source tasks:
 {json.dumps(recovery_sources)}.
@@ -329,8 +329,9 @@ The following discovery rules describe normal fresh runs; for this recovery, the
 batch replaces external discovery and ingestion. All remaining scoring and publication rules apply."""
         else:
             discovery_start = (
-                f"Start discovery with `frontier source arxiv-discover --date {run_date} "
-                "--offset 0 --page-size 100`."
+                "After any required interest-profile refresh, run `frontier source arxiv-sync` "
+                "exactly once. It advances the durable arXiv cursor only after all pages are fetched. "
+                "Retry a failed sync unchanged; do not replace it with ad-hoc keyword discovery."
             )
         return f"""{workflow_common}
 
@@ -362,10 +363,11 @@ negative evidence, and cite the provided `evidence_key` values in each semantic 
 copy paper summaries into the profile or create additional feedback-profile memories. A 409 means
 evidence changed; reload `interest context` and retry once before ranking. After a successful profile
 update, reload `interest context` once and use that new `source_digest` for brief creation.
-You are the single daily-workflow root Agent responsible for candidate discovery, bibliographic
-verification, ranking, and the catalog summaries and comments saved for every selected paper.
-You must verify the evidence, make the final ranking decision, and perform every Frontier mutation
-yourself. Candidate analysis must not use or create a paper-reading Conversation;
+You are the single daily-workflow root Agent responsible for reviewing model-uncertain candidates,
+bibliographic verification, final ranking, and the catalog summaries and comments saved for every
+selected paper. The Server owns cursor discovery, domain gating, model scoring, and confidence
+routing. You must verify evidence that needs review, make the final ranking decision, and perform
+every Frontier mutation yourself. Candidate analysis must not use or create a paper-reading Conversation;
 that long-lived main Agent is reserved for papers the user actively reads and discusses.
 Use an abstract-only workflow: score candidates, write
 `catalog_summary` and comments, create the brief, and publish it so the user can start reading
@@ -386,51 +388,37 @@ cross-domain exploration. If interest hit rate is weak, tighten personal relevan
 belongs to post-reading evaluation; do not predict quality or use quality scores for daily ranking.
 The graph describes research
 questions and accumulated evidence; it is not by itself proof that the user likes a topic.
-Read `frontier setting list`. Broad discovery domains are `discovery_domains` (normally 3D vision,
-embodied intelligence, and AI agents). These alone define the semantic domain gate. In contrast,
-`initial_interest_domains` (VLA, WAM, etc.), explicit interests, and learned preferences guide interest
-selection and ranking, never the initial retrieval query or the domain gate. General AI agents include
-tool use, planning, multi-agent collaboration, memory, and computer use, not just embodied agents.
+Read `frontier setting list`. Discovery is cursor-based and must be served by
+`frontier source arxiv-sync`. The Server trains the current personal-relevance model from all
+available human five-level labels, fetches every arXiv record whose `lastUpdatedDate` falls between
+the committed cursor and the current safe cutoff, applies the embodied-intelligence domain gate,
+and scores every promoted paper with a continuous relevance score and confidence. There is no raw
+scan or prefilter numeric cap. Completion means every reported `totalResults` page was fetched and
+deduplicated.
 {discovery_start}
-This read-only tool scans the configured broad arXiv categories over the recent candidate_lookback_days
-(default 3; Monday through Wednesday use up to 7 days in a single request to cover weekend or holiday
-announcement delays), then applies a high-recall server-side prefilter to obvious vision, robotics, embodied,
-or agent-related metadata. It scans at most discovery_scan_limit raw records (default 300) and returns
-at most discovery_prefilter_limit records (default 120) to you. Inspect every returned item; the
-prefilter is only an efficiency filter, not proof of domain membership. It deliberately does not use
-VLA, WAM, or other narrow interest keywords. If `scan_capped` is true, record that coverage is bounded
-by the raw scan limit; do not claim to have covered the full category set. The Server deduplicates by
-version-independent arXiv ID, normalized DOI, and normalized title, and excludes ALL existing library
-papers (including candidate) before returning the list. Do not rescan or refill from the library merely
-to reach 100; use the returned new-paper batch only. Pagination happens inside the Server, so call this
-command once per daily run, except when retrying a failed request. A null next_offset ends discovery;
-it does not mean the entire arXiv window was covered. Set candidate-pool discovery_complete from the
-returned coverage_complete and explain scan_capped/prefilter_capped or shortages in notes.
-Retry a failed discovery request without changing the date or offset. Never silently substitute narrow
-keyword searches for broad discovery; keyword search is only supplemental lookup or verification.
-Inspect each title, abstract and authors for semantic membership in a broad domain. Categories are
-recall sources, not proof of domain membership. Papers that fail the gate must never enter the database.
-For domain matches, run `frontier paper add-arxiv`; ingestion still deduplicates races with other
-requests. Ingest eligible domain matches before interest shortlisting, even if they
-will not be chosen today, so lower-interest domain papers remain available for future discovery.
-Then narrow domain-qualified unread papers to about `abstract_limit` candidates (default 100, normally
-80-120) using personal interest. This setting is the POST-screening candidate target, not a cap on
-raw search results or how many abstracts you may inspect for domain screening. Prefer explicit user
-preferences, but reserve about 15% of this shortlist for promising or uncertain work elsewhere in the
-broad domains; VLA/WAM keyword absence must never by itself eliminate a paper. Author influence must
-not change the personal-relevance rating or bypass the broad domain gate. Do not fill shortages with off-domain
-or already-read papers. Keep shortlist IDs and progress in task-scoped scratch files as needed.
+The sync response separates `paper_ids` (confident relevant plus low-confidence review cases),
+`agent_review_paper_ids` (confidence below the model threshold, weak training support, or score near
+the decision boundary), and `model_filtered_paper_ids`. Inspect the Agent review IDs from title,
+abstract and authors and write a continuous `relevance_score` for each. A confident model score is
+already the initial continuous `relevance_score`; do not force scores into five levels and do not
+rescore every confident candidate. After reviewing an Agent-review paper, save the continuous score
+and `model_review_required=false`. Human ratings remain five-level and are owned by the Web user.
+If an Agent-reviewed paper is clearly outside the embodied/perception scope, leave it out of the
+candidate pool and explain the exception. Never override model scores merely from author prestige.
+Use `coverage_complete` from the sync response. Never substitute narrow keyword searches for cursor
+discovery except for individual paper verification. Keep shortlist IDs and progress in task-scoped
+scratch files as needed.
 Save this intermediate pool with `frontier task candidate-pool {task.id} --data @data/tasks/{task.id}/candidate-pool.json`.
 The JSON contains `paper_ids`, `discovery_complete`, and `notes` explaining shortages or incomplete
 coverage. Read `frontier task get {task.id}` to verify persistence. Choose the final brief only from
 this saved pool. Create the brief with `task_id={task.id}` so the Server can validate pool membership.
-Assign only a five-level personal-relevance rating to these candidates, then choose a
-continuous final brief between 20 and 50 papers (never more than the
-configured brief limit). Store `relevance_score` as exactly one of 0.0 (不相关), 0.25 (较不相关),
-0.5 (一般), 0.75 (较相关), or 1.0 (高度相关). These are five discrete levels, not a continuous
-prediction: never add decimal precision or blend in author influence. Rank the entire pool by these
-relevance levels; break ties using the user's explicit topic preferences and recency without changing
-the stored level. Do not generate `research_score`, `topic_relevance_score`, or
+Assign a continuous personal-relevance score to model-review candidates, then choose a continuous
+final brief between 20 and 50 papers (never more than the configured brief limit). Store
+`relevance_score` as a continuous value in `[0,1]` with exactly two decimal places. Human five-level
+anchors are 0.00 (不相关), 0.25 (较不相关), 0.50 (一般), 0.75 (较相关), and 1.00 (高度相关);
+Agent scores may interpolate between them. Rank the entire eligible pool by continuous relevance;
+break ties using explicit topic preferences and recency without changing stored scores.
+Do not generate `research_score`, `topic_relevance_score`, or
 `author_influence_score` in this daily workflow. Quality is unknown before reading: leave
 `research_score` null for abstract-only candidates. Never reinterpret an old abstract-based quality
 prediction as a reading judgment. Preserve genuine full-text analysis and user-confirmed feedback.
@@ -439,14 +427,19 @@ are owned by the ingestion metadata Agent. Do not repeat affiliation/group extra
 groups in this daily scoring run; use the existing fields and leave missing values blank.
 For every paper that enters the final 20–50, save a concise Simplified-Chinese
 `catalog_summary` (not `Paper.summary`) and a concise, information-dense Agent comment for every
-final brief item; do not put the entire 100-paper intermediate pool in the brief. The comment must explain what the work does
+final brief item; do not put the entire eligible intermediate pool in the brief. The comment must explain what the work does
 and its concrete methodological or empirical highlight, such as the proposed mechanism, benchmark,
 real-robot result, or a reported limitation. Never present an abstract-only comment as a quality
 judgment. Do not repeat the relevance rating in `agent_comment`; it belongs in `relevance_score`.
+For each final item, also derive a concise `model_short_name` when the title or abstract provides a
+stable method/model name, plus one to four short `search_aliases` covering acronym expansions,
+notation variants, or a useful Chinese shorthand. Do not invent a model name, use a generic family
+such as VLA alone as the method name, or turn topical tags into aliases. These are paper-level
+search fields, not tags. Never overwrite the user's `screening_feedback` note.
 Before ranking or adding a paper, inspect its existing record and exclude every paper whose
 status is not `candidate`; papers in `reading`, `feedback_pending`, `completed`, or `ignored` status
 must never appear in the daily recommendations. Screen and score the pool from titles, abstracts,
-and authors only. Every selected paper needs a catalog summary, concise comment, a five-level relevance rating,
+and authors only. Every selected paper needs a catalog summary, concise comment, and a continuous relevance score,
 and a recommendation reason; abstract translations are queued by the publish endpoint. Do not publish
 a failure message as a one-paper brief. If fewer than 20 eligible papers exist after broad discovery,
 report the shortage explicitly and do not fabricate extra papers. Catalog summaries, Agent comments,
