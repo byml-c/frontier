@@ -7,6 +7,8 @@ import { api, ApiError } from "../api";
 import { BriefTabs } from "../components/BriefTabs";
 import { PageHeader } from "../components/PageHeader";
 import { PaperCard } from "../components/PaperCard";
+import { RatingQueryControls } from "../components/RatingQueryControls";
+import { queryBriefItems, type RatingQuery } from "../components/paperQuery";
 import { Empty, ErrorState, Loading } from "../components/States";
 import type { Brief } from "../types";
 
@@ -16,6 +18,7 @@ export function BriefPage() {
   const { briefId } = useParams();
   const queryClient = useQueryClient();
   const [view, setView] = useState<ViewTab>("all");
+  const [ratingQuery, setRatingQuery] = useState<RatingQuery>({ ratingSource: "interest", ratingLevel: "", sort: "default" });
   const brief = useQuery({
     queryKey: ["brief", briefId ?? "latest"],
     queryFn: async () => {
@@ -35,12 +38,12 @@ export function BriefPage() {
   if (brief.error) return <Container sx={{ py: 6 }}><PageHeader title="研究简报" tabs={<BriefTabs value={briefId ? "archive" : "today"} />} /><ErrorState error={brief.error} /></Container>;
   const data = brief.data!;
   const ordered = [...data.items].sort((a, b) => (a.rank || 999) - (b.rank || 999));
-  const visible = ordered.filter((item) => {
+  const visible = queryBriefItems(ordered.filter((item) => {
     if (view === "top") return item.rank > 0 && item.rank <= 10;
     if (view === "pending") return item.rank > 10;
     if (view === "rated") return Boolean(item.paper.agent_score_confirmed || item.paper.agent_quality_confirmed || item.paper.agent_interest_confirmed || item.paper.screening_feedback || item.paper.screening_quality_level || item.paper.screening_interest_level);
     return true;
-  });
+  }), ratingQuery);
 
   return <Container maxWidth="lg" sx={{ py: { xs: 4, md: 5 } }}>
     <PageHeader title={data.title} tabs={<BriefTabs value={briefId ? "archive" : "today"} />} />
@@ -52,6 +55,10 @@ export function BriefPage() {
         <Tab value="pending" label="其余候选" />
         <Tab value="rated" label={`已评分 ${ordered.filter((item) => item.paper.agent_score_confirmed || item.paper.agent_quality_confirmed || item.paper.agent_interest_confirmed || item.paper.screening_feedback || item.paper.screening_quality_level || item.paper.screening_interest_level).length}`} />
       </Tabs>
+      <Stack direction={{ xs: "column", sm: "row" }} spacing={1.5} sx={{ pt: 1 }}>
+        <RatingQueryControls value={ratingQuery} onChange={setRatingQuery} defaultSortLabel="推荐顺序" />
+      </Stack>
+      <Typography variant="caption" color="text.secondary">匹配 {visible.length} / {data.items.length} 篇 · 连续相关度按五档筛选，排序使用原始分数。</Typography>
     </Stack>
     {!visible.length && <Empty title={view === "rated" ? "还没有评分记录" : "暂无论文"} body={view === "rated" ? "点击论文下方的相关度标签，记录你的偏好。" : "切换其他分类继续阅读。"} />}
     <Stack spacing={1.5}>

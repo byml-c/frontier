@@ -3,7 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import mimetypes
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from pathlib import Path
 from typing import Annotated
 
@@ -123,6 +123,13 @@ from ..services.paper_agent_context import (
     sync_paper_agent_context,
 )
 from ..services.paper_metadata import queue_metadata_enrichment
+from ..services.paper_query import (
+    PaperSort,
+    RatingSource,
+    dimension_filters,
+    rating_expression,
+    rating_level_expression,
+)
 from ..services.paper_sources import arxiv_html_url, arxiv_pdf_url
 from ..services.podcast_content import (
     PodcastContentError,
@@ -547,9 +554,20 @@ def list_papers(
     interested: bool | None = None,
     source: str | None = None,
     library: bool = False,
+    published_from: date | None = None,
+    published_to: date | None = None,
+    title_q: str | None = Query(None, max_length=1000),
+    affiliation_q: str | None = Query(None, max_length=1000),
+    keyword_q: str | None = Query(None, max_length=1000),
+    tag_q: str | None = Query(None, max_length=1000),
+    rating_source: RatingSource = "interest",
+    rating_level: int | None = Query(None, ge=-1, le=4),
+    sort: PaperSort = "default",
     limit: int = Query(default=50, ge=1, le=200),
     offset: int = Query(default=0, ge=0),
 ) -> dict:
+    if published_from and published_to and published_from > published_to:
+        raise HTTPException(status_code=422, detail="Publication start date must not exceed end date")
     reading_status_order = case(
         (Paper.status == "feedback_pending", 0),
         (Paper.status == "reading", 1),
@@ -562,9 +580,28 @@ def list_papers(
         reading_status_order,
         Paper.published_at.desc(),
         Paper.created_at.desc(),
+        Paper.id,
     )
     count_statement = select(func.count(func.distinct(Paper.id)))
-    filters = []
+    filters = dimension_filters(
+        title=title_q, affiliation=affiliation_q, keyword=keyword_q, tag=tag_q,
+    )
+    if published_from:
+        filters.append(Paper.published_at >= published_from)
+    if published_to:
+        filters.append(Paper.published_at <= published_to)
+    rating = rating_expression(rating_source)
+    if rating_level is not None:
+        filters.append(rating.is_(None) if rating_level == -1 else rating_level_expression(rating) == rating_level)
+    orders = {
+        "rating_desc": [rating.desc().nullslast(), Paper.published_at.desc().nullslast()],
+        "rating_asc": [rating.asc().nullslast(), Paper.published_at.desc().nullslast()],
+        "published_desc": [Paper.published_at.desc().nullslast()],
+        "published_asc": [Paper.published_at.asc().nullslast()],
+        "title": [func.lower(Paper.title).asc()],
+    }
+    if sort in orders:
+        statement = statement.order_by(None).order_by(*orders[sort], Paper.id)
     if q and (query := q.strip()):
         token = f"%{query}%"
         json_token = f"%{json.dumps(query, ensure_ascii=True)[1:-1]}%"

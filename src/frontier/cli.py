@@ -126,6 +126,16 @@ def paper_list(
     tag_id: str | None = None,
     library: bool = False,
     limit: int = 50,
+    offset: int = 0,
+    published_from: str | None = None,
+    published_to: str | None = None,
+    title_query: str | None = None,
+    affiliation_query: str | None = None,
+    keyword_query: str | None = None,
+    tag_query: str | None = None,
+    rating_source: str = "interest",
+    rating_level: int | None = None,
+    sort: str = "default",
 ) -> None:
     emit(
         client.request(
@@ -138,6 +148,16 @@ def paper_list(
                 "tag_id": tag_id,
                 "library": str(library).lower(),
                 "limit": limit,
+                "offset": offset,
+                "published_from": published_from,
+                "published_to": published_to,
+                "title_q": title_query,
+                "affiliation_q": affiliation_query,
+                "keyword_q": keyword_query,
+                "tag_q": tag_query,
+                "rating_source": rating_source,
+                "rating_level": rating_level,
+                "sort": sort,
             },
         )
     )
