@@ -54,21 +54,29 @@ those belong exclusively to the paper main Agent after explicit reading completi
    When confirmed evidence changed, use `interest profile-update` to refresh the one derived semantic
    profile with evidence-key citations, then reload `interest context` once before creating the
    brief. It is a rebuildable cache, not a second owner of paper facts.
-2. Read `setting list`, then run `source arxiv-sync` once. The Server trains the current relevance
+2. Read `setting list`, then run `source arxiv-sync --date YYYY-MM-DD` once using the task's brief
+   date. The cutoff is that date's scheduled daily update time (normally 09:05 Asia/Shanghai), not
+   the wall clock when the Agent reaches discovery. Retries use the same date and discovery batch.
+   The Server trains the current relevance
    model from human five-level labels, fetches every arXiv update between the durable
-   `lastUpdatedDate` cursor and the safe current cutoff, records every fetched item in staging,
+   `lastUpdatedDate` cursor and this fixed brief cutoff, records every fetched item in staging,
    deduplicates against the whole library, and applies the embodied-intelligence domain gate.
    There is no raw-scan or prefilter numeric cap, and `totalResults` must equal the verified fetched
    count for complete coverage. Retry a failed sync unchanged.
 3. Use the sync routing. `paper_ids` contains confident relevant and low-confidence review papers;
    `agent_review_paper_ids` requires Agent abstract review; `model_filtered_paper_ids` are
    high-confidence low-relevance papers retained in the library but excluded from today's pool.
+   Only this sync's discovery batch is eligible. Never refill from recent library candidates.
+   Exclude papers already recommended in any published brief or explicitly rated/commented on by
+   the user, even when their reading status is still `candidate`.
    Do not rescreen every confident candidate or use author prestige to override the model.
 4. Score each Agent-review paper with a continuous `relevance_score` in `[0,1]`, save exactly two
    decimals, and clear `model_review_required`. Human ratings remain five levels; the five values
    are only calibration anchors for Agent scores. Save the verified eligible IDs with
    `task candidate-pool TASK_ID --data @data/tasks/TASK_ID/candidate-pool.json`; there is no 120-item
    cap. Supply `discovery_complete` from sync and notes for shortages, review exceptions, or failures.
+   Include `discovery_run_id` from the sync's `run_id`; the Server verifies the batch and brief date.
+   Recovery without a run ID may reuse only saved same-date pools, with eligibility rechecked.
 5. Rank by continuous relevance, breaking ties by explicit topic preferences and recency; select
    20–50 for the final brief within `brief_limit`.
    Do not generate quality, topic-relevance, or author-influence scores, or blend them into relevance.
@@ -90,6 +98,8 @@ those belong exclusively to the paper main Agent after explicit reading completi
     used for later evaluation. Include the current `task_id` so pool membership is validated.
     The publish endpoint queues abstract translations independently when configured. End the daily
     workflow after publication; there is no automatic full-text analysis stage.
+    If the complete window contains no eligible new papers, save an empty pool with explanatory
+    notes and publish an empty dated brief; do not fill it with older or already-rated papers.
 11. Save only durable user preference or reusable workflow lessons as memory.
 
 Do not invent author roles, affiliations, experimental results, or limitations. Use `null`, “未标注”, or a concrete failure when evidence is absent.

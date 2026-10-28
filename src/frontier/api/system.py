@@ -15,9 +15,19 @@ from ..agent_runner import (
 from ..config import settings
 from ..database import SessionLocal, get_session
 from ..interactive_stream import encode_stream_event, stream_codex_prompt
-from ..models import AppSetting, Conversation, Memory, OperationLog, Paper, TaskRun, utcnow
+from ..models import (
+    AppSetting,
+    Conversation,
+    DiscoveryRun,
+    Memory,
+    OperationLog,
+    Paper,
+    TaskRun,
+    utcnow,
+)
 from ..schemas import CandidatePoolUpdate, MemoryCreate, MemoryUpdate, SettingUpdate, TaskCreate
 from ..services.architecture_scene import release_agent_lock_for_task
+from ..services.arxiv_sync import InvalidBriefDate
 from ..services.arxiv_sync import sync_arxiv as sync_arxiv_cursor
 from ..services.backup import create_local_git_backup
 from ..services.bootstrap import import_bibtex
@@ -34,6 +44,10 @@ from ..services.common import (
 from ..services.discovery import discover_arxiv_page, valid_string_list
 from ..services.ingest import create_or_update_paper, search_arxiv
 from ..services.interest_evidence import DERIVED_INTEREST_PROFILE_ID
+from ..services.manual_recommendations import (
+    is_daily_recommendation_eligible,
+    previously_recommended_paper_ids,
+)
 from ..services.paper_agent_context import paper_agent_context_sync_required
 from ..services.paper_conversations import get_or_create_paper_conversation
 from ..services.podcast_generation import (
@@ -771,9 +785,15 @@ def arxiv_discover(
 
 
 @router.post("/sources/arxiv/sync")
-def arxiv_sync(session: Annotated[Session, Depends(get_session)]) -> dict:
+def arxiv_sync(
+    session: Annotated[Session, Depends(get_session)], through_date: date | None = None
+) -> dict:
     try:
-        return sync_arxiv_cursor(session)
+        return sync_arxiv_cursor(
+            session, through_date=through_date or current_research_date(session)
+        )
+    except InvalidBriefDate as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
     except Exception as exc:
         raise HTTPException(status_code=502, detail=f"arXiv cursor sync failed: {exc}") from exc
 
@@ -801,11 +821,35 @@ def save_candidate_pool(
         )
     papers = list(session.scalars(select(Paper).where(Paper.id.in_(payload.paper_ids))))
     if len(papers) != len(payload.paper_ids) or any(
-        paper.status != "candidate" for paper in papers
+        not is_daily_recommendation_eligible(paper) for paper in papers
     ):
         raise HTTPException(
-            status_code=422, detail="Candidate pool requires existing unread papers"
+            status_code=422, detail="Candidate pool requires existing unrated unread papers"
         )
+    if previously_recommended_paper_ids(session, payload.paper_ids):
+        raise HTTPException(status_code=422, detail="Candidate pool contains previously recommended papers")
+    task_payload = task.payload_json or {}
+    if payload.discovery_run_id:
+        run = session.get(DiscoveryRun, payload.discovery_run_id)
+        result = (run.result_json or {}) if run else {}
+        if (
+            not run or run.status != "completed"
+            or result.get("brief_date") != task_payload.get("date")
+        ):
+            raise HTTPException(status_code=422, detail="Discovery batch does not match this brief date")
+        if not set(payload.paper_ids).issubset(result.get("paper_ids", [])):
+            raise HTTPException(status_code=422, detail="Candidate pool contains papers outside its discovery batch")
+    elif task_payload.get("recovery_source_task_ids"):
+        recovered_ids = set()
+        for source_id in task_payload["recovery_source_task_ids"]:
+            source = session.get(TaskRun, source_id)
+            source_payload = (source.payload_json or {}) if source else {}
+            if source_payload.get("date") == task_payload.get("date"):
+                recovered_ids.update(source_payload.get("candidate_pool", {}).get("paper_ids", []))
+        if not set(payload.paper_ids).issubset(recovered_ids):
+            raise HTTPException(status_code=422, detail="Recovery may only reuse same-date candidate pools")
+    elif task_payload.get("discovery_mode") == "brief_date_cursor":
+        raise HTTPException(status_code=422, detail="A dated discovery_run_id is required")
     pool = {**payload.model_dump(), "target": target, "saved_at": utcnow().isoformat()}
     task.payload_json = {**(task.payload_json or {}), "candidate_pool": pool}
     log_operation(

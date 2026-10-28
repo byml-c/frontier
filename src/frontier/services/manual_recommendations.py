@@ -15,8 +15,31 @@ DAILY_RECOMMENDATION_STATUS = "candidate"
 
 
 def is_daily_recommendation_eligible(paper: Paper) -> bool:
-    """Only unread candidates may occupy a daily recommendation slot."""
-    return paper.status == DAILY_RECOMMENDATION_STATUS
+    """Unrated unread candidates may occupy an automatic recommendation slot."""
+    feedback = paper.screening_feedback or {}
+    observed = any(
+        feedback.get(key)
+        for key in (
+            "interest_level", "quality_level", "comment", "agent_score_confirmed",
+            "agent_interest_confirmed", "agent_quality_confirmed",
+        )
+    )
+    return paper.status == DAILY_RECOMMENDATION_STATUS and not observed
+
+
+def previously_recommended_paper_ids(
+    session: Session, paper_ids: list[str], *, exclude_brief_id: str | None = None
+) -> set[str]:
+    if not paper_ids:
+        return set()
+    statement = (
+        select(BriefItem.paper_id)
+        .join(Brief, Brief.id == BriefItem.brief_id)
+        .where(Brief.status == "published", BriefItem.paper_id.in_(paper_ids))
+    )
+    if exclude_brief_id:
+        statement = statement.where(Brief.id != exclude_brief_id)
+    return set(session.scalars(statement))
 
 
 def _needs_analysis(paper: Paper) -> bool:

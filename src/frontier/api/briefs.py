@@ -48,6 +48,7 @@ from ..services.interest_evidence import (
 from ..services.manual_recommendations import (
     current_analysis_state,
     is_daily_recommendation_eligible,
+    previously_recommended_paper_ids,
 )
 from ..services.paper_sources import arxiv_html_url, arxiv_pdf_url
 from ..services.podcast_content import (
@@ -680,11 +681,17 @@ def add_brief_item(
     pool = (task.payload_json or {}).get("candidate_pool") if task else None
     if pool is not None and payload.tier != "manual" and paper.id not in pool["paper_ids"]:
         raise HTTPException(status_code=409, detail="Paper is not in the daily candidate pool")
-    if not is_daily_recommendation_eligible(paper):
+    if payload.tier != "manual" and (
+        not is_daily_recommendation_eligible(paper)
+        or paper.id in previously_recommended_paper_ids(
+            session, [paper.id], exclude_brief_id=brief.id
+        )
+    ):
         raise HTTPException(
             status_code=409,
             detail=(
-                "Only unread candidate papers can be added to a daily brief "
+                "Only unread candidate papers without screening feedback or prior recommendation "
+                "can be added to a daily brief "
                 f"(current status: {paper.status})"
             ),
         )
@@ -731,31 +738,45 @@ def add_brief_item(
 
 
 @router.post("/{brief_id}/publish")
+@serialized_task_claim
 def publish_brief(
     brief_id: str,
     background_tasks: BackgroundTasks,
     session: Annotated[Session, Depends(get_session)],
 ) -> dict:
     brief = _brief_or_404(session, brief_id)
+    if brief.status == "published":
+        return _serialize_brief(session, brief)
     rows = session.execute(
         select(BriefItem, Paper)
         .join(Paper, Paper.id == BriefItem.paper_id)
         .where(BriefItem.brief_id == brief_id)
         .order_by(BriefItem.rank)
     ).all()
+    prior_ids = previously_recommended_paper_ids(
+        session, [paper.id for _item, paper in rows], exclude_brief_id=brief.id
+    )
     excluded_rows = [
         row
         for row in rows
-        if row[0].tier != "manual" and not is_daily_recommendation_eligible(row[1])
+        if row[0].tier != "manual"
+        and (not is_daily_recommendation_eligible(row[1]) or row[1].id in prior_ids)
     ]
     rows = [
-        row for row in rows if row[0].tier == "manual" or is_daily_recommendation_eligible(row[1])
+        row for row in rows
+        if row[0].tier == "manual"
+        or (is_daily_recommendation_eligible(row[1]) and row[1].id not in prior_ids)
     ]
-    if not rows:
-        raise HTTPException(status_code=409, detail="Cannot publish a brief without unread papers")
-    recommendation_count = sum(item.tier != "manual" for item, _paper in rows)
     task = session.get(TaskRun, brief.task_id) if brief.task_id else None
     pool = (task.payload_json or {}).get("candidate_pool") if task else None
+    empty_daily = bool(
+        task and (task.payload_json or {}).get("discovery_mode") == "brief_date_cursor"
+        and pool is not None and pool.get("paper_ids") == []
+        and pool.get("discovery_complete") and pool.get("notes", "").strip()
+    )
+    if not rows and not empty_daily:
+        raise HTTPException(status_code=409, detail="Cannot publish a brief without unread papers")
+    recommendation_count = sum(item.tier != "manual" for item, _paper in rows)
     if pool is not None and any(
         item.tier != "manual" and paper.id not in pool["paper_ids"] for item, paper in rows
     ):

@@ -9,7 +9,7 @@ from fastapi.testclient import TestClient
 from frontier import cli
 from frontier.agent_runner import build_prompt, run_task
 from frontier.database import SessionLocal
-from frontier.models import Paper, TaskRun
+from frontier.models import Brief, BriefItem, Paper, TaskRun, utcnow
 from frontier.services.interest_evidence import feedback_payload_hash_v2
 
 
@@ -44,6 +44,7 @@ def _published_brief(
     *,
     day_offset: int,
     digest: str | None = None,
+    legacy_duplicate: bool = False,
 ) -> dict:
     payload = {
         "brief_date": (date(2032, 1, 1) + timedelta(days=day_offset)).isoformat(),
@@ -54,6 +55,19 @@ def _published_brief(
     brief_response = client.post("/api/briefs", json=payload)
     assert brief_response.status_code == 200, brief_response.text
     brief = brief_response.json()
+    if legacy_duplicate:
+        # Historical duplicates remain readable, but new API calls must not create them.
+        with SessionLocal() as session:
+            stored = session.get(Brief, brief["id"])
+            stored.status = "published"
+            stored.published_at = utcnow()
+            for rank, paper in enumerate(papers, start=1):
+                session.add(BriefItem(
+                    brief_id=stored.id, paper_id=paper["id"], rank=rank,
+                    tier="featured" if rank == 1 else "related", snapshot_json=dict(paper),
+                ))
+            session.commit()
+        return client.get(f"/api/briefs/{brief['id']}").json()
     for rank, paper in enumerate(papers, start=1):
         item = client.post(
             f"/api/briefs/{brief['id']}/items",
@@ -667,7 +681,7 @@ def test_ambiguous_legacy_daily_source_is_excluded_from_calibration(
 ) -> None:
     paper = _paper(client, "Ambiguous legacy source paper", relevance=0.6, research=0.6)
     _published_brief(client, [paper], day_offset=21)
-    _published_brief(client, [paper], day_offset=22)
+    _published_brief(client, [paper], day_offset=22, legacy_duplicate=True)
     before_feedback = client.get("/api/interests/context").json()["calibration"]
     finish = client.post(
         f"/api/papers/{paper['id']}/finish",
@@ -698,7 +712,7 @@ def test_feedback_source_is_part_of_idempotency_and_is_validated_first(
 ) -> None:
     paper = _paper(client, "Feedback source identity paper", relevance=0.5, research=0.5)
     first = _published_brief(client, [paper], day_offset=23)["items"][0]
-    second = _published_brief(client, [paper], day_offset=24)["items"][0]
+    second = _published_brief(client, [paper], day_offset=24, legacy_duplicate=True)["items"][0]
     other = _paper(client, "Unrelated source paper", relevance=0.5, research=0.5)
     other_item = _published_brief(client, [other], day_offset=25)["items"][0]
     summary = _summary("相同标签但来源不同，不是同一条反馈。")

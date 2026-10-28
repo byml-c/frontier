@@ -1,30 +1,42 @@
 from __future__ import annotations
 
 import re
-from datetime import UTC, datetime, timedelta
+import threading
+from datetime import UTC, date, datetime, time, timedelta
 from time import sleep
 from typing import Any
+from zoneinfo import ZoneInfo
 
 import httpx
 from lxml import etree
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from ..config import settings
 from ..models import DiscoveryCursor, DiscoveryItem, DiscoveryRun, Paper
 from ..schemas import PaperCreate
-from .common import get_setting, log_operation
+from .common import get_daily_time, get_setting, log_operation
 from .discovery import _identity_keys
 from .ingest import create_or_update_paper
 from .interest_ranker import score_paper, train_daily_ranker
+from .manual_recommendations import (
+    is_daily_recommendation_eligible,
+    previously_recommended_paper_ids,
+)
 from .outbound_network import external_httpx_kwargs
 from .paper_metadata import queue_metadata_enrichment
+from .research_day import current_research_date
 
 SYNC_CURSOR_ID = "arxiv-last-updated-v1"
 OAI_ENDPOINT = "https://oaipmh.arxiv.org/oai"
 DEFAULT_SYNC_CATEGORIES = ["cs.RO", "cs.CV", "cs.AI", "cs.LG", "cs.CL", "cs.MA"]
 DEFAULT_BOOTSTRAP_DAYS = 3
-SAFETY_LAG_MINUTES = 5
-OVERLAP_HOURS = 2
+_SYNC_LOCK = threading.Lock()
+
+
+class InvalidBriefDate(ValueError):
+    pass
+
 
 CORE_EMBODIED = re.compile(
     r"\b(?:embodied|robot\w*|manipulat\w*|grasp\w*|locomotion|navigation|tactile|"
@@ -72,16 +84,13 @@ def _domain_scope(payload: PaperCreate) -> tuple[bool, list[str], str]:
         return True, ["embodied intelligence"], "cs.RO recall"
     if core:
         return True, ["embodied intelligence"], "core embodied concept: " + ", ".join(core[:5])
-    visual = sorted(
-        {match.group(0).casefold() for match in THREE_D_VISION.finditer(text)}
-    )
+    visual = sorted({match.group(0).casefold() for match in THREE_D_VISION.finditer(text)})
     context = sorted({match.group(0).casefold() for match in EMBODIED_CONTEXT.finditer(text)})
     if visual and context:
         return (
             True,
             ["3D vision", "embodied intelligence"],
-            "3D concept with embodied context: "
-            + ", ".join([*visual[:3], *context[:3]]),
+            "3D concept with embodied context: " + ", ".join([*visual[:3], *context[:3]]),
         )
     return False, [], "no embodied or embodied-perception signal"
 
@@ -108,9 +117,7 @@ def _oai_payload(record: Any) -> tuple[PaperCreate, list[str]] | None:
     if not arxiv_id or not title:
         return None
     categories = [
-        value
-        for value in (_xml_text(metadata, f"{arxiv}categories") or "").split()
-        if value
+        value for value in (_xml_text(metadata, f"{arxiv}categories") or "").split() if value
     ]
     authors = []
     for author in metadata.findall(f"{arxiv}authors/{arxiv}author"):
@@ -148,6 +155,9 @@ def _oai_payload(record: Any) -> tuple[PaperCreate, list[str]] | None:
                 "arxiv_updated_at": updated,
                 "arxiv_published_at": created,
                 "metadata_source": "oai-pmh",
+                "arxiv_datestamp": _xml_text(header, f"{oai}datestamp")
+                if header is not None
+                else None,
             },
         ),
         categories,
@@ -228,25 +238,22 @@ def _cursor(session: Session) -> DiscoveryCursor:
 
 def _library_keys(session: Session) -> set[str]:
     keys: set[str] = set()
-    for arxiv_id, doi, title in session.execute(
-        select(Paper.arxiv_id, Paper.doi, Paper.title)
-    ):
+    for arxiv_id, doi, title in session.execute(select(Paper.arxiv_id, Paper.doi, Paper.title)):
         keys.update(_identity_keys(arxiv_id, doi, title))
     return keys
 
 
-def _pending_candidate_routing(
+def _batch_candidate_routing(
     session: Session,
     *,
-    start: datetime,
-    ranker: Any,
+    paper_ids: list[str],
+    relevance_threshold: float,
 ) -> tuple[list[str], list[str], list[str]]:
     papers = list(
         session.scalars(
             select(Paper)
             .where(
-                Paper.status == "candidate",
-                Paper.discovered_at >= start,
+                Paper.id.in_(paper_ids),
                 Paper.model_relevance_score.is_not(None),
             )
             .order_by(Paper.model_relevance_score.desc(), Paper.published_at.desc())
@@ -255,51 +262,131 @@ def _pending_candidate_routing(
     eligible_ids: list[str] = []
     review_ids: list[str] = []
     filtered_ids: list[str] = []
+    prior_ids = previously_recommended_paper_ids(session, paper_ids)
     for paper in papers:
+        if not is_daily_recommendation_eligible(paper) or paper.id in prior_ids:
+            continue
         if paper.model_review_required:
             eligible_ids.append(paper.id)
             review_ids.append(paper.id)
         elif (
-            paper.model_relevance_score is not None
-            and paper.model_relevance_score >= ranker.relevance_threshold
-        ):
+            paper.relevance_score
+            if paper.relevance_score is not None
+            else paper.model_relevance_score
+        ) >= relevance_threshold:
             eligible_ids.append(paper.id)
         else:
             filtered_ids.append(paper.id)
     return eligible_ids, review_ids, filtered_ids
 
 
+def _in_source_window(payload: PaperCreate, start: datetime, end: datetime) -> bool:
+    """OAI date-only stamps overlap whole UTC days; exact stamps use (start, end]."""
+    metadata = payload.metadata_json
+    stamp = (
+        metadata.get("arxiv_datestamp")
+        or metadata.get("arxiv_updated_at")
+        or metadata.get("arxiv_published_at")
+    )
+    parsed = _parse_source_time(stamp)
+    if parsed is None:
+        return False
+    if len(str(stamp)) == 10:
+        return parsed <= end and parsed + timedelta(days=1) > start
+    return start < parsed <= end
+
+
 def sync_arxiv(
     session: Session,
     *,
+    through_date: date | None = None,
     now: datetime | None = None,
     bootstrap_days: int = DEFAULT_BOOTSTRAP_DAYS,
 ) -> dict[str, Any]:
-    """Fetch every newly available arXiv record through a durable time cursor."""
+    # One cursor owner at a time; do not let overlapping sync requests regress it.
+    with _SYNC_LOCK:
+        return _sync_arxiv(
+            session, through_date=through_date, now=now, bootstrap_days=bootstrap_days
+        )
+
+
+def _sync_arxiv(
+    session: Session,
+    *,
+    through_date: date | None = None,
+    now: datetime | None = None,
+    bootstrap_days: int = DEFAULT_BOOTSTRAP_DAYS,
+) -> dict[str, Any]:
+    """Discover one batch ending at the requested brief's scheduled time."""
     now_utc = _aware_utc(now)
-    cutoff = (now_utc - timedelta(minutes=SAFETY_LAG_MINUTES)).replace(second=0, microsecond=0)
+    brief_date = through_date or current_research_date(session, now=now_utc)
+    hour, minute = get_daily_time(session)
+    cutoff = datetime.combine(
+        brief_date, time(hour, minute), tzinfo=ZoneInfo(settings.timezone)
+    ).astimezone(UTC)
+    if cutoff > now_utc:
+        raise InvalidBriefDate("The brief's scheduled cutoff is in the future")
     cursor = _cursor(session)
-    previous_committed = (
-        _aware_utc(cursor.committed_through) if cursor.committed_through else None
-    )
+    previous_committed = _aware_utc(cursor.committed_through) if cursor.committed_through else None
     if previous_committed is None:
         start = (cutoff - timedelta(days=max(1, bootstrap_days))).replace(second=0, microsecond=0)
     else:
-        start = (previous_committed - timedelta(hours=OVERLAP_HOURS)).replace(
-            second=0, microsecond=0
+        start = previous_committed
+    if previous_committed is not None and previous_committed >= cutoff:
+        completed = session.scalar(
+            select(DiscoveryRun)
+            .where(DiscoveryRun.status == "completed", DiscoveryRun.window_end == cutoff)
+            .order_by(DiscoveryRun.finished_at.desc())
+            .limit(1)
         )
-    if start >= cutoff:
+        if completed and (completed.result_json or {}).get("brief_date") == brief_date.isoformat():
+            result = dict(completed.result_json)
+            relevant, review, filtered = _batch_candidate_routing(
+                session,
+                paper_ids=result.get("batch_paper_ids", []),
+                relevance_threshold=result["model"]["relevance_threshold"],
+            )
+            return {
+                **result,
+                "status": "up_to_date",
+                "reused_run": True,
+                "paper_ids": relevant,
+                "agent_review_paper_ids": review,
+                "model_filtered_paper_ids": filtered,
+                "counts": {
+                    **result["counts"],
+                    "candidate_pool": len(relevant),
+                    "confident_relevant": len(relevant) - len(review),
+                    "agent_review": len(review),
+                    "model_filtered": len(filtered),
+                },
+            }
         return {
             "status": "up_to_date",
-            "window_start": start.isoformat(),
-            "window_end": cutoff.isoformat(),
+            "brief_date": brief_date.isoformat(),
+            "window": {"start": cutoff.isoformat(), "end": cutoff.isoformat()},
+            "cursor": {
+                "previous": previous_committed.isoformat(),
+                "committed_through": previous_committed.isoformat(),
+            },
+            "coverage_complete": True,
             "fetched": 0,
             "paper_ids": [],
             "agent_review_paper_ids": [],
         }
-    categories = get_setting(
-        session, "discovery_arxiv_categories", DEFAULT_SYNC_CATEGORIES
+    # Recover only staging from interrupted attempts at this exact daily interval.
+    retry_ids = list(
+        session.scalars(
+            select(DiscoveryItem.paper_id)
+            .join(DiscoveryRun, DiscoveryRun.id == DiscoveryItem.run_id)
+            .where(
+                DiscoveryRun.window_start == start,
+                DiscoveryRun.window_end == cutoff,
+                DiscoveryItem.paper_id.is_not(None),
+            )
+        )
     )
+    categories = get_setting(session, "discovery_arxiv_categories", DEFAULT_SYNC_CATEGORIES)
     if not isinstance(categories, list) or not categories:
         categories = DEFAULT_SYNC_CATEGORIES
     categories = [
@@ -320,6 +407,7 @@ def sync_arxiv(
     session.add(run)
     cursor.last_attempt_started_at = now_utc
     session.commit()
+    run_id = run.id
 
     try:
         ranker, model_run, model_metrics = train_daily_ranker(session, now=now_utc)
@@ -339,7 +427,8 @@ def sync_arxiv(
         filtered_paper_ids: list[str] = []
         promoted_papers: list[Paper] = []
         promoted_this_run = 0
-        domain_rejected = duplicate_count = skipped_existing = 0
+        domain_rejected = duplicate_count = skipped_existing = outside_window = 0
+        batch_ids = list(retry_ids)
         for payload in raw_items:
             identity_keys = _identity_keys(payload.arxiv_id, payload.doi, payload.title)
             if identity_keys & seen_keys:
@@ -360,6 +449,11 @@ def sync_arxiv(
                 source_json=payload.model_dump(mode="json"),
             )
             session.add(stage)
+            if not _in_source_window(payload, start, cutoff):
+                outside_window += 1
+                stage.status = "outside_window"
+                stage.reason = "source update is outside this brief's cursor interval"
+                continue
             if identity_keys & library_keys:
                 skipped_existing += 1
                 stage.status = "existing"
@@ -372,6 +466,8 @@ def sync_arxiv(
                 stage.reason = domain_reason
                 continue
             paper, _created = create_or_update_paper(session, payload, actor="system")
+            library_keys.update(identity_keys)
+            batch_ids.append(paper.id)
             promoted_this_run += 1
             ranked = score_paper(ranker, paper)
             if ranked.review_required:
@@ -400,10 +496,10 @@ def sync_arxiv(
             )
             session.commit()
 
-        routed_ids, routed_review_ids, routed_filtered_ids = _pending_candidate_routing(
+        routed_ids, routed_review_ids, routed_filtered_ids = _batch_candidate_routing(
             session,
-            start=start,
-            ranker=ranker,
+            paper_ids=batch_ids,
+            relevance_threshold=ranker.relevance_threshold,
         )
         paper_ids = routed_ids
         agent_review_paper_ids = routed_review_ids
@@ -421,6 +517,7 @@ def sync_arxiv(
         run.review_required_count = len(agent_review_paper_ids)
         result = {
             "status": "completed",
+            "brief_date": brief_date.isoformat(),
             "run_id": run.id,
             "cursor": {
                 "previous": previous_committed.isoformat() if previous_committed else None,
@@ -444,6 +541,7 @@ def sync_arxiv(
                 "deduplicated": duplicate_count,
                 "existing": skipped_existing,
                 "domain_rejected": domain_rejected,
+                "outside_window": outside_window,
                 "promoted_this_run": promoted_this_run,
                 "candidate_pool": len(paper_ids),
                 "confident_relevant": len(paper_ids) - len(agent_review_paper_ids),
@@ -451,6 +549,7 @@ def sync_arxiv(
                 "model_filtered": len(filtered_paper_ids),
             },
             "paper_ids": paper_ids,
+            "batch_paper_ids": list(dict.fromkeys(batch_ids)),
             "agent_review_paper_ids": agent_review_paper_ids,
             "model_filtered_paper_ids": filtered_paper_ids,
             "coverage_complete": run.total_results == run.fetched_count,
@@ -465,6 +564,10 @@ def sync_arxiv(
         session.commit()
         return result
     except Exception as exc:
+        # Discard an uncommitted cursor advance, including failures during the final commit.
+        session.rollback()
+        run = session.get(DiscoveryRun, run_id)
+        cursor = _cursor(session)
         run.status = "failed"
         run.finished_at = datetime.now(UTC)
         run.error = str(exc)

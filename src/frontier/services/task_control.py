@@ -132,7 +132,7 @@ def _daily_claim(
             if (previous.payload_json or {}).get("candidate_pool", {}).get("paper_ids")
         ]
     )
-    task_payload = {**payload, "date": target}
+    task_payload = {**payload, "date": target, "discovery_mode": "brief_date_cursor"}
     if recovery_sources:
         task_payload["recovery_source_task_ids"] = recovery_sources
     task = TaskRun(kind="daily_brief", payload_json=task_payload)

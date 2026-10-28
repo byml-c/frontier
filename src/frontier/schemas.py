@@ -487,6 +487,7 @@ class MemoryCreate(BaseModel):
 
 
 class CandidatePoolUpdate(BaseModel):
+    discovery_run_id: str | None = None
     paper_ids: list[str] = Field(max_length=600)
     discovery_complete: bool
     notes: str = Field(default="", max_length=4_000)

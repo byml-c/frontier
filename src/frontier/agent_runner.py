@@ -329,7 +329,7 @@ The following discovery rules describe normal fresh runs; for this recovery, the
 batch replaces external discovery and ingestion. All remaining scoring and publication rules apply."""
         else:
             discovery_start = (
-                "After any required interest-profile refresh, run `frontier source arxiv-sync` "
+                f"After any required interest-profile refresh, run `frontier source arxiv-sync --date {run_date}` "
                 "exactly once. It advances the durable arXiv cursor only after all pages are fetched. "
                 "Retry a failed sync unchanged; do not replace it with ad-hoc keyword discovery."
             )
@@ -391,12 +391,16 @@ questions and accumulated evidence; it is not by itself proof that the user like
 Read `frontier setting list`. Discovery is cursor-based and must be served by
 `frontier source arxiv-sync`. The Server trains the current personal-relevance model from all
 available human five-level labels, fetches every arXiv record whose `lastUpdatedDate` falls between
-the committed cursor and the current safe cutoff, applies the embodied-intelligence domain gate,
+the committed cursor and the scheduled update time for this brief's date, applies the embodied-intelligence domain gate,
 and scores every promoted paper with a continuous relevance score and confidence. There is no raw
 scan or prefilter numeric cap. Completion means every reported `totalResults` page was fetched and
 deduplicated.
 {discovery_start}
-The sync response separates `paper_ids` (confident relevant plus low-confidence review cases),
+The sync response binds `paper_ids` to `run_id` and `brief_date`. Use only this discovery batch;
+never query recent library candidates as a substitute. In fresh runs include `discovery_run_id`
+equal to the sync `run_id` when saving the candidate pool. Recovery may reuse only saved same-date
+pools. Already recommended or explicitly rated papers are not eligible.
+The response separates `paper_ids` (confident relevant plus low-confidence review cases),
 `agent_review_paper_ids` (confidence below the model threshold, weak training support, or score near
 the decision boundary), and `model_filtered_paper_ids`. Inspect the Agent review IDs from title,
 abstract and authors and write a continuous `relevance_score` for each. A confident model score is
@@ -441,7 +445,9 @@ status is not `candidate`; papers in `reading`, `feedback_pending`, `completed`,
 must never appear in the daily recommendations. Screen and score the pool from titles, abstracts,
 and authors only. Every selected paper needs a catalog summary, concise comment, and a continuous relevance score,
 and a recommendation reason; abstract translations are queued by the publish endpoint. Do not publish
-a failure message as a one-paper brief. If fewer than 20 eligible papers exist after broad discovery,
+a failure message as a one-paper brief. If there are no eligible papers, save an empty pool with
+coverage and explanatory notes, then publish an empty dated brief explaining that no new eligible
+papers were found; never refill it from older papers. If fewer than 20 eligible papers exist after broad discovery,
 report the shortage explicitly and do not fabricate extra papers. Catalog summaries, Agent comments,
 and recommendation reasons must be written in Simplified Chinese. Do not attach daily
 or candidate papers to research nodes, create paper-backed node progress, or otherwise treat them

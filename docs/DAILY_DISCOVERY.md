@@ -2,7 +2,7 @@
 
 ## 流程
 
-持久时间游标 → `lastUpdatedDate` 区间全量分页 → staging 与去重 → 具身智能领域硬筛 →
+上次成功截止点 → 本期日报日期的固定启动时间 → 源更新区间全量分页 → staging 与去重 → 具身智能领域硬筛 →
 每日训练的元数据相关度模型（连续分数与置信度）→ 低置信度文章交给 Agent 复核 →
 发布日报 20–50 篇并排队摘要翻译；
 document 只在用户打开时实时生成。课题组元信息整理走独立 lane，不阻塞日报发布。
@@ -41,7 +41,7 @@ cs.CL、cs.MA，不再单独查询 cs.SE 和 cs.HC。
 | 设置 | 默认值 | 用途 |
 | --- | --- | --- |
 | `discovery_arxiv_categories` | cs.RO、cs.CV、cs.AI、cs.LG、cs.CL、cs.MA | 游标召回来源，不等同于领域通过 |
-| 游标 | `lastUpdatedDate` | 上次完整成功截止点减去 2 小时重叠，直至今次安全截止 |
+| 游标 | 日报日期 + `daily_time` | 上次完整成功截止点，至本期日报日期的启动时间（默认北京时间 09:05） |
 | 模型置信度 | 动态 | 低于阈值、训练支持不足或接近边界时交给 Agent |
 | `initial_interest_domains` | 保留原有值 | 细分兴趣先验 |
 | `brief_limit` | 50 | 最终自动推荐上限 |
@@ -56,7 +56,7 @@ cs.CL、cs.MA，不再单独查询 cs.SE 和 cs.HC。
 ## 工具与核查
 
 ```bash
-uv run frontier source arxiv-sync
+uv run frontier source arxiv-sync --date 2026-10-28
 # 训练当日模型，按 lastUpdatedDate 游标全量分页，领域筛选并返回需 Agent 复核的论文。
 uv run frontier task candidate-pool TASK_ID --data @data/tasks/TASK_ID/candidate-pool.json
 uv run frontier task get TASK_ID
@@ -65,7 +65,7 @@ uv run frontier task get TASK_ID
 候选文件格式：
 
 ```json
-{"paper_ids": ["PAPER_ID"], "discovery_complete": true, "notes": "模型高置信相关及 Agent 复核后的候选"}
+{"discovery_run_id":"DISCOVERY_RUN_ID", "paper_ids":["PAPER_ID"], "discovery_complete":true, "notes":"本期游标区间内的新候选"}
 ```
 
 游标同步按 `lastUpdatedDate` 完整分页，不设 300 或 120 条上限。每条原始记录先进入
@@ -77,7 +77,9 @@ DOI 和规范化标题合并。领域内新论文入库并立即计算连续模�
 去 DOI URL 前缀及统一大小写后的 DOI、规范化标题。已有文章不重复交给 Agent，不重复入库。
 返回游标区间、上游总数、实际抓取数、库内/批内去重、领域排除、模型过滤、直接候选和
 Agent 复核数。只有全部分页成功且抓取数等于上游总数时才推进游标。候选池保留任意唯一
-`candidate` 论文；不足目标或覆盖不完整时必须说明原因，但不再按 120% 上限拒绝。
+`candidate` 论文，且必须属于对应日报日期的发现批次；已在已发布日报出现或已有显式评分、
+认可、简记的论文不得再次入池。保存池、添加推荐、发布时均验证；发布后再评分不会改变历史名单。
+不足目标或覆盖不完整时必须说明原因，但不再按 120% 上限拒绝。
 服务端还必须保存 `interest_model_runs` 版本、标签 digest、验证 MAE、残差尺度、阈值与 artifact 路径。
 
 每日本地模型使用标题、摘要、类别、主分类、comment、journal reference 和作者姓名训练。
@@ -85,9 +87,14 @@ Agent 复核数。只有全部分页成功且抓取数等于上游总数时才�
 置信度综合 bootstrap ensemble 方差、最近训练样本支持度、时间切分残差尺度以及预测值
 相对决策边界的位置；低于置信度阈值或训练支持不足时由 Agent 阅读摘要复核。
 
-游标区间从上次完整成功的 `lastUpdatedDate` 截止点向前重叠 2 小时，到本次运行前 5 分钟，
-内部时间一律用带时区的绝对时间。失败时不推进游标，下次从原位置重试，已抓取记录按 identity
-去重。这样周末、假期和延迟可见记录不会因为日历窗口切换而丢失。
+日报日期确定本期固定截止时间。例如前一截止为 10 月 27 日 09:05，本期为 10 月 28 日，
+逻辑窗口就是 `(10 月 27 日 09:05, 10 月 28 日 09:05]`（北京时间）；任务延迟、重试和补跑
+都不改变截止点。只在完整成功后推进游标，旧游标不会因补跑更早日期而倒退。
+
+OAI-PMH 仅提供日期粒度的记录时，边界 UTC 日仍需完整抓取以防漏；精确时间戳按逻辑窗口过滤。
+日期粒度的边界重叠只用于抓取和去重，不再按本地 `discovered_at` 回捞整个论文库。
+候选只来自本批新入库论文，以及同一窗口失败尝试的 staging；没有新增时发布说明原因的空日报。
+同日重试读取原发现批次并重新排除已有推荐和反馈，历史日报与用户评分保留。
 
 API 失败不能当成无文章。
 服务端对 HTTP 429、502、503、504 及网络传输异常自动按原参数重试，退避间隔从 60 秒开始，

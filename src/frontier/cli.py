@@ -818,9 +818,14 @@ def source_arxiv_search(query: str, max_results: int = 50, ingest: bool = True) 
 
 
 @source_app.command("arxiv-sync")
-def source_arxiv_sync() -> None:
-    """Fetch all arXiv updates since the durable cursor and score them locally."""
-    emit(client.request("POST", "/api/sources/arxiv/sync", timeout=660))
+def source_arxiv_sync(
+    date: str | None = typer.Option(None, help="Brief date (YYYY-MM-DD)"),
+) -> None:
+    """Sync the interval ending at this brief date's scheduled update time."""
+    emit(client.request(
+        "POST", "/api/sources/arxiv/sync",
+        params={"through_date": date} if date else None, timeout=660,
+    ))
 
 
 @source_app.command("arxiv-discover")
