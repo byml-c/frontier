@@ -191,12 +191,14 @@ def search_arxiv(query: str, max_results: int = 50) -> list[PaperCreate]:
 
 
 @contextmanager
-def arxiv_request_budget():
-    """Share one ten-minute budget across all pages in a discovery call."""
-    if _ARXIV_DEADLINE.get() is not None:
+def arxiv_request_budget(seconds: float | None = None):
+    """Share a deadline across pages; an explicit inner budget may shorten it."""
+    deadline = _ARXIV_DEADLINE.get()
+    if deadline is not None and seconds is None:
         yield
         return
-    token = _ARXIV_DEADLINE.set(monotonic() + ARXIV_RETRY_BUDGET_SECONDS)
+    requested = monotonic() + (ARXIV_RETRY_BUDGET_SECONDS if seconds is None else seconds)
+    token = _ARXIV_DEADLINE.set(min(deadline, requested) if deadline is not None else requested)
     try:
         yield
     finally:
@@ -217,17 +219,25 @@ def _arxiv_retry_after(response: httpx.Response) -> float:
             return 0.0
 
 
-def _arxiv_get(params: dict) -> httpx.Response:
+def _arxiv_get(
+    params: dict,
+    *,
+    url: str = ARXIV_API,
+    request_timeout: float = 45.0,
+    max_attempts: int | None = None,
+    retry_backoff: float = 60.0,
+) -> httpx.Response:
     global _arxiv_last_query_at, _arxiv_cooldown_until
     with arxiv_request_budget():
         deadline = _ARXIV_DEADLINE.get()
         assert deadline is not None
         remaining = deadline - monotonic()
         if remaining <= 0 or not _ARXIV_QUERY_LOCK.acquire(timeout=remaining):
-            raise httpx.TimeoutException("arXiv ten-minute request budget exhausted")
+            raise httpx.TimeoutException("arXiv request budget exhausted")
         try:
-            backoff = 60.0
+            backoff = retry_backoff
             last_error = None
+            attempts = 0
             while True:
                 remaining = deadline - monotonic()
                 delay = max(
@@ -239,19 +249,20 @@ def _arxiv_get(params: dict) -> httpx.Response:
                     if remaining > 0:
                         sleep(remaining)
                     raise httpx.TimeoutException(
-                        "arXiv ten-minute request budget exhausted; retry later"
+                        "arXiv request budget exhausted; retry later"
                     ) from last_error
                 if delay:
                     sleep(delay)
                 _arxiv_last_query_at = monotonic()
+                attempts += 1
                 try:
                     response = httpx.get(
-                        ARXIV_API,
+                        url,
                         params=params,
                         headers={"User-Agent": USER_AGENT},
-                        timeout=min(45.0, max(0.001, (deadline - monotonic()) / 4)),
+                        timeout=min(request_timeout, max(0.001, (deadline - monotonic()) / 4)),
                         follow_redirects=True,
-                        **external_httpx_kwargs(ARXIV_API),
+                        **external_httpx_kwargs(url),
                     )
                     response.raise_for_status()
                     return response
@@ -264,6 +275,8 @@ def _arxiv_get(params: dict) -> httpx.Response:
                     wait = backoff
                     last_error = exc
                 _arxiv_cooldown_until = monotonic() + wait
+                if max_attempts is not None and attempts >= max_attempts:
+                    raise last_error
                 _logger.warning(
                     "arXiv request failed (%s); retry in %.0fs, budget remaining %.0fs",
                     last_error,
@@ -282,6 +295,9 @@ def search_arxiv_page(
     start: int = 0,
     sort_by: str = "submittedDate",
     sort_order: str = "descending",
+    request_timeout: float = 45.0,
+    max_attempts: int | None = None,
+    retry_backoff: float = 60.0,
 ) -> dict:
     """Read one metadata page without ingestion, retaining upstream pagination."""
     max_results = max(1, min(max_results, 100))
@@ -294,7 +310,10 @@ def search_arxiv_page(
             "max_results": max_results,
             "sortBy": sort_by,
             "sortOrder": sort_order,
-        }
+        },
+        request_timeout=request_timeout,
+        max_attempts=max_attempts,
+        retry_backoff=retry_backoff,
     )
     feed = feedparser.parse(response.text)
     if feed.get("bozo") or feed.get("version") != "atom10":
@@ -339,14 +358,16 @@ def search_arxiv_page(
                     "primary_category": primary_term,
                     "comment": entry.get("arxiv_comment"),
                     "journal_ref": entry.get("arxiv_journal_ref"),
-                    "arxiv_updated_at": entry.get("updated"),
+                    "arxiv_updated_at": entry.get("updated") if "updated" in entry else None,
                     "arxiv_published_at": entry.get("published"),
                 },
             )
         )
     total = feed.feed.get("opensearch_totalresults")
     reported_start = feed.feed.get("opensearch_startindex")
-    if reported_start is not None and int(reported_start) != start:
+    if reported_start is None:
+        raise ValueError("arXiv omitted the page offset")
+    if int(reported_start) != start:
         raise ValueError("arXiv returned a different page offset")
     total = int(total) if total is not None else None
     if total is not None and total < 0:

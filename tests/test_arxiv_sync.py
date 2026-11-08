@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import UTC, date, datetime
 from types import SimpleNamespace
 
+import httpx
 import pytest
 from sqlalchemy import create_engine, func, select
 from sqlalchemy.orm import Session
@@ -11,7 +12,23 @@ from sqlalchemy.pool import StaticPool
 from frontier.database import Base
 from frontier.models import Brief, BriefItem, DiscoveryCursor, DiscoveryItem, DiscoveryRun, Paper
 from frontier.schemas import PaperCreate
-from frontier.services import arxiv_sync
+from frontier.services import arxiv_sync, ingest
+
+
+@pytest.fixture(autouse=True)
+def arxiv_clock(monkeypatch):
+    clock = [1000.0]
+    waits = []
+
+    def wait(seconds):
+        waits.append(seconds)
+        clock[0] += seconds
+
+    monkeypatch.setattr(ingest, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(ingest, "sleep", wait)
+    monkeypatch.setattr(ingest, "_arxiv_last_query_at", 0.0)
+    monkeypatch.setattr(ingest, "_arxiv_cooldown_until", 0.0)
+    return clock, waits
 
 
 def _session() -> Session:
@@ -85,7 +102,7 @@ def test_cursor_sync_fetches_all_pages_and_commits_after_success(monkeypatch) ->
 
         monkeypatch.setattr(
             arxiv_sync,
-            "_fetch_oai_records",
+            "_fetch_arxiv_records",
             lambda **_kwargs: (
                 payloads,
                 {
@@ -125,7 +142,7 @@ def test_cursor_sync_does_not_advance_on_incomplete_pagination(monkeypatch) -> N
         def incomplete(**_kwargs):
             raise RuntimeError("empty page before OAI resumption completion")
 
-        monkeypatch.setattr(arxiv_sync, "_fetch_oai_records", incomplete)
+        monkeypatch.setattr(arxiv_sync, "_fetch_arxiv_records", incomplete)
         try:
             arxiv_sync.sync_arxiv(
                 session,
@@ -157,7 +174,7 @@ def test_cursor_sync_has_no_300_or_120_result_cap(monkeypatch) -> None:
         ]
         monkeypatch.setattr(
             arxiv_sync,
-            "_fetch_oai_records",
+            "_fetch_arxiv_records",
             lambda **_kwargs: (
                 payloads,
                 {
@@ -179,7 +196,9 @@ def test_cursor_sync_has_no_300_or_120_result_cap(monkeypatch) -> None:
         assert result["counts"]["domain_rejected"] == 205
 
 
-def test_oai_fetch_follows_resumption_token_and_filters_categories(monkeypatch) -> None:
+def test_oai_fetch_follows_resumption_token_and_filters_categories(
+    monkeypatch, arxiv_clock
+) -> None:
     pages = [
         """<?xml version="1.0"?>
         <OAI-PMH xmlns="http://www.openarchives.org/OAI/2.0/">
@@ -221,7 +240,6 @@ def test_oai_fetch_follows_resumption_token_and_filters_categories(monkeypatch) 
         )
 
     monkeypatch.setattr(arxiv_sync.httpx, "get", get)
-    monkeypatch.setattr(arxiv_sync, "sleep", lambda _seconds: None)
     items, stats = arxiv_sync._fetch_oai_records(
         start=datetime(2026, 10, 20, tzinfo=UTC),
         end=datetime(2026, 10, 23, tzinfo=UTC),
@@ -232,7 +250,9 @@ def test_oai_fetch_follows_resumption_token_and_filters_categories(monkeypatch) 
     assert stats["source_records"] == 3
     assert stats["complete"] is True
     assert requests[0]["from"] == "2026-10-20"
+    assert requests[0]["set"] == "cs"
     assert requests[1] == {"verb": "ListRecords", "resumptionToken": "next-page"}
+    assert arxiv_clock[1] == [3.0]
 
 
 def _robot(identifier: str, stamp: str) -> PaperCreate:
@@ -264,14 +284,14 @@ def _mock_batch(monkeypatch, payloads):
         return payloads, {"complete": True, "pages": 1}
 
     monkeypatch.setattr(arxiv_sync, "score_paper", score)
-    monkeypatch.setattr(arxiv_sync, "_fetch_oai_records", fetch)
+    monkeypatch.setattr(arxiv_sync, "_fetch_arxiv_records", fetch)
     return calls
 
 
 def test_brief_date_fixes_cutoff_and_limits_candidates_to_its_source_batch(monkeypatch):
     payloads = [
         _robot("2610.94001", "2026-10-26T12:00:00Z"),
-        _robot("2610.94002", "2026-10-25T12:00:00Z"),
+        _robot("2610.94002", "2026-10-23T12:00:00Z"),
         _robot("2610.94003", "2026-10-27T02:00:00Z"),
     ]
     calls = _mock_batch(monkeypatch, payloads)
@@ -297,7 +317,8 @@ def test_brief_date_fixes_cutoff_and_limits_candidates_to_its_source_batch(monke
             through_date=date(2026, 10, 27),
             now=datetime(2026, 10, 28, 12, tzinfo=UTC),
         )
-        assert calls[0]["start"] == datetime(2026, 10, 26, 1, 5, tzinfo=UTC)
+        assert calls[0]["start"] == datetime(2026, 10, 24, 1, 5, tzinfo=UTC)
+        assert result["window"]["start"] == "2026-10-26T01:05:00+00:00"
         assert calls[0]["end"] == datetime(2026, 10, 27, 1, 5, tzinfo=UTC)
         assert result["brief_date"] == "2026-10-27"
         assert result["counts"]["outside_window"] == 2
@@ -418,3 +439,242 @@ def test_failure_after_cursor_assignment_does_not_commit_the_advance(monkeypatch
         assert cursor.last_success_at is None
         run = session.scalar(select(DiscoveryRun))
         assert run.status == "failed"
+
+
+def test_atom_fetch_covers_all_recent_pages_and_keeps_old_papers_new_versions(monkeypatch):
+    recent = [_robot(f"2610.{95000 + i}", "2026-10-26T12:00:00Z") for i in range(365)]
+    recent[0].metadata_json["arxiv_published_at"] = "2020-01-01T00:00:00Z"
+    entries = [
+        _robot("2610.96000", "2026-10-28T00:00:00Z"),
+        *recent,
+        _robot("2610.96001", "2026-10-20T00:00:00Z"),
+    ]
+    calls = []
+
+    def page(query, **kwargs):
+        calls.append((query, kwargs))
+        offset = kwargs["start"]
+        return {
+            "items": entries[offset : offset + kwargs["max_results"]],
+            "total_results": 10000,
+            "start": offset,
+        }
+
+    monkeypatch.setattr(arxiv_sync, "search_arxiv_page", page)
+    items, stats = arxiv_sync._fetch_atom_records(
+        start=datetime(2026, 10, 25, tzinfo=UTC),
+        end=datetime(2026, 10, 27, tzinfo=UTC),
+        categories=["cs.RO", "cs.AI"],
+    )
+    assert len(items) == 365
+    assert items[0].metadata_json["arxiv_published_at"].startswith("2020")
+    assert items[0].metadata_json["metadata_source"] == "atom"
+    assert [options["start"] for _, options in calls] == [0, 100, 200, 300]
+    assert calls[0][0] == "(cat:cs.RO OR cat:cs.AI)"
+    assert all(options["sort_by"] == "lastUpdatedDate" for _, options in calls)
+    assert stats["complete"] is True
+    assert stats["source_records"] == 367
+    assert stats["pages"] == 4
+
+
+def _fetch_atom():
+    return arxiv_sync._fetch_atom_records(
+        start=datetime(2026, 10, 25, tzinfo=UTC),
+        end=datetime(2026, 10, 27, tzinfo=UTC),
+        categories=["cs.RO"],
+    )
+
+
+@pytest.mark.parametrize(
+    "pages",
+    [
+        [{"items": [], "total_results": None, "start": 0}],
+        [{"items": [], "total_results": 1, "start": 0}],
+        [{"items": [], "total_results": 0, "start": 1}],
+        [{"items": [_robot("2610.97001", "invalid")], "total_results": 1, "start": 0}],
+        [
+            {
+                "items": [
+                    _robot("2610.97001", "2026-10-26T00:00:00Z"),
+                    _robot("2610.97002", "2026-10-26T01:00:00Z"),
+                ],
+                "total_results": 2,
+                "start": 0,
+            }
+        ],
+        [
+            {"items": [_robot("2610.97001", "2026-10-26")], "total_results": 2, "start": 0},
+            {"items": [_robot("2610.97001", "2026-10-26")], "total_results": 2, "start": 1},
+        ],
+        [
+            {"items": [_robot("2610.97001", "2026-10-26")], "total_results": 2, "start": 0},
+            {"items": [_robot("2610.97002", "2026-10-26")], "total_results": 3, "start": 1},
+        ],
+    ],
+)
+def test_atom_rejects_unverifiable_coverage(monkeypatch, pages):
+    responses = iter(pages)
+    monkeypatch.setattr(arxiv_sync, "search_arxiv_page", lambda *a, **k: next(responses))
+    with pytest.raises(ValueError):
+        _fetch_atom()
+
+
+def test_atom_empty_complete_window_does_not_call_oai(monkeypatch):
+    monkeypatch.setattr(
+        arxiv_sync,
+        "search_arxiv_page",
+        lambda *a, **k: {"items": [], "total_results": 0, "start": 0},
+    )
+
+    def unexpected(**kwargs):
+        pytest.fail("A complete Atom window should not start the slow OAI request")
+
+    monkeypatch.setattr(arxiv_sync, "_fetch_oai_records", unexpected)
+    items, stats = arxiv_sync._fetch_arxiv_records(
+        start=datetime(2026, 10, 25, tzinfo=UTC),
+        end=datetime(2026, 10, 27, tzinfo=UTC),
+        categories=["cs.RO"],
+    )
+    assert items == []
+    assert stats["fallback_used"] is False
+    assert stats["source"] == "atom"
+
+
+def test_partial_atom_failure_restarts_the_whole_window_using_oai(monkeypatch):
+    calls = []
+
+    def page(query, **kwargs):
+        if kwargs["start"]:
+            raise httpx.ReadTimeout("Atom second page timed out")
+        return {
+            "items": [_robot("2610.97001", "2026-10-26")],
+            "total_results": 2,
+            "start": 0,
+        }
+
+    def oai(**kwargs):
+        calls.append(kwargs)
+        return [_robot("2610.97002", "2026-10-26")], {"source": "oai-pmh", "complete": True}
+
+    monkeypatch.setattr(arxiv_sync, "search_arxiv_page", page)
+    monkeypatch.setattr(arxiv_sync, "_fetch_oai_records", oai)
+    params = {
+        "start": datetime(2026, 10, 25, tzinfo=UTC),
+        "end": datetime(2026, 10, 27, tzinfo=UTC),
+        "categories": ["cs.RO"],
+    }
+    items, stats = arxiv_sync._fetch_arxiv_records(**params)
+    assert [item.arxiv_id for item in items] == ["2610.97002"]
+    assert calls == [params]
+    assert stats["fallback_used"] is True
+    assert "second page" in stats["atom_error"]
+
+
+def test_both_sources_failing_preserves_database_cursor_and_records_both_errors(monkeypatch):
+    fetch = arxiv_sync._fetch_arxiv_records
+    _mock_batch(monkeypatch, [])
+    monkeypatch.setattr(arxiv_sync, "_fetch_arxiv_records", fetch)
+
+    def atom(**kwargs):
+        raise httpx.ReadTimeout("Atom unavailable")
+
+    def oai(**kwargs):
+        raise httpx.ReadTimeout("OAI unavailable")
+
+    monkeypatch.setattr(arxiv_sync, "_fetch_atom_records", atom)
+    monkeypatch.setattr(arxiv_sync, "_fetch_oai_records", oai)
+    with _session() as session:
+        prior = datetime(2026, 10, 26, 1, 5, tzinfo=UTC)
+        session.add(DiscoveryCursor(id=arxiv_sync.SYNC_CURSOR_ID, committed_through=prior))
+        session.commit()
+        with pytest.raises(RuntimeError, match="Atom unavailable; OAI-PMH: OAI unavailable"):
+            arxiv_sync.sync_arxiv(
+                session,
+                through_date=date(2026, 10, 27),
+                now=datetime(2026, 10, 27, 2, tzinfo=UTC),
+            )
+        cursor = session.get(DiscoveryCursor, arxiv_sync.SYNC_CURSOR_ID)
+        assert cursor.committed_through.replace(tzinfo=UTC) == prior
+        run = session.scalar(select(DiscoveryRun))
+        assert run.status == "failed"
+        assert "Atom unavailable" in run.error and "OAI unavailable" in run.error
+        assert session.scalar(select(func.count(DiscoveryItem.id))) == 0
+        assert session.scalar(select(func.count(Paper.id))) == 0
+
+
+def test_index_delay_overlap_finds_late_papers_without_recommending_existing_ones(monkeypatch):
+    calls = _mock_batch(monkeypatch, [_robot("2610.97003", "2026-10-25T12:00:00Z")])
+    with _session() as session:
+        session.add(
+            DiscoveryCursor(
+                id=arxiv_sync.SYNC_CURSOR_ID,
+                committed_through=datetime(2026, 10, 26, 1, 5, tzinfo=UTC),
+            )
+        )
+        session.commit()
+        first = arxiv_sync.sync_arxiv(
+            session,
+            through_date=date(2026, 10, 27),
+            now=datetime(2026, 10, 27, 2, tzinfo=UTC),
+        )
+        assert len(first["paper_ids"]) == 1
+        assert calls[0]["start"] == datetime(2026, 10, 24, 1, 5, tzinfo=UTC)
+        second = arxiv_sync.sync_arxiv(
+            session,
+            through_date=date(2026, 10, 28),
+            now=datetime(2026, 10, 28, 2, tzinfo=UTC),
+        )
+        assert second["paper_ids"] == []
+        assert second["counts"]["existing"] == 1
+        assert session.scalar(select(func.count(Paper.id))) == 1
+
+
+def test_atom_transport_failure_falls_back_quickly_and_shares_oai_rate_limit(
+    monkeypatch, arxiv_clock
+):
+    urls = []
+
+    def get(url, **kwargs):
+        urls.append(url)
+        if url == ingest.ARXIV_API:
+            assert kwargs["timeout"] <= 15
+            raise httpx.ReadTimeout("Atom network failure")
+        return httpx.Response(
+            200,
+            text='<OAI-PMH xmlns="http://www.openarchives.org/OAI/2.0/">'
+            '<error code="noRecordsMatch">No matches</error></OAI-PMH>',
+            request=httpx.Request("GET", url),
+        )
+
+    monkeypatch.setattr(ingest.httpx, "get", get)
+    items, stats = arxiv_sync._fetch_arxiv_records(
+        start=datetime(2026, 10, 25, tzinfo=UTC),
+        end=datetime(2026, 10, 27, tzinfo=UTC),
+        categories=["cs.RO"],
+    )
+    assert items == []
+    assert urls == [ingest.ARXIV_API, ingest.ARXIV_API, arxiv_sync.OAI_ENDPOINT]
+    assert arxiv_clock[1] == [3.0, 6.0]
+    assert stats["source"] == "oai-pmh"
+    assert stats["fallback_used"] is True
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        "<html>proxy error</html>",
+        '<OAI-PMH xmlns="http://www.openarchives.org/OAI/2.0/"><ListRecords/></OAI-PMH>',
+    ],
+)
+def test_oai_does_not_mistake_invalid_or_empty_pages_for_success(monkeypatch, body):
+    monkeypatch.setattr(
+        ingest.httpx,
+        "get",
+        lambda url, **kwargs: httpx.Response(200, text=body, request=httpx.Request("GET", url)),
+    )
+    with pytest.raises(ValueError):
+        arxiv_sync._fetch_oai_records(
+            start=datetime(2026, 10, 25, tzinfo=UTC),
+            end=datetime(2026, 10, 27, tzinfo=UTC),
+            categories=["cs.RO"],
+        )

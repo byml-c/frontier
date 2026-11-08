@@ -314,7 +314,7 @@ def test_arxiv_stops_retrying_at_ten_minutes(monkeypatch, arxiv_clock):
         return httpx.Response(429, request=httpx.Request("GET", url))
 
     monkeypatch.setattr(ingest.httpx, "get", get)
-    with pytest.raises(httpx.TimeoutException, match="ten-minute"):
+    with pytest.raises(httpx.TimeoutException, match="request budget"):
         ingest.search_arxiv_page("cat:cs.AI")
     assert len(calls) == 4
     assert arxiv_clock[0][0] == 1600.0
@@ -359,6 +359,58 @@ def test_arxiv_does_not_retry_permanent_errors(monkeypatch, arxiv_clock):
     with pytest.raises(httpx.HTTPStatusError):
         ingest.search_arxiv_page("invalid")
     assert arxiv_clock[1] == []
+
+
+def test_short_arxiv_budget_restores_outer_deadline(monkeypatch, arxiv_clock):
+    with ingest.arxiv_request_budget():
+        outer_deadline = ingest._ARXIV_DEADLINE.get()
+        with ingest.arxiv_request_budget(seconds=180):
+            assert ingest._ARXIV_DEADLINE.get() == 1180
+            # A nested request must not reset the shortened phase budget.
+            with ingest.arxiv_request_budget():
+                assert ingest._ARXIV_DEADLINE.get() == 1180
+        assert ingest._ARXIV_DEADLINE.get() == outer_deadline == 1600
+    assert ingest._ARXIV_DEADLINE.get() is None
+
+
+def test_fast_attempt_limit_preserves_retry_after_for_fallback(monkeypatch, arxiv_clock):
+    calls = []
+
+    def get(url, **kwargs):
+        calls.append(url)
+        return httpx.Response(
+            429 if len(calls) == 1 else 200,
+            headers={"Retry-After": "90"},
+            request=httpx.Request("GET", url),
+        )
+
+    monkeypatch.setattr(ingest.httpx, "get", get)
+    with pytest.raises(httpx.HTTPStatusError):
+        ingest._arxiv_get({}, max_attempts=1, retry_backoff=3)
+    ingest._arxiv_get({}, url="https://oaipmh.arxiv.org/oai", max_attempts=1)
+    assert arxiv_clock[1] == [90.0]
+    assert len(calls) == 2
+
+
+def test_arxiv_does_not_invent_missing_updated_timestamp(monkeypatch, arxiv_clock):
+    monkeypatch.setattr(
+        ingest.httpx,
+        "get",
+        lambda url, **kwargs: httpx.Response(200, text=atom(), request=httpx.Request("GET", url)),
+    )
+    page = ingest.search_arxiv_page("cat:cs.AI", start=1)
+    assert page["items"][0].metadata_json["arxiv_updated_at"] is None
+
+
+def test_arxiv_rejects_missing_pagination_offset(monkeypatch, arxiv_clock):
+    body = atom().replace("<opensearch:startIndex>1</opensearch:startIndex>", "")
+    monkeypatch.setattr(
+        ingest.httpx,
+        "get",
+        lambda url, **kwargs: httpx.Response(200, text=body, request=httpx.Request("GET", url)),
+    )
+    with pytest.raises(ValueError, match="page offset"):
+        ingest.search_arxiv_page("cat:cs.AI", start=1)
 
 
 @pytest.mark.parametrize("body", [atom(entry=False), atom(offset=0), "<html>error</html>"])

@@ -55,8 +55,12 @@ analysis. Preserve existing `post_read_summary`, explicit user scores, notes and
    are the evidence for personalization. Refresh a stale derived profile with evidence-key citations
    through `interest profile-update`, then reload context once.
 2. Run `source arxiv-sync --date YYYY-MM-DD` once for the task date. It fixes the cutoff at that
-   date's configured daily time, trains from explicit user scores, stages every arXiv update since
-   the durable cursor, deduplicates and applies the domain gate. There is no daily numeric scan cap.
+   date's configured daily time and uses the database's durable time cursor. The Server tries Atom
+   first (newest article updates, 100 records per page), then falls back to OAI-PMH on failure.
+   It also rechecks at least three recent days for indexing delays, deduplicates against the library,
+   trains from explicit user scores, stages the batch and applies the domain gate. Atom covers article
+   submissions/versions, not every administrative metadata edit; the result records the source and
+   coverage kind. There is no daily numeric scan cap and no per-paper Agent/API call is needed.
    Retry incomplete coverage unchanged. Recover interrupted runs from saved same-date candidate
    pools when the task prompt specifies recovery source IDs; recheck current eligibility.
 3. Use only this discovery batch. Independently review `agent_review_paper_ids` using title,

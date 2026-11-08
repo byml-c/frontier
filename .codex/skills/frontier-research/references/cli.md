@@ -101,11 +101,20 @@ uv run frontier source arxiv-search 'ti:"exact paper title" AND au:"author surna
 ```
 
 `source arxiv-sync` is the daily cursor workflow. It trains the current metadata relevance model,
-fetches every update since the durable cursor, stages and domain-filters the batch, and returns
+prefers Atom article-update pages and falls back to OAI-PMH metadata harvesting on failure,
+stages and domain-filters the batch, and returns
 confident relevant IDs plus the low-confidence IDs that need Agent review. It advances the cursor
-only after every reported result page has been fetched.
+only after the requested source window is completely covered. Atom walks newest updates until
+it reaches the lower time boundary or exhausts the results; OAI follows every resumption token.
+Both share serial rate limiting (at least three seconds) and a ten-minute network budget. Atom
+gets at most three minutes, with two 15-second attempts per page before falling back. OAI gets
+two attempts per page with a 90-second timeout, within the remaining budget.
 The requested date fixes the cutoff at its configured daily update time (normally 09:05 Beijing).
-The next window starts at the previous committed cutoff. Same-date retries reuse that batch and
+The logical next window starts at the previous committed cutoff. The actual fetch revisits at least
+the last three days to recover delayed indexing; existing papers are excluded. The result's `source`
+reports the actual fetch window, source, coverage kind and any Atom fallback error. Atom's article
+update timestamps do not cover every OAI administrative metadata change.
+Same-date retries reuse that batch and
 do not advance the cutoff. Save its `run_id` as `discovery_run_id` in the candidate-pool payload.
 The pool excludes previously published recommendations and explicit user screening feedback.
 

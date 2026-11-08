@@ -1,9 +1,9 @@
 from __future__ import annotations
 
+import logging
 import re
 import threading
 from datetime import UTC, date, datetime, time, timedelta
-from time import sleep
 from typing import Any
 from zoneinfo import ZoneInfo
 
@@ -17,20 +17,28 @@ from ..models import DiscoveryCursor, DiscoveryItem, DiscoveryRun, Paper
 from ..schemas import PaperCreate
 from .common import get_daily_time, get_setting, log_operation
 from .discovery import _identity_keys
-from .ingest import create_or_update_paper
+from .ingest import (
+    _arxiv_get,
+    arxiv_request_budget,
+    create_or_update_paper,
+    search_arxiv_page,
+)
 from .interest_ranker import score_paper, train_daily_ranker
 from .manual_recommendations import (
     is_daily_recommendation_eligible,
     previously_recommended_paper_ids,
 )
-from .outbound_network import external_httpx_kwargs
 from .research_day import current_research_date
 
 SYNC_CURSOR_ID = "arxiv-last-updated-v1"
 OAI_ENDPOINT = "https://oaipmh.arxiv.org/oai"
 DEFAULT_SYNC_CATEGORIES = ["cs.RO", "cs.CV", "cs.AI", "cs.LG", "cs.CL", "cs.MA"]
 DEFAULT_BOOTSTRAP_DAYS = 3
+INDEX_LOOKBACK_DAYS = 3
+ATOM_PAGE_SIZE = 100
+ATOM_BUDGET_SECONDS = 180.0
 _SYNC_LOCK = threading.Lock()
+_logger = logging.getLogger(__name__)
 
 
 class InvalidBriefDate(ValueError):
@@ -176,32 +184,45 @@ def _fetch_oai_records(
         "from": start.date().isoformat(),
         "until": end.date().isoformat(),
     }
+    # The default categories all belong to cs. Avoid harvesting every discipline.
+    groups = {category.split(".")[0] for category in categories}
+    if len(groups) == 1 and groups <= {"cs", "math", "stat", "eess", "econ", "q-bio", "q-fin"}:
+        params["set"] = next(iter(groups))
     records: list[PaperCreate] = []
     source_count = category_match_count = page_count = 0
     seen_tokens: set[str] = set()
     configured = set(categories)
     while True:
-        response = httpx.get(
-            OAI_ENDPOINT,
-            params=params,
-            headers={"User-Agent": "FrontierResearch/0.1 (personal research assistant)"},
-            timeout=90,
-            follow_redirects=True,
-            **external_httpx_kwargs(OAI_ENDPOINT),
+        response = _arxiv_get(
+            params,
+            url=OAI_ENDPOINT,
+            request_timeout=90.0,
+            max_attempts=2,
+            retry_backoff=6.0,
         )
-        response.raise_for_status()
         page_count += 1
         root = etree.fromstring(response.content)
         oai = "{http://www.openarchives.org/OAI/2.0/}"
+        if root.tag != f"{oai}OAI-PMH":
+            raise ValueError("arXiv returned a malformed OAI-PMH response")
         error = root.find(f".//{oai}error")
         if error is not None:
             if error.get("code") == "noRecordsMatch":
                 break
             raise RuntimeError(f"arXiv OAI-PMH error: {error.text or error.get('code')}")
-        for record in root.findall(f".//{oai}record"):
+        listing = root.find(f"{oai}ListRecords")
+        if listing is None:
+            raise ValueError("arXiv omitted OAI-PMH ListRecords")
+        page_records = listing.findall(f"{oai}record")
+        if not page_records:
+            raise ValueError("arXiv returned an empty OAI-PMH page without noRecordsMatch")
+        for record in page_records:
             source_count += 1
             parsed = _oai_payload(record)
             if parsed is None:
+                header = record.find(f"{oai}header")
+                if header is None or header.get("status") != "deleted":
+                    raise ValueError("arXiv returned an incomplete OAI-PMH record")
                 continue
             payload, record_categories = parsed
             if not configured.intersection(record_categories):
@@ -216,14 +237,114 @@ def _fetch_oai_records(
             raise RuntimeError("arXiv OAI-PMH repeated a resumption token")
         seen_tokens.add(token_value)
         params = {"verb": "ListRecords", "resumptionToken": token_value}
-        sleep(2)
     return records, {
         "source": "oai-pmh",
         "pages": page_count,
         "source_records": source_count,
         "category_matched": category_match_count,
         "complete": True,
+        "coverage_kind": "metadata-datestamp",
     }
+
+
+def _fetch_atom_records(
+    *,
+    start: datetime,
+    end: datetime,
+    categories: list[str],
+) -> tuple[list[PaperCreate], dict[str, Any]]:
+    """Walk article updates newest first until the persisted time window is covered.
+
+    Atom supports updated-date sorting, but only submission-date range filtering.
+    Do not filter by submittedDate: that would omit new versions of older papers.
+    """
+    query = "(" + " OR ".join(f"cat:{category}" for category in categories) + ")"
+    records: list[PaperCreate] = []
+    seen_ids: set[str] = set()
+    offset = pages = 0
+    total: int | None = None
+    previous_stamp: datetime | None = None
+    while True:
+        if offset >= 30000:
+            raise ValueError("Atom pagination limit reached before covering the cursor window")
+        page = search_arxiv_page(
+            query,
+            start=offset,
+            max_results=ATOM_PAGE_SIZE,
+            sort_by="lastUpdatedDate",
+            sort_order="descending",
+            request_timeout=15.0,
+            max_attempts=2,
+            retry_backoff=3.0,
+        )
+        reported_total = page["total_results"]
+        if not isinstance(reported_total, int) or reported_total < 0:
+            raise ValueError("Atom omitted a valid totalResults; coverage cannot be verified")
+        if total is not None and reported_total != total:
+            raise ValueError("Atom result set changed during pagination; retry the cursor window")
+        total = reported_total
+        pages += 1
+        items = page["items"]
+        if page["start"] != offset or (not items and offset < total):
+            raise ValueError("Atom returned an incomplete page before covering the cursor window")
+        if offset + len(items) > total:
+            raise ValueError("Atom returned more records than totalResults")
+        reached_start = False
+        for payload in items:
+            stamp = _parse_source_time(payload.metadata_json.get("arxiv_updated_at"))
+            if stamp is None or not payload.arxiv_id:
+                raise ValueError("Atom record omitted its article ID or updated timestamp")
+            if payload.arxiv_id in seen_ids:
+                raise ValueError("Atom repeated an article across pages; coverage is incomplete")
+            if previous_stamp is not None and stamp > previous_stamp:
+                raise ValueError("Atom records are not sorted by updated date")
+            seen_ids.add(payload.arxiv_id)
+            previous_stamp = stamp
+            if stamp <= start:
+                reached_start = True
+            elif stamp <= end:
+                payload.metadata_json = {**payload.metadata_json, "metadata_source": "atom"}
+                records.append(payload)
+        offset += len(items)
+        if reached_start or offset == total:
+            return records, {
+                "source": "atom",
+                "query": query,
+                "pages": pages,
+                "source_records": offset,
+                "total_results": total,
+                "category_matched": len(records),
+                "complete": True,
+                "coverage_kind": "article-updates",
+            }
+
+
+def _fetch_arxiv_records(
+    *,
+    start: datetime,
+    end: datetime,
+    categories: list[str],
+) -> tuple[list[PaperCreate], dict[str, Any]]:
+    """Prefer bounded Atom requests, falling back to a fresh complete OAI harvest."""
+    with arxiv_request_budget():
+        try:
+            # Reserve most of the shared ten-minute deadline for the slower fallback.
+            with arxiv_request_budget(seconds=ATOM_BUDGET_SECONDS):
+                items, stats = _fetch_atom_records(start=start, end=end, categories=categories)
+            if not stats.get("complete"):
+                raise ValueError("Atom did not cover the cursor window")
+            return items, {**stats, "fallback_used": False}
+        except (httpx.HTTPError, ValueError, TypeError, KeyError, AttributeError) as atom_error:
+            _logger.warning("Atom discovery failed; falling back to OAI-PMH: %s", atom_error)
+            try:
+                items, stats = _fetch_oai_records(start=start, end=end, categories=categories)
+                if not stats.get("complete"):
+                    raise ValueError("OAI-PMH did not complete pagination")
+            except Exception as oai_error:
+                raise RuntimeError(
+                    f"arXiv discovery failed: Atom: {atom_error}; OAI-PMH: {oai_error}"
+                ) from oai_error
+            return items, {**stats, "fallback_used": True, "atom_error": str(atom_error)}
 
 
 def _cursor(session: Session) -> DiscoveryCursor:
@@ -391,9 +512,14 @@ def _sync_arxiv(
         for category in categories
         if isinstance(category, str) and category not in {"cs.SE", "cs.HC"}
     ] or DEFAULT_SYNC_CATEGORIES
+    # Revisit recent source timestamps so announcement/search-index delays do not
+    # permanently disappear behind a successful time cursor. Library deduplication
+    # keeps overlap from producing repeat recommendations.
+    fetch_start = min(start, cutoff - timedelta(days=INDEX_LOOKBACK_DAYS))
     query = (
-        f"OAI-PMH ListRecords datestamp [{start.date().isoformat()} TO "
-        f"{cutoff.date().isoformat()}], categories={','.join(categories)}"
+        f"Atom lastUpdatedDate descending -> OAI-PMH fallback; "
+        f"updates ({fetch_start.isoformat()}, {cutoff.isoformat()}], "
+        f"categories={','.join(categories)}"
     )
     run = DiscoveryRun(
         status="running",
@@ -409,11 +535,19 @@ def _sync_arxiv(
     try:
         ranker, model_run, model_metrics = train_daily_ranker(session, now=now_utc)
         run.model_version = model_run.version
-        raw_items, source_stats = _fetch_oai_records(
-            start=start,
+        raw_items, source_stats = _fetch_arxiv_records(
+            start=fetch_start,
             end=cutoff,
             categories=categories,
         )
+        if not source_stats.get("complete"):
+            raise ValueError("arXiv source coverage is incomplete; cursor was not advanced")
+        source_stats = {
+            **source_stats,
+            "window_start": fetch_start.isoformat(),
+            "window_end": cutoff.isoformat(),
+            "index_lookback_days": INDEX_LOOKBACK_DAYS,
+        }
         run.total_results = len(raw_items)
         run.fetched_count = len(raw_items)
 
@@ -446,10 +580,10 @@ def _sync_arxiv(
                 source_json=payload.model_dump(mode="json"),
             )
             session.add(stage)
-            if not _in_source_window(payload, start, cutoff):
+            if not _in_source_window(payload, fetch_start, cutoff):
                 outside_window += 1
                 stage.status = "outside_window"
-                stage.reason = "source update is outside this brief's cursor interval"
+                stage.reason = "source update is outside this discovery source window"
                 continue
             if identity_keys & library_keys:
                 skipped_existing += 1
@@ -546,7 +680,7 @@ def _sync_arxiv(
             "batch_paper_ids": list(dict.fromkeys(batch_ids)),
             "agent_review_paper_ids": agent_review_paper_ids,
             "model_filtered_paper_ids": filtered_paper_ids,
-            "coverage_complete": run.total_results == run.fetched_count,
+            "coverage_complete": True,
         }
         run.result_json = result
         log_operation(
