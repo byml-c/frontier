@@ -29,15 +29,13 @@ def _paper(
     level: str,
     categories: list[str],
 ) -> Paper:
-    observed = datetime(2026, 1, 1, tzinfo=UTC)
-    screening = {"interest_level": level, "updated_at": observed.isoformat()}
     return Paper(
         title=title,
         normalized_title=title.casefold(),
         abstract=abstract,
         authors=[{"name": f"Author {index}"}],
         status="candidate",
-        screening_feedback=screening,
+        user_score={"ignored": 0.0, "interested": 1.0, "neutral": 0.5}[level],
         metadata_json={"categories": categories, "primary_category": categories[0]},
     )
 
@@ -71,11 +69,12 @@ def test_daily_ranker_learns_continuous_relevance_and_confidence() -> None:
         ranker, run, metrics = train_daily_ranker(session)
         assert run.status == "active"
         assert metrics["sample_count"] == 24
-        assert ranker.score_document(
-            "Robot manipulation policy with tactile visuomotor control categories"
-        ).score > ranker.score_document(
-            "Database query optimizer with relational index planning"
-        ).score
+        assert (
+            ranker.score_document(
+                "Robot manipulation policy with tactile visuomotor control categories"
+            ).score
+            > ranker.score_document("Database query optimizer with relational index planning").score
+        )
 
         target = _paper(
             999,
@@ -84,14 +83,14 @@ def test_daily_ranker_learns_continuous_relevance_and_confidence() -> None:
             level="neutral",
             categories=["cs.RO"],
         )
-        target.screening_feedback = {}
+        target.user_score = None
         session.add(target)
         session.commit()
         ranked = score_paper(ranker, target)
         assert 0 <= ranked.score <= 1
         assert 0 <= ranked.confidence <= 1
         assert target.model_version == run.version
-        assert target.model_relevance_score == ranked.score
+        assert target.model_score == ranked.score
         assert "interest_model" in target.metadata_json
 
 
@@ -114,12 +113,8 @@ def test_ranker_versions_retire_previous_active_model() -> None:
                 )
             )
         session.commit()
-        first, _, _ = train_daily_ranker(
-            session, now=datetime(2026, 2, 1, tzinfo=UTC)
-        )
-        second, _, _ = train_daily_ranker(
-            session, now=datetime(2026, 2, 2, tzinfo=UTC)
-        )
+        first, _, _ = train_daily_ranker(session, now=datetime(2026, 2, 1, tzinfo=UTC))
+        second, _, _ = train_daily_ranker(session, now=datetime(2026, 2, 2, tzinfo=UTC))
         assert first.version != second.version
         runs = session.scalars(select(InterestModelRun)).all()
         assert sum(run.status == "active" for run in runs) == 1

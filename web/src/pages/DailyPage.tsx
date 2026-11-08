@@ -6,7 +6,6 @@ import { useQuery } from "@tanstack/react-query";
 import { useEffect, useMemo, useState } from "react";
 import { useSearchParams } from "react-router-dom";
 import { api, formatDate } from "../api";
-import { CompletionSummarySections } from "../components/CompletionSummarySections";
 import { DailyCalendar } from "../components/DailyCalendar";
 import { MarkdownMessage } from "../components/MarkdownMessage";
 import { PaperTitle } from "../components/PaperTitle";
@@ -66,7 +65,7 @@ function DailyPaperCard({ selection }: { selection: DailySelection }) {
     <PaperAuthorSummary paper={paper} />
     {authors && <Typography variant="body2" color="text.secondary" sx={{ mt: .75, display: "-webkit-box", WebkitLineClamp: 3, WebkitBoxOrient: "vertical", overflow: "hidden" }}>{authors}</Typography>}
     <Divider sx={{ my: 2.5 }} />
-    <CompletionSummarySections summary={paper.completion_summary_structured} scope="public" emptyMessage="这篇论文尚无可公开的结构化精读总结。" />
+    <Typography variant="h3">读前简介</Typography><MarkdownMessage content={paper.pre_read_summary || "尚无读前简介。"} />
     <Divider sx={{ my: 3 }} /><Stack direction="row" spacing={1} alignItems="center"><NotesRounded color="primary" /><Typography variant="h3">阅读批注与笔记</Typography><Chip size="small" label={`${annotations.length} 条`} /></Stack>
     {!annotations.length ? <Typography color="text.secondary" sx={{ mt: 1.5 }}>这篇论文暂时没有公开批注。</Typography> : <Stack spacing={1.5} sx={{ mt: 1.5 }}>{annotations.map((note) => <Box key={note.id} sx={{ pl: 1.5, borderLeft: 4, borderColor: note.color || "primary.light" }}><Typography variant="caption" color="text.secondary">第 {note.page_number} 页</Typography>{note.selected_text && <Typography component="blockquote" sx={{ m: 0, mt: .5, color: "text.secondary", fontFamily: '"Times New Roman", Times, serif', fontStyle: "italic" }}>{note.selected_text}</Typography>}{note.content && <Box sx={{ mt: .75 }}><MarkdownMessage content={note.content} /></Box>}</Box>)}</Stack>}
   </CardContent></Card>;

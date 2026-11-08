@@ -31,12 +31,8 @@ import type { Setting } from "../types";
 
 const LABELS: Record<string, { label: string; help: string }> = {
   daily_time: { label: "日报启动时间", help: "北京时间，默认 09:05；保存后重新加载运行计划" },
-  abstract_limit: { label: "兴趣初筛候选目标", help: "领域筛选后按兴趣收敛到约 100 篇；允许上下浮动 20%，不限制最初浏览的摘要数量" },
   brief_limit: { label: "简报论文上限", help: "从候选池选出 20–50 篇供速览，最多 50 篇" },
-  featured_limit: { label: "重点推荐上限", help: "重点推荐数量必须小于简报总量" },
   candidate_lookback_days: { label: "广泛抓取时间窗口", help: "按 arXiv 提交日期扫描最近文章（UTC）；默认 3 天" },
-  discovery_scan_limit: { label: "原始扫描上限", help: "按分类和日期最多扫描多少条元数据，默认 300" },
-  discovery_prefilter_limit: { label: "交给 Agent 的候选上限", help: "宽松预筛后交给 Agent 的文章数，默认 120" },
   discovery_domains: { label: "大领域范围", help: "每行一个领域。领域外的文章不入库；默认 3D 视觉、具身智能、AI Agent" },
   discovery_arxiv_categories: { label: "arXiv 抓取分类", help: "每行一个分类。用于广泛召回，Agent 会进一步判断是否属于大领域" },
   initial_interest_domains: { label: "细分兴趣", help: "每行一个方向，例如 VLA、WAM。用于兴趣排序，不作为抓取或领域筛选条件" },

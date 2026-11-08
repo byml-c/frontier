@@ -8,64 +8,20 @@ from sqlalchemy import or_, select
 from sqlalchemy.orm import Session
 
 from ..database import get_session
-from ..models import (
-    Brief,
-    BriefItem,
-    Paper,
-    PaperNode,
-    PaperTag,
-    PodcastEpisode,
-    ResearchNode,
-    Tag,
-    TaskRun,
-)
-from ..schemas import (
-    BriefCreate,
-    BriefItemCreate,
-    PodcastEpisodeCommit,
-    PodcastEpisodeStatusUpdate,
-)
-from ..services.abstract_translation import abstract_translation, queue_brief_abstract_translations
+from ..models import Brief, BriefItem, Paper, TaskRun
+from ..schemas import BriefCreate, BriefItemCreate
+from ..services.abstract_translation import queue_brief_abstract_translations
 from ..services.common import (
     BRIEF_LIMIT_DEFAULT,
     BRIEF_LIMIT_MAX,
-    FEATURED_LIMIT_DEFAULT,
-    RESEARCH_GROUP_SUMMARY_KEY,
     get_setting,
     log_operation,
     model_dict,
 )
-from ..services.completion_summary import (
-    brief_completion_summary,
-    completion_summary_structured,
-)
-from ..services.interest_evidence import (
-    build_interest_context,
-    interest_context_snapshot,
-    paper_interest_level,
-    paper_quality_level,
-)
 from ..services.manual_recommendations import (
-    current_analysis_state,
     is_daily_recommendation_eligible,
     previously_recommended_paper_ids,
 )
-from ..services.paper_sources import arxiv_html_url, arxiv_pdf_url
-from ..services.podcast_content import (
-    PodcastContentError,
-    PodcastContentNotFoundError,
-    PodcastContentRevisionError,
-    PodcastContentSourceError,
-    PodcastContentValidationError,
-    commit_podcast_episode,
-    episode_payload,
-    update_podcast_episode_status,
-)
-from ..services.podcast_generation import (
-    PodcastGenerationError,
-    get_or_create_podcast_task,
-)
-from ..services.research_groups import group_for_paper, serialize_group
 from ..services.task_control import (
     ACTIVE_TASK_STATUSES,
     get_or_create_daily_task,
@@ -87,246 +43,31 @@ def _brief_or_404(session: Session, brief_id: str) -> Brief:
     return item
 
 
-def _podcast_content_error(exc: PodcastContentError) -> HTTPException:
-    if isinstance(exc, PodcastContentNotFoundError):
-        return HTTPException(status_code=404, detail=str(exc))
-    if isinstance(exc, PodcastContentRevisionError):
-        return HTTPException(
-            status_code=409,
-            detail={
-                "message": "播客已更新，请读取最新版本后重试",
-                "expected_revision": exc.expected,
-                "actual_revision": exc.actual,
-            },
-        )
-    if isinstance(exc, PodcastContentSourceError):
-        return HTTPException(
-            status_code=409,
-            detail={
-                "message": "简报或文字稿已变化，请重新生成播客",
-                "expected_source_digest": exc.expected,
-                "actual_source_digest": exc.actual,
-            },
-        )
-    if isinstance(exc, PodcastContentValidationError):
-        return HTTPException(status_code=422, detail=str(exc))
-    return HTTPException(status_code=400, detail=str(exc))
-
-
-def _paper_snapshot(session: Session, paper: Paper) -> dict:
-    nodes = session.execute(
-        select(ResearchNode.id, ResearchNode.name, PaperNode.reason)
-        .join(PaperNode, PaperNode.node_id == ResearchNode.id)
-        .where(PaperNode.paper_id == paper.id)
-    ).all()
-    tags = session.execute(
-        select(Tag.id, Tag.name, Tag.color)
-        .join(PaperTag, PaperTag.tag_id == Tag.id)
-        .where(PaperTag.paper_id == paper.id)
-        .order_by(Tag.name)
-    ).all()
-    metadata = paper.metadata_json or {}
-    manual_analysis = current_analysis_state(paper)
-    translation = abstract_translation(session, paper)
-    return {
-        "id": paper.id,
-        "title": paper.title,
-        "abstract": paper.abstract,
-        "authors": paper.authors or [],
-        "arxiv_id": paper.arxiv_id,
-        "first_author": paper.first_author,
-        "corresponding_author": paper.corresponding_author,
-        "primary_affiliation": paper.primary_affiliation,
-        "research_group_id": paper.research_group_id,
-        "research_group": (
-            serialize_group(session, group)
-            if (group := group_for_paper(session, paper.id)) is not None
-            else None
-        ),
-        "research_group_summary": metadata.get(RESEARCH_GROUP_SUMMARY_KEY),
-        "source": paper.source,
-        "source_url": paper.source_url,
-        "pdf_url": paper.pdf_url,
-        "pdf_source_url": arxiv_pdf_url(paper),
-        "html_source_url": arxiv_html_url(paper),
-        "published_at": paper.published_at.isoformat() if paper.published_at else None,
-        "catalog_summary": paper.catalog_summary,
-        "model_short_name": paper.model_short_name,
-        "search_aliases": paper.search_aliases or [],
-        "summary": paper.summary,
-        "agent_comment": paper.agent_comment,
-        "problem": paper.problem,
-        "innovation": paper.innovation,
-        "experiment": paper.experiment,
-        "limitations": paper.limitations,
-        "open_questions": metadata.get("open_questions"),
-        "research_score": paper.research_score,
-        "relevance_score": paper.relevance_score,
-        "model_relevance_score": paper.model_relevance_score,
-        "model_relevance_confidence": paper.model_relevance_confidence,
-        "model_version": paper.model_version,
-        "model_review_required": paper.model_review_required,
-        "topic_relevance_score": paper.topic_relevance_score,
-        "author_influence_score": paper.author_influence_score,
-        "recommendation_reason": paper.recommendation_reason,
-        "nodes": [dict(row._mapping) for row in nodes],
-        "tags": [dict(row._mapping) for row in tags],
-        "analysis_status": manual_analysis.get("status"),
-        "analysis_error": manual_analysis.get("error"),
-        "suggested_tags": metadata.get("suggested_tags", []),
-        "screening_quality_level": (paper.screening_feedback or {}).get("quality_level"),
-        "screening_interest_level": (paper.screening_feedback or {}).get("interest_level"),
-        "screening_feedback": (paper.screening_feedback or {}).get("comment"),
-        "agent_score_confirmed": (paper.screening_feedback or {}).get("agent_score_confirmed", False),
-        "agent_quality_confirmed": (paper.screening_feedback or {}).get(
-            "agent_quality_confirmed",
-            (paper.screening_feedback or {}).get("agent_score_confirmed", False),
-        ),
-        "agent_interest_confirmed": (paper.screening_feedback or {}).get(
-            "agent_interest_confirmed",
-            (paper.screening_feedback or {}).get("agent_score_confirmed", False),
-        ),
-        "abstract_translation": translation.content if translation else None,
-        "abstract_translation_status": (
-            "ready"
-            if translation
-            else (
-                (metadata.get("abstract_translation") or {}).get("status", "missing")
-                if isinstance(metadata.get("abstract_translation"), dict)
-                else "missing"
-            )
-        ),
-        "abstract_translation_error": (
-            (metadata.get("abstract_translation") or {}).get("error")
-            if isinstance(metadata.get("abstract_translation"), dict)
-            else None
-        ),
-    }
-
-
 def _serialize_brief(session: Session, brief: Brief, *, detail: bool = True) -> dict:
-    # Brief membership is a historical recommendation decision. Eligibility is checked
-    # when an item is added and again at publish time, never recomputed while reading.
+    from .papers import _serialize_paper
+
+    items = list(
+        session.scalars(
+            select(BriefItem).where(BriefItem.brief_id == brief.id).order_by(BriefItem.rank)
+        )
+    )
     payload = model_dict(brief)
-    if not detail:
-        statement = select(BriefItem.id).where(BriefItem.brief_id == brief.id)
-        payload["item_count"] = len(session.scalars(statement).all())
-        return payload
-    rows = session.execute(
-        select(BriefItem, Paper)
-        .join(Paper, Paper.id == BriefItem.paper_id)
-        .where(BriefItem.brief_id == brief.id)
-        .order_by(BriefItem.rank)
-    ).all()
-    translations = {paper.id: abstract_translation(session, paper) for _, paper in rows}
-    translation_errors = (brief.snapshot_json or {}).get("abstract_translation_errors", {})
-    payload["items"] = [
-        {
-            **model_dict(item),
-            "paper": (
-                {
-                    **_paper_snapshot(session, paper),
-                    **((item.snapshot_json or {}) if item.tier != "manual" else {}),
-                    # Keep editable analysis fields current so a user or Agent can
-                    # correct a brief comment after publication without rewriting
-                    # the historical membership decision.
-                    "summary": paper.summary,
-                    "catalog_summary": paper.catalog_summary,
-                    "model_short_name": paper.model_short_name,
-                    "search_aliases": paper.search_aliases or [],
-                    "agent_comment": paper.agent_comment,
-                    "problem": paper.problem,
-                    "innovation": paper.innovation,
-                    "experiment": paper.experiment,
-                    "limitations": paper.limitations,
-                    "open_questions": (paper.metadata_json or {}).get("open_questions"),
-                    "research_score": paper.research_score,
-                    "relevance_score": paper.relevance_score,
-                    "model_relevance_score": paper.model_relevance_score,
-                    "model_relevance_confidence": paper.model_relevance_confidence,
-                    "model_version": paper.model_version,
-                    "model_review_required": paper.model_review_required,
-                    "topic_relevance_score": paper.topic_relevance_score,
-                    "author_influence_score": paper.author_influence_score,
-                    "recommendation_reason": paper.recommendation_reason,
-                    "abstract": paper.abstract,
-                    "authors": paper.authors or [],
-                    "first_author": paper.first_author,
-                    "corresponding_author": paper.corresponding_author,
-                    "primary_affiliation": paper.primary_affiliation,
-                    "research_group_id": paper.research_group_id,
-                    "research_group": (
-                        serialize_group(session, group)
-                        if (group := group_for_paper(session, paper.id)) is not None
-                        else None
-                    ),
-                    "research_group_summary": (paper.metadata_json or {}).get(
-                        RESEARCH_GROUP_SUMMARY_KEY
-                    ),
-                    "screening_quality_level": (paper.screening_feedback or {}).get(
-                        "quality_level"
-                    ),
-                    "screening_interest_level": (paper.screening_feedback or {}).get(
-                        "interest_level"
-                    ),
-                    "screening_feedback": (paper.screening_feedback or {}).get("comment"),
-                    "agent_score_confirmed": (paper.screening_feedback or {}).get(
-                        "agent_score_confirmed", False
-                    ),
-                    "agent_quality_confirmed": (paper.screening_feedback or {}).get(
-                        "agent_quality_confirmed",
-                        (paper.screening_feedback or {}).get("agent_score_confirmed", False),
-                    ),
-                    "agent_interest_confirmed": (paper.screening_feedback or {}).get(
-                        "agent_interest_confirmed",
-                        (paper.screening_feedback or {}).get("agent_score_confirmed", False),
-                    ),
-                    # 阅读结论属于论文的后续状态，不应被冻结在发布时的简报快照中。
-                    "completion_summary": brief_completion_summary(paper),
-                    "completion_summary_structured": completion_summary_structured(
-                        paper, include_user_attitude=False
-                    ),
-                    "abstract_translation_status": (
-                        "ready"
-                        if translations[paper.id]
-                        else (
-                            "failed"
-                            if paper.id in translation_errors
-                            else (brief.snapshot_json or {}).get(
-                                "abstract_translation_status",
-                                (
-                                    ((paper.metadata_json or {}).get("abstract_translation") or {})
-                                    .get("status", "missing")
-                                    if isinstance(
-                                        (paper.metadata_json or {}).get("abstract_translation"),
-                                        dict,
-                                    )
-                                    else "missing"
-                                ),
-                            )
-                        )
-                    ),
-                    "abstract_translation": (
-                        translations[paper.id].content if translations[paper.id] else None
-                    ),
-                    "abstract_translation_error": translation_errors.get(paper.id)
-                    or (
-                        ((paper.metadata_json or {}).get("abstract_translation") or {}).get("error")
-                        if isinstance(
-                            (paper.metadata_json or {}).get("abstract_translation"), dict
-                        )
-                        else None
-                    ),
-                }
-            ),
-            "current_status": paper.status,
-            "interest_level": paper_interest_level(paper),
-            "quality_level": paper_quality_level(paper),
-            "is_interested": paper.is_interested,
-            "is_quality": paper.is_quality,
+    payload["item_count"] = len(items)
+    if detail:
+        papers = {
+            p.id: p
+            for p in session.scalars(select(Paper).where(Paper.id.in_([i.paper_id for i in items])))
         }
-        for item, paper in rows
-    ]
+        payload["items"] = [
+            {
+                "id": i.id,
+                "rank": i.rank,
+                "tier": i.tier,
+                "paper": _serialize_paper(session, papers[i.paper_id]),
+            }
+            for i in items
+            if i.paper_id in papers
+        ]
     return payload
 
 
@@ -362,7 +103,7 @@ def create_brief(payload: BriefCreate, session: Annotated[Session, Depends(get_s
     existing = session.scalar(select(Brief).where(Brief.brief_date == payload.brief_date))
     if existing:
         if existing.status != "published":
-            current_digest = (existing.snapshot_json or {}).get("interest_context_digest_used")
+            current_digest = existing.interest_context_digest
             if (
                 payload.interest_context_digest
                 and payload.interest_context_digest != current_digest
@@ -385,12 +126,12 @@ def create_brief(payload: BriefCreate, session: Annotated[Session, Depends(get_s
             if payload.task_id and existing.task_id != payload.task_id:
                 existing.task_id = payload.task_id
                 changed = True
-            if payload.interest_context_digest:
-                snapshot = dict(existing.snapshot_json or {})
-                if snapshot.get("interest_context_digest_used") != payload.interest_context_digest:
-                    snapshot["interest_context_digest_used"] = payload.interest_context_digest
-                    existing.snapshot_json = snapshot
-                    changed = True
+            if (
+                payload.interest_context_digest
+                and existing.interest_context_digest != payload.interest_context_digest
+            ):
+                existing.interest_context_digest = payload.interest_context_digest
+                changed = True
             if changed:
                 session.commit()
         return _serialize_brief(session, existing)
@@ -399,11 +140,7 @@ def create_brief(payload: BriefCreate, session: Annotated[Session, Depends(get_s
         title=payload.title or f"{payload.brief_date.isoformat()} 研究简报",
         introduction=payload.introduction,
         task_id=payload.task_id,
-        snapshot_json={
-            "interest_context_digest_used": payload.interest_context_digest,
-        }
-        if payload.interest_context_digest
-        else {},
+        interest_context_digest=payload.interest_context_digest,
     )
     session.add(item)
     session.flush()
@@ -460,31 +197,10 @@ def _queue_daily_brief_regeneration(
         if item.tier != "manual":
             session.delete(item)
 
-    episode = session.scalar(select(PodcastEpisode).where(PodcastEpisode.brief_id == brief.id))
-    if episode is not None:
-        episode.status = "voided"
-        episode.revision += 1
-        episode.audio_path = None
-        episode.audio_content_hash = None
-        episode.duration_ms = None
-        episode.size_bytes = None
-        episode.generation_task_id = None
-        episode.published_at = None
-        episode.error = reason
-        log_operation(
-            session,
-            actor="user",
-            action="podcast_episode.voided",
-            entity_type="podcast_episode",
-            entity_id=episode.id,
-            task_id=previous_task.id,
-            detail={"brief_id": brief.id, "reason": reason},
-        )
-
     brief.status = "draft"
     brief.published_at = None
     brief.introduction = None
-    brief.snapshot_json = {}
+    brief.interest_context_digest = None
     session.flush()
     claim = get_or_create_daily_task(session, brief.brief_date)
     assert claim.task is not None
@@ -515,7 +231,8 @@ def recover_failed_brief(
         or previous_task.status != "failed"
     ):
         raise HTTPException(
-            status_code=409, detail="Only drafts or publications from failed daily tasks can recover"
+            status_code=409,
+            detail="Only drafts or publications from failed daily tasks can recover",
         )
     rows = session.execute(
         select(BriefItem, Paper)
@@ -526,9 +243,9 @@ def recover_failed_brief(
         item.tier != "manual"
         and (
             paper.status != "candidate"
-            or paper.research_score is not None
-            or paper.relevance_score is not None
-            or paper.screening_feedback
+            or paper.post_read_summary
+            or paper.user_score is not None
+            or paper.user_note
         )
         for item, paper in rows
     ):
@@ -541,7 +258,9 @@ def recover_failed_brief(
         background_tasks=background_tasks,
         session=session,
         action="brief.failed_publication_recovered",
-        reason="重建失败任务的日报草稿" if brief.status == "draft" else "恢复意外发布且任务失败的日报",
+        reason="重建失败任务的日报草稿"
+        if brief.status == "draft"
+        else "恢复意外发布且任务失败的日报",
     )
 
 
@@ -579,92 +298,6 @@ def void_and_regenerate_brief(
     )
 
 
-@router.get("/{brief_id}/podcast")
-def get_brief_podcast(
-    brief_id: str,
-    session: Annotated[Session, Depends(get_session)],
-    language: str = Query(default="zh-CN", min_length=2, max_length=35),
-) -> dict:
-    try:
-        return episode_payload(session, brief_id, language=language)
-    except PodcastContentError as exc:
-        raise _podcast_content_error(exc) from exc
-
-
-@router.post("/{brief_id}/podcast/generate")
-def generate_brief_podcast(
-    brief_id: str,
-    background_tasks: BackgroundTasks,
-    session: Annotated[Session, Depends(get_session)],
-) -> dict:
-    try:
-        claim = get_or_create_podcast_task(session, brief_id)
-    except PodcastGenerationError as exc:
-        status_code = 404 if str(exc) == "简报不存在" else 409
-        raise HTTPException(status_code=status_code, detail=str(exc)) from exc
-    assert claim.task is not None
-    if claim.task.status == "queued":
-        background_tasks.add_task(submit_task, claim.task.id)
-    return {
-        "id": claim.task.id,
-        "task_id": claim.task.id,
-        "status": claim.task.status,
-    }
-
-
-@router.post("/{brief_id}/podcast/commit")
-@serialized_task_claim
-def save_brief_podcast(
-    brief_id: str,
-    payload: PodcastEpisodeCommit,
-    session: Annotated[Session, Depends(get_session)],
-) -> dict:
-    try:
-        item, changed = commit_podcast_episode(session, brief_id, payload)
-        if changed:
-            log_operation(
-                session,
-                actor="agent" if payload.task_id else "user",
-                action="podcast_episode.committed",
-                entity_type="podcast_episode",
-                entity_id=item.id,
-                task_id=payload.task_id,
-                detail={"brief_id": brief_id, "revision": item.revision},
-            )
-        return episode_payload(session, brief_id, language=payload.language)
-    except PodcastContentError as exc:
-        raise _podcast_content_error(exc) from exc
-
-
-@router.patch("/{brief_id}/podcast/status")
-@serialized_task_claim
-def set_brief_podcast_status(
-    brief_id: str,
-    payload: PodcastEpisodeStatusUpdate,
-    session: Annotated[Session, Depends(get_session)],
-    language: str = Query(default="zh-CN", min_length=2, max_length=35),
-) -> dict:
-    try:
-        item, changed = update_podcast_episode_status(session, brief_id, payload, language=language)
-        if changed:
-            log_operation(
-                session,
-                actor="agent" if payload.task_id else "system",
-                action="podcast_episode.status_updated",
-                entity_type="podcast_episode",
-                entity_id=item.id,
-                task_id=payload.task_id,
-                detail={
-                    "brief_id": brief_id,
-                    "revision": item.revision,
-                    "status": item.status,
-                },
-            )
-        return episode_payload(session, brief_id, language=language)
-    except PodcastContentError as exc:
-        raise _podcast_content_error(exc) from exc
-
-
 @router.post("/{brief_id}/items")
 def add_brief_item(
     brief_id: str,
@@ -683,9 +316,8 @@ def add_brief_item(
         raise HTTPException(status_code=409, detail="Paper is not in the daily candidate pool")
     if payload.tier != "manual" and (
         not is_daily_recommendation_eligible(paper)
-        or paper.id in previously_recommended_paper_ids(
-            session, [paper.id], exclude_brief_id=brief.id
-        )
+        or paper.id
+        in previously_recommended_paper_ids(session, [paper.id], exclude_brief_id=brief.id)
     ):
         raise HTTPException(
             status_code=409,
@@ -716,16 +348,6 @@ def add_brief_item(
     )
     if current_count >= limit:
         raise HTTPException(status_code=409, detail=f"Brief item limit reached ({limit})")
-    featured_count = len(
-        session.scalars(
-            select(BriefItem.id).where(BriefItem.brief_id == brief_id, BriefItem.tier == "featured")
-        ).all()
-    )
-    featured_limit = int(get_setting(session, "featured_limit", FEATURED_LIMIT_DEFAULT))
-    if payload.tier == "featured" and featured_count >= featured_limit:
-        raise HTTPException(
-            status_code=409, detail=f"Featured item limit reached ({featured_limit})"
-        )
     if existing:
         existing.rank = payload.rank
         existing.tier = payload.tier
@@ -763,16 +385,20 @@ def publish_brief(
         and (not is_daily_recommendation_eligible(row[1]) or row[1].id in prior_ids)
     ]
     rows = [
-        row for row in rows
+        row
+        for row in rows
         if row[0].tier == "manual"
         or (is_daily_recommendation_eligible(row[1]) and row[1].id not in prior_ids)
     ]
     task = session.get(TaskRun, brief.task_id) if brief.task_id else None
     pool = (task.payload_json or {}).get("candidate_pool") if task else None
     empty_daily = bool(
-        task and (task.payload_json or {}).get("discovery_mode") == "brief_date_cursor"
-        and pool is not None and pool.get("paper_ids") == []
-        and pool.get("discovery_complete") and pool.get("notes", "").strip()
+        task
+        and (task.payload_json or {}).get("discovery_mode") == "brief_date_cursor"
+        and pool is not None
+        and pool.get("paper_ids") == []
+        and pool.get("discovery_complete")
+        and pool.get("notes", "").strip()
     )
     if not rows and not empty_daily:
         raise HTTPException(status_code=409, detail="Cannot publish a brief without unread papers")
@@ -794,21 +420,6 @@ def publish_brief(
         )
     for item, _paper in excluded_rows:
         session.delete(item)
-    for item, paper in rows:
-        item.snapshot_json = _paper_snapshot(session, paper)
-    interest_context = build_interest_context(session, recent_limit=20)
-    digest_used = (brief.snapshot_json or {}).get("interest_context_digest_used")
-    brief.snapshot_json = {
-        **(brief.snapshot_json or {}),
-        "title": brief.title,
-        "introduction": brief.introduction,
-        "paper_ids": [paper.id for _item, paper in rows],
-        **({"candidate_pool": pool} if pool is not None else {}),
-        "interest_context": interest_context_snapshot(interest_context),
-        "interest_context_stale_at_publish": (
-            digest_used != interest_context["source_digest"] if digest_used else None
-        ),
-    }
     brief.status = "published"
     brief.published_at = datetime.now(UTC)
     log_operation(

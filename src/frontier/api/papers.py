@@ -48,9 +48,7 @@ from ..schemas import (
     IgnorePaper,
     PaperAgentContextSyncRequest,
     PaperCreate,
-    PaperMetadataEnrichmentComplete,
     PaperMetadataUpdate,
-    PaperNarrationCommit,
     PaperUpdate,
     ReadingProgressUpdate,
     StartReading,
@@ -63,28 +61,17 @@ from ..services.abstract_translation import (
     queue_paper_abstract_translation,
 )
 from ..services.author_metadata import (
-    BIBLIOGRAPHIC_FIELDS,
-    BIBLIOGRAPHIC_PROVENANCE_KEY,
-    MANUAL_BIBLIOGRAPHIC_FIELDS_KEY,
     manual_bibliographic_fields,
     preserve_author_details_for_unchanged_names,
     record_manual_bibliographic_changes,
 )
 from ..services.common import (
-    AGENT_BIBLIOGRAPHY_KEY,
     RESEARCH_GROUP_PROFILE_KEY,
     RESEARCH_GROUP_SUMMARY_KEY,
     compact_search_key,
     log_operation,
     model_dict,
     normalize_title,
-)
-from ..services.completion_summary import (
-    COMPLETION_SUMMARY_METADATA_KEY,
-    completion_summary_structured,
-    migrate_legacy_completion_summary,
-    render_completion_summary,
-    save_completion_summary,
 )
 from ..services.document_reader import (
     document_asset,
@@ -107,10 +94,6 @@ from ..services.interest_evidence import (
     IGNORE_PROVENANCE_KEY,
     READING_PROVENANCE_KEY,
     feedback_payload_hash,
-    feedback_payload_hash_v2,
-    feedback_payload_hash_v3,
-    paper_interest_level,
-    paper_quality_level,
     validate_brief_item_source,
 )
 from ..services.manual_recommendations import (
@@ -122,24 +105,8 @@ from ..services.paper_agent_context import (
     build_paper_agent_context,
     sync_paper_agent_context,
 )
-from ..services.paper_metadata import queue_metadata_enrichment
-from ..services.paper_query import (
-    PaperSort,
-    RatingSource,
-    dimension_filters,
-    rating_expression,
-    rating_level_expression,
-)
+from ..services.paper_query import PaperSort, RatingSource, dimension_filters, rating_expression
 from ..services.paper_sources import arxiv_html_url, arxiv_pdf_url
-from ..services.podcast_content import (
-    PodcastContentError,
-    PodcastContentNotFoundError,
-    PodcastContentRevisionError,
-    PodcastContentSourceError,
-    PodcastContentValidationError,
-    commit_paper_narration,
-    narration_payload,
-)
 from ..services.research_groups import (
     assign_research_group,
     clear_research_group,
@@ -147,7 +114,7 @@ from ..services.research_groups import (
     serialize_group,
     upsert_group_from_paper,
 )
-from ..services.task_control import ACTIVE_TASK_STATUSES, serialized_task_claim
+from ..services.task_control import ACTIVE_TASK_STATUSES
 from ..services.task_dispatcher import submit_task
 from ..services.translation_provider import stream_translation_prompt
 
@@ -166,9 +133,7 @@ def _normalize_model_identity_fields(changes: dict) -> None:
     if "model_short_name" in changes:
         raw = changes["model_short_name"]
         changes["model_short_name"] = (
-            " ".join(str(raw).split())[:255]
-            if isinstance(raw, str) and raw.strip()
-            else None
+            " ".join(str(raw).split())[:255] if isinstance(raw, str) and raw.strip() else None
         )
     if "search_aliases" in changes:
         aliases = changes["search_aliases"]
@@ -188,37 +153,9 @@ def _normalize_model_identity_fields(changes: dict) -> None:
         changes["search_aliases"] = normalized[:20]
 
 
-def _podcast_content_error(exc: PodcastContentError) -> HTTPException:
-    if isinstance(exc, PodcastContentNotFoundError):
-        return HTTPException(status_code=404, detail=str(exc))
-    if isinstance(exc, PodcastContentRevisionError):
-        return HTTPException(
-            status_code=409,
-            detail={
-                "message": "文字稿已更新，请读取最新版本后重试",
-                "expected_revision": exc.expected,
-                "actual_revision": exc.actual,
-            },
-        )
-    if isinstance(exc, PodcastContentSourceError):
-        return HTTPException(
-            status_code=409,
-            detail={
-                "message": "论文来源内容已变化，请基于最新内容重新生成文字稿",
-                "expected_source_digest": exc.expected,
-                "actual_source_digest": exc.actual,
-            },
-        )
-    if isinstance(exc, PodcastContentValidationError):
-        return HTTPException(status_code=422, detail=str(exc))
-    return HTTPException(status_code=400, detail=str(exc))
-
-
 def _serialize_paper(session: Session, paper: Paper, *, detail: bool = False) -> dict:
     payload = model_dict(paper)
-    payload["completion_summary_structured"] = completion_summary_structured(
-        paper, include_user_attitude=True
-    )
+
     tags = session.execute(
         select(Tag.id, Tag.name, Tag.color)
         .join(PaperTag, PaperTag.tag_id == Tag.id)
@@ -249,23 +186,6 @@ def _serialize_paper(session: Session, paper: Paper, *, detail: bool = False) ->
     payload["analysis_status"] = analysis.get("status")
     payload["analysis_error"] = analysis.get("error")
     payload["suggested_tags"] = metadata.get("suggested_tags", [])
-    payload["interest_level"] = paper_interest_level(paper)
-    payload["quality_level"] = paper_quality_level(paper)
-    screening = paper.screening_feedback or {}
-    payload["screening_interest_level"] = screening.get("interest_level")
-    payload["screening_quality_level"] = screening.get("quality_level")
-    payload["screening_feedback"] = screening.get("comment")
-    legacy_confirmed = bool(screening.get("agent_score_confirmed", False))
-    payload["agent_quality_confirmed"] = bool(
-        screening.get("agent_quality_confirmed", legacy_confirmed)
-    )
-    payload["agent_interest_confirmed"] = bool(
-        screening.get("agent_interest_confirmed", legacy_confirmed)
-    )
-    payload["agent_score_confirmed"] = (
-        payload["agent_quality_confirmed"] and payload["agent_interest_confirmed"]
-    )
-    payload["open_questions"] = metadata.get("open_questions")
     payload["research_group_summary"] = metadata.get(RESEARCH_GROUP_SUMMARY_KEY)
     group = group_for_paper(session, paper.id)
     payload["research_group"] = serialize_group(session, group) if group else None
@@ -283,7 +203,6 @@ def _serialize_paper(session: Session, paper: Paper, *, detail: bool = False) ->
         translation_state.get("error") if isinstance(translation_state, dict) else None
     )
     if not detail:
-        payload.pop("full_analysis", None)
         payload.pop("metadata_json", None)
     return payload
 
@@ -431,17 +350,12 @@ def _replace_selected_node_progress(
     session: Session,
     paper: Paper,
     selected_node_ids: list[str],
-    structured: dict[str, str | None] | None,
 ) -> None:
     """Project the confirmed paper summary onto exactly the user-selected nodes."""
     session.query(NodeProgress).filter(NodeProgress.paper_id == paper.id).delete()
     if not selected_node_ids:
         return
-    content = (
-        (render_completion_summary(structured, include_user_attitude=False) if structured else None)
-        or paper.summary
-        or "该论文已完成精读，并由用户确认归入此研究节点。"
-    )
+    content = "论文已完成精读，详见论文当前读后总结。"
     title = f"精读：{paper.title}"[:255]
     for node_id in selected_node_ids:
         session.add(
@@ -455,90 +369,16 @@ def _replace_selected_node_progress(
         )
 
 
-def _confirmed_feedback_hash(
-    session: Session,
-    paper: Paper,
-    payload: ConfirmFeedback,
-    source_brief_item_id: str | None,
-    node_selections: list[dict[str, object]],
-) -> str:
-    structured = (
-        payload.completion_summary_structured.model_dump()
-        if payload.completion_summary_structured is not None
-        else completion_summary_structured(paper, include_user_attitude=True)
-    )
-    metadata = paper.metadata_json or {}
-    personal_comment = (
-        payload.personal_comment
-        if payload.personal_comment is not None
-        else metadata.get("personal_comment")
-    )
+def _confirmed_feedback_hash(session, paper, payload, source_brief_item_id, node_selections):
     return feedback_payload_hash(
-        interest_level=payload.resolved_interest_level,
-        quality_level=payload.resolved_quality_level,
+        user_score=payload.user_score,
+        post_read_summary=payload.post_read_summary
+        if payload.post_read_summary is not None
+        else paper.post_read_summary,
         create_node=payload.create_node,
         tag_names=_prospective_tag_names(session, paper.id, payload.tag_ids, payload.new_tags),
         node_selections=node_selections,
-        user_attitude=(structured or {}).get("user_attitude"),
-        personal_comment=(personal_comment if isinstance(personal_comment, str) else None),
-        source_brief_item_id=source_brief_item_id,
-    )
-
-
-def _confirmed_feedback_hash_v2(
-    session: Session,
-    paper: Paper,
-    payload: ConfirmFeedback,
-    source_brief_item_id: str | None,
-) -> str:
-    structured = (
-        payload.completion_summary_structured.model_dump()
-        if payload.completion_summary_structured is not None
-        else completion_summary_structured(paper, include_user_attitude=True)
-    )
-    metadata = paper.metadata_json or {}
-    personal_comment = (
-        payload.personal_comment
-        if payload.personal_comment is not None
-        else metadata.get("personal_comment")
-    )
-    return feedback_payload_hash_v2(
-        interested=payload.resolved_interest_level == "interested",
-        quality=payload.resolved_quality_level == "excellent",
-        create_node=payload.create_node,
-        tag_names=_prospective_tag_names(session, paper.id, payload.tag_ids, payload.new_tags),
-        user_attitude=(structured or {}).get("user_attitude"),
-        personal_comment=(personal_comment if isinstance(personal_comment, str) else None),
-        source_brief_item_id=source_brief_item_id,
-    )
-
-
-def _confirmed_feedback_hash_v3(
-    session: Session,
-    paper: Paper,
-    payload: ConfirmFeedback,
-    source_brief_item_id: str | None,
-    node_selections: list[dict[str, object]],
-) -> str:
-    structured = (
-        payload.completion_summary_structured.model_dump()
-        if payload.completion_summary_structured is not None
-        else completion_summary_structured(paper, include_user_attitude=True)
-    )
-    metadata = paper.metadata_json or {}
-    personal_comment = (
-        payload.personal_comment
-        if payload.personal_comment is not None
-        else metadata.get("personal_comment")
-    )
-    return feedback_payload_hash_v3(
-        interest_level=payload.resolved_interest_level,
-        quality=payload.resolved_quality_level == "excellent",
-        create_node=payload.create_node,
-        tag_names=_prospective_tag_names(session, paper.id, payload.tag_ids, payload.new_tags),
-        node_selections=node_selections,
-        user_attitude=(structured or {}).get("user_attitude"),
-        personal_comment=(personal_comment if isinstance(personal_comment, str) else None),
+        personal_comment=payload.personal_comment,
         source_brief_item_id=source_brief_item_id,
     )
 
@@ -550,8 +390,6 @@ def list_papers(
     status: str | None = None,
     node_id: str | None = None,
     tag_id: str | None = None,
-    quality: bool | None = None,
-    interested: bool | None = None,
     source: str | None = None,
     library: bool = False,
     published_from: date | None = None,
@@ -560,14 +398,18 @@ def list_papers(
     affiliation_q: str | None = Query(None, max_length=1000),
     keyword_q: str | None = Query(None, max_length=1000),
     tag_q: str | None = Query(None, max_length=1000),
-    rating_source: RatingSource = "interest",
-    rating_level: int | None = Query(None, ge=-1, le=4),
+    rating_source: RatingSource = "user",
+    score_min: float | None = Query(None, ge=0, le=1),
+    score_max: float | None = Query(None, ge=0, le=1),
+    rated: bool | None = None,
     sort: PaperSort = "default",
     limit: int = Query(default=50, ge=1, le=200),
     offset: int = Query(default=0, ge=0),
 ) -> dict:
     if published_from and published_to and published_from > published_to:
-        raise HTTPException(status_code=422, detail="Publication start date must not exceed end date")
+        raise HTTPException(
+            status_code=422, detail="Publication start date must not exceed end date"
+        )
     reading_status_order = case(
         (Paper.status == "feedback_pending", 0),
         (Paper.status == "reading", 1),
@@ -584,15 +426,24 @@ def list_papers(
     )
     count_statement = select(func.count(func.distinct(Paper.id)))
     filters = dimension_filters(
-        title=title_q, affiliation=affiliation_q, keyword=keyword_q, tag=tag_q,
+        title=title_q,
+        affiliation=affiliation_q,
+        keyword=keyword_q,
+        tag=tag_q,
     )
     if published_from:
         filters.append(Paper.published_at >= published_from)
     if published_to:
         filters.append(Paper.published_at <= published_to)
     rating = rating_expression(rating_source)
-    if rating_level is not None:
-        filters.append(rating.is_(None) if rating_level == -1 else rating_level_expression(rating) == rating_level)
+    if score_min is not None and score_max is not None and score_min > score_max:
+        raise HTTPException(422, "score_min must not exceed score_max")
+    if score_min is not None:
+        filters.append(rating >= score_min)
+    if score_max is not None:
+        filters.append(rating <= score_max)
+    if rated is not None:
+        filters.append(rating.is_not(None) if rated else rating.is_(None))
     orders = {
         "rating_desc": [rating.desc().nullslast(), Paper.published_at.desc().nullslast()],
         "rating_asc": [rating.asc().nullslast(), Paper.published_at.desc().nullslast()],
@@ -617,8 +468,8 @@ def list_papers(
             Paper.model_short_name.ilike(token),
             cast(Paper.search_aliases, Text).ilike(token),
             cast(Paper.search_aliases, Text).ilike(json_token),
-            cast(Paper.screening_feedback, Text).ilike(token),
-            cast(Paper.screening_feedback, Text).ilike(json_token),
+            Paper.user_note.ilike(token),
+            Paper.user_note.ilike(json_token),
             Paper.first_author.ilike(token),
             Paper.corresponding_author.ilike(token),
             Paper.primary_affiliation.ilike(token),
@@ -635,10 +486,6 @@ def list_papers(
         filters.append(or_(*search_clauses))
     if status:
         filters.append(Paper.status == status)
-    if quality is not None:
-        filters.append(Paper.is_quality == quality)
-    if interested is not None:
-        filters.append(Paper.is_interested == interested)
     if source:
         filters.append(Paper.source == source)
     if library:
@@ -688,7 +535,6 @@ def add_arxiv(
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except Exception as exc:
         raise HTTPException(status_code=502, detail=f"arXiv ingestion failed: {exc}") from exc
-    queue_metadata_enrichment(session, [paper.id], reason="arxiv-ingest")
     if recommend:
         return _manual_ingest_result(session, paper, created, background_tasks, analyze=analyze)
     return {"paper": _serialize_paper(session, paper, detail=True), "created": created}
@@ -708,7 +554,6 @@ def add_url(
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except Exception as exc:
         raise HTTPException(status_code=502, detail=f"URL ingestion failed: {exc}") from exc
-    queue_metadata_enrichment(session, [paper.id], reason="url-ingest")
     if recommend:
         return _manual_ingest_result(session, paper, created, background_tasks, analyze=analyze)
     return {"paper": _serialize_paper(session, paper, detail=True), "created": created}
@@ -733,7 +578,6 @@ async def add_pdf(
         paper, created = ingest_pdf_bytes(session, content, file.filename or "upload.pdf")
     except Exception as exc:
         raise HTTPException(status_code=400, detail=f"PDF ingestion failed: {exc}") from exc
-    queue_metadata_enrichment(session, [paper.id], reason="upload-ingest")
     if recommend:
         return _manual_ingest_result(session, paper, created, background_tasks, analyze=analyze)
     return {"paper": _serialize_paper(session, paper, detail=True), "created": created}
@@ -748,7 +592,7 @@ def get_paper(paper_id: str, session: Annotated[Session, Depends(get_session)]) 
 def get_paper_metadata_context(
     paper_id: str, session: Annotated[Session, Depends(get_session)]
 ) -> dict:
-    """Compact, non-analysis context for the ingestion metadata Agent."""
+    """Compact context for inline daily affiliation checks and reading discussion."""
     paper = _paper_or_404(session, paper_id)
     group = group_for_paper(session, paper.id)
     return {
@@ -766,7 +610,6 @@ def get_paper_metadata_context(
         "pdf_url": paper.pdf_url,
         "research_group_id": paper.research_group_id,
         "research_group": serialize_group(session, group, detail=True) if group else None,
-        "metadata_enrichment": (paper.metadata_json or {}).get("metadata_enrichment"),
     }
 
 
@@ -777,141 +620,7 @@ def get_paper_first_page(
     max_chars: int = Query(default=2500, ge=200, le=8000),
 ) -> dict:
     """Expose a short affiliation snippet without retaining the PDF or HTML."""
-    return paper_first_page_text(
-        session, _paper_or_404(session, paper_id), max_chars=max_chars
-    )
-
-
-@router.post("/{paper_id}/metadata-enrichment/complete")
-def complete_paper_metadata_enrichment(
-    paper_id: str,
-    payload: PaperMetadataEnrichmentComplete,
-    session: Annotated[Session, Depends(get_session)],
-) -> dict:
-    paper = _paper_or_404(session, paper_id)
-    state = dict((paper.metadata_json or {}).get("metadata_enrichment") or {})
-    note = payload.note.strip() if payload.note and payload.note.strip() else None
-    paper.metadata_json = {
-        **(paper.metadata_json or {}),
-        "metadata_enrichment": {
-            **state,
-            "status": payload.status,
-            "note": note,
-            "error": note if payload.status == "failed" else None,
-            "updated_at": datetime.now(UTC).isoformat(),
-        },
-    }
-    log_operation(
-        session,
-        actor="agent",
-        action="paper.metadata_enrichment_completed",
-        entity_type="paper",
-        entity_id=paper.id,
-        detail={"status": payload.status, "note": note},
-    )
-    session.commit()
-    return _serialize_paper(session, paper, detail=True)
-
-
-@router.post("/{paper_id}/metadata-enrichment/retry")
-def retry_paper_metadata_enrichment(
-    paper_id: str,
-    session: Annotated[Session, Depends(get_session)],
-) -> dict:
-    paper = _paper_or_404(session, paper_id)
-    state = dict((paper.metadata_json or {}).get("metadata_enrichment") or {})
-    paper.metadata_json = {
-        **(paper.metadata_json or {}),
-        "metadata_enrichment": {
-            **state,
-            "status": "pending",
-            "task_id": None,
-            "error": None,
-            "requested_at": datetime.now(UTC).isoformat(),
-        },
-    }
-    log_operation(
-        session,
-        actor="user",
-        action="paper.metadata_enrichment_retried",
-        entity_type="paper",
-        entity_id=paper.id,
-    )
-    session.commit()
-    return _serialize_paper(session, paper, detail=True)
-
-
-@router.post("/metadata-enrichment/retry-failed")
-def retry_failed_metadata_enrichment(
-    session: Annotated[Session, Depends(get_session)],
-) -> dict:
-    papers = list(
-        session.scalars(
-            select(Paper).where(
-                Paper.metadata_json["metadata_enrichment"]["status"].as_string()
-                == "failed"
-            )
-        ).all()
-    )
-    now = datetime.now(UTC).isoformat()
-    for paper in papers:
-        state = dict((paper.metadata_json or {}).get("metadata_enrichment") or {})
-        paper.metadata_json = {
-            **(paper.metadata_json or {}),
-            "metadata_enrichment": {
-                **state,
-                "status": "pending",
-                "task_id": None,
-                "error": None,
-                "requested_at": now,
-            },
-        }
-    if papers:
-        log_operation(
-            session,
-            actor="user",
-            action="paper.metadata_enrichment_retried",
-            entity_type="metadata_batch",
-            detail={"paper_count": len(papers)},
-        )
-    session.commit()
-    return {"retried": len(papers)}
-
-
-@router.get("/{paper_id}/narration")
-def get_paper_narration(
-    paper_id: str,
-    session: Annotated[Session, Depends(get_session)],
-    language: str = Query(default="zh-CN", min_length=2, max_length=35),
-) -> dict:
-    try:
-        return narration_payload(session, paper_id, language=language)
-    except PodcastContentError as exc:
-        raise _podcast_content_error(exc) from exc
-
-
-@router.post("/{paper_id}/narration/commit")
-@serialized_task_claim
-def save_paper_narration(
-    paper_id: str,
-    payload: PaperNarrationCommit,
-    session: Annotated[Session, Depends(get_session)],
-) -> dict:
-    try:
-        item, changed = commit_paper_narration(session, paper_id, payload)
-        if changed:
-            log_operation(
-                session,
-                actor="agent" if payload.task_id else "user",
-                action="paper_narration.committed",
-                entity_type="paper_narration",
-                entity_id=item.id,
-                task_id=payload.task_id,
-                detail={"paper_id": paper_id, "revision": item.revision},
-            )
-        return narration_payload(session, paper_id, language=payload.language)
-    except PodcastContentError as exc:
-        raise _podcast_content_error(exc) from exc
+    return paper_first_page_text(session, _paper_or_404(session, paper_id), max_chars=max_chars)
 
 
 @router.get("/{paper_id}/agent-context")
@@ -951,319 +660,24 @@ def sync_agent_context(
 
 @router.patch("/{paper_id}")
 def update_paper(
-    paper_id: str,
-    payload: PaperUpdate,
-    session: Annotated[Session, Depends(get_session)],
+    paper_id: str, payload: PaperUpdate, session: Annotated[Session, Depends(get_session)]
 ) -> dict:
     paper = _paper_or_404(session, paper_id)
     changes = payload.model_dump(exclude_unset=True)
-    _normalize_model_identity_fields(changes)
-    suggested_tags = changes.pop("suggested_tags", None)
-    research_group_summary = changes.pop("research_group_summary", None)
-    update_research_group_summary = "research_group_summary" in payload.model_fields_set
-    research_group_id = changes.pop("research_group_id", None)
-    update_research_group_id = "research_group_id" in payload.model_fields_set
-    open_questions = changes.pop("open_questions", None)
-    update_open_questions = "open_questions" in payload.model_fields_set
-    protected_fields = manual_bibliographic_fields(session, paper)
-    skipped_fields = sorted(protected_fields.intersection(changes))
-    for field in skipped_fields:
+    for field in manual_bibliographic_fields(session, paper):
         changes.pop(field, None)
-    if "metadata_json" in changes:
-        current_metadata = paper.metadata_json or {}
-        changes["metadata_json"] = {
-            **(changes["metadata_json"] or {}),
-            **{
-                key: current_metadata[key]
-                for key in (
-                    "manual_analysis",
-                    "agent_metadata_analysis",
-                    COMPLETION_SUMMARY_METADATA_KEY,
-                    BIBLIOGRAPHIC_PROVENANCE_KEY,
-                    MANUAL_BIBLIOGRAPHIC_FIELDS_KEY,
-                    READING_PROVENANCE_KEY,
-                    FEEDBACK_PROVENANCE_KEY,
-                    IGNORE_PROVENANCE_KEY,
-                    "screening_feedback",
-                    "personal_comment",
-                    "open_questions",
-                    RESEARCH_GROUP_SUMMARY_KEY,
-                    RESEARCH_GROUP_PROFILE_KEY,
-                    ABSTRACT_TRANSLATION_STATE_KEY,
-                )
-                if key in current_metadata
-            },
-        }
-        if (
-            AGENT_BIBLIOGRAPHY_KEY not in changes["metadata_json"]
-            and AGENT_BIBLIOGRAPHY_KEY in current_metadata
-        ):
-            changes["metadata_json"][AGENT_BIBLIOGRAPHY_KEY] = current_metadata[
-                AGENT_BIBLIOGRAPHY_KEY
-            ]
-    if "title" in changes:
-        changes["normalized_title"] = normalize_title(changes["title"])
-    for key, value in changes.items():
-        setattr(paper, key, value)
-    if update_open_questions:
-        paper.metadata_json = {
-            **(paper.metadata_json or {}),
-            "open_questions": open_questions.strip()
-            if isinstance(open_questions, str) and open_questions.strip()
-            else None,
-        }
-    if update_research_group_summary:
-        paper.metadata_json = {
-            **(paper.metadata_json or {}),
-            RESEARCH_GROUP_SUMMARY_KEY: (
-                research_group_summary.strip()
-                if isinstance(research_group_summary, str) and research_group_summary.strip()
-                else None
-            ),
-        }
-    if suggested_tags is not None:
-        paper.metadata_json = {**(paper.metadata_json or {}), "suggested_tags": suggested_tags}
-    if update_research_group_id:
-        if research_group_id:
-            group = session.get(ResearchGroup, research_group_id)
-            if group is None:
-                raise HTTPException(status_code=404, detail="Research group not found")
-            assign_research_group(session, paper, group)
-        else:
-            clear_research_group(session, paper)
-    else:
-        upsert_group_from_paper(session, paper)
-    log_operation(
-        session,
-        actor="agent",
-        action="paper.updated",
-        entity_type="paper",
-        entity_id=paper.id,
-        detail={"fields": sorted(changes), "protected_fields_skipped": skipped_fields},
-    )
-    session.commit()
+    _apply_current_paper_changes(session, paper, changes, actor="agent")
     return _serialize_paper(session, paper, detail=True)
 
 
 @router.patch("/{paper_id}/metadata")
 def update_paper_metadata(
-    paper_id: str,
-    payload: PaperMetadataUpdate,
-    session: Annotated[Session, Depends(get_session)],
+    paper_id: str, payload: PaperMetadataUpdate, session: Annotated[Session, Depends(get_session)]
 ) -> dict:
     paper = _paper_or_404(session, paper_id)
-    changes = payload.model_dump(exclude_unset=True)
-    _normalize_model_identity_fields(changes)
-    tag_ids = changes.pop("tag_ids", None)
-    new_tags = changes.pop("new_tags", [])
-    structured = changes.pop("completion_summary_structured", None)
-    open_questions = changes.pop("open_questions", None)
-    research_group_summary = changes.pop("research_group_summary", None)
-    update_research_group_summary = "research_group_summary" in payload.model_fields_set
-    research_group_id = changes.pop("research_group_id", None)
-    update_research_group_id = "research_group_id" in payload.model_fields_set
-    update_open_questions = "open_questions" in payload.model_fields_set
-    interest_level = changes.pop("interest_level", None)
-    quality_level = changes.pop("quality_level", None)
-    screening_feedback = changes.pop("screening_feedback", None)
-    agent_score_confirmed = changes.pop("agent_score_confirmed", None)
-    agent_quality_confirmed = changes.pop("agent_quality_confirmed", None)
-    agent_interest_confirmed = changes.pop("agent_interest_confirmed", None)
-    update_agent_score_confirmation = "agent_score_confirmed" in payload.model_fields_set
-    update_agent_quality_confirmation = "agent_quality_confirmed" in payload.model_fields_set
-    update_agent_interest_confirmation = "agent_interest_confirmed" in payload.model_fields_set
-    if update_agent_score_confirmation:
-        if not update_agent_quality_confirmation:
-            agent_quality_confirmed = agent_score_confirmed
-            update_agent_quality_confirmation = True
-        if not update_agent_interest_confirmation:
-            agent_interest_confirmed = agent_score_confirmed
-            update_agent_interest_confirmation = True
-    original_values = {field: getattr(paper, field) for field in BIBLIOGRAPHIC_FIELDS}
-    if "authors" in changes and changes["authors"] is not None:
-        changes["authors"] = preserve_author_details_for_unchanged_names(
-            paper.authors or [], changes["authors"]
-        )
-    if "metadata_json" in changes:
-        current_metadata = paper.metadata_json or {}
-        changes["metadata_json"] = {
-            **(changes["metadata_json"] or {}),
-            **{
-                key: current_metadata[key]
-                for key in (
-                    "manual_analysis",
-                    "agent_metadata_analysis",
-                    "suggested_tags",
-                    COMPLETION_SUMMARY_METADATA_KEY,
-                    BIBLIOGRAPHIC_PROVENANCE_KEY,
-                    MANUAL_BIBLIOGRAPHIC_FIELDS_KEY,
-                    READING_PROVENANCE_KEY,
-                    FEEDBACK_PROVENANCE_KEY,
-                    IGNORE_PROVENANCE_KEY,
-                    "screening_feedback",
-                    "personal_comment",
-                    "open_questions",
-                    RESEARCH_GROUP_SUMMARY_KEY,
-                    RESEARCH_GROUP_PROFILE_KEY,
-                    ABSTRACT_TRANSLATION_STATE_KEY,
-                )
-                if key in current_metadata
-            },
-        }
-        if (
-            AGENT_BIBLIOGRAPHY_KEY not in changes["metadata_json"]
-            and AGENT_BIBLIOGRAPHY_KEY in current_metadata
-        ):
-            changes["metadata_json"][AGENT_BIBLIOGRAPHY_KEY] = current_metadata[
-                AGENT_BIBLIOGRAPHY_KEY
-            ]
-    if changes.get("title"):
-        changes["normalized_title"] = normalize_title(changes["title"])
-    for key, value in changes.items():
-        setattr(paper, key, value)
-    manually_changed = record_manual_bibliographic_changes(paper, original_values, changes)
-    if structured is not None:
-        save_completion_summary(paper, structured)
-    if update_open_questions:
-        paper.metadata_json = {
-            **(paper.metadata_json or {}),
-            "open_questions": open_questions.strip()
-            if isinstance(open_questions, str) and open_questions.strip()
-            else None,
-        }
-    if update_research_group_summary:
-        paper.metadata_json = {
-            **(paper.metadata_json or {}),
-            RESEARCH_GROUP_SUMMARY_KEY: (
-                research_group_summary.strip()
-                if isinstance(research_group_summary, str) and research_group_summary.strip()
-                else None
-            ),
-        }
-    if tag_ids is not None:
-        _replace_paper_tags(session, paper.id, tag_ids, new_tags)
-    if update_research_group_id:
-        if research_group_id:
-            group = session.get(ResearchGroup, research_group_id)
-            if group is None:
-                raise HTTPException(status_code=404, detail="Research group not found")
-            assign_research_group(session, paper, group)
-        else:
-            clear_research_group(session, paper)
-    else:
-        upsert_group_from_paper(session, paper)
-    if (
-        interest_level is not None
-        or quality_level is not None
-        or screening_feedback is not None
-        or update_agent_score_confirmation
-        or update_agent_quality_confirmation
-        or update_agent_interest_confirmation
-    ):
-        if paper.status != "completed":
-            current_screening = dict(paper.screening_feedback or {})
-            legacy_confirmed = bool(current_screening.get("agent_score_confirmed", False))
-            current_screening.setdefault("agent_quality_confirmed", legacy_confirmed)
-            current_screening.setdefault("agent_interest_confirmed", legacy_confirmed)
-            if interest_level is not None:
-                current_screening["interest_level"] = interest_level
-            if quality_level is not None:
-                current_screening["quality_level"] = quality_level
-            if screening_feedback is not None:
-                current_screening["comment"] = screening_feedback.strip() or None
-            if update_agent_score_confirmation:
-                current_screening["agent_score_confirmed"] = bool(agent_score_confirmed)
-            if update_agent_quality_confirmation:
-                current_screening["agent_quality_confirmed"] = bool(agent_quality_confirmed)
-            if update_agent_interest_confirmation:
-                current_screening["agent_interest_confirmed"] = bool(agent_interest_confirmed)
-            current_screening["agent_score_confirmed"] = bool(
-                current_screening.get("agent_quality_confirmed", False)
-                and current_screening.get("agent_interest_confirmed", False)
-            )
-            current_screening["updated_at"] = datetime.now(UTC).isoformat()
-            current_screening["revision"] = int(current_screening.get("revision") or 0) + 1
-            current_screening["evidence_key"] = (
-                f"paper:{paper.id}:screening:{current_screening['revision']}"
-            )
-            paper.screening_feedback = current_screening
-        else:
-            if (
-                screening_feedback is not None
-                or update_agent_score_confirmation
-                or update_agent_quality_confirmation
-                or update_agent_interest_confirmation
-            ):
-                current_screening = dict(paper.screening_feedback or {})
-                legacy_confirmed = bool(current_screening.get("agent_score_confirmed", False))
-                current_screening.setdefault("agent_quality_confirmed", legacy_confirmed)
-                current_screening.setdefault("agent_interest_confirmed", legacy_confirmed)
-                if screening_feedback is not None:
-                    current_screening["comment"] = screening_feedback.strip() or None
-                if update_agent_score_confirmation:
-                    current_screening["agent_score_confirmed"] = bool(agent_score_confirmed)
-                if update_agent_quality_confirmation:
-                    current_screening["agent_quality_confirmed"] = bool(agent_quality_confirmed)
-                if update_agent_interest_confirmation:
-                    current_screening["agent_interest_confirmed"] = bool(agent_interest_confirmed)
-                current_screening["agent_score_confirmed"] = bool(
-                    current_screening.get("agent_quality_confirmed", False)
-                    and current_screening.get("agent_interest_confirmed", False)
-                )
-                current_screening["updated_at"] = datetime.now(UTC).isoformat()
-                current_screening["revision"] = int(current_screening.get("revision") or 0) + 1
-                current_screening["evidence_key"] = (
-                    f"paper:{paper.id}:screening:{current_screening['revision']}"
-                )
-                paper.screening_feedback = current_screening
-        if paper.status == "completed" and (
-            interest_level is not None or quality_level is not None
-        ):
-            resolved_interest = interest_level or paper_interest_level(paper) or "neutral"
-            resolved_quality = quality_level or paper_quality_level(paper) or "normal"
-            paper.is_interested = resolved_interest in {"high", "interested"}
-            paper.is_quality = resolved_quality in {"good", "excellent"}
-            current_provenance = (paper.metadata_json or {}).get(FEEDBACK_PROVENANCE_KEY)
-            provenance = dict(current_provenance) if isinstance(current_provenance, dict) else {}
-            revision = int(provenance.get("revision") or 0) + 1
-            confirmed_at = datetime.now(UTC)
-            provenance.update(
-                {
-                    "schema_version": 2,
-                    "revision": revision,
-                    "evidence_key": f"paper:{paper.id}:feedback:{revision}",
-                    "confirmed_at": confirmed_at.isoformat(),
-                    "interest_level": resolved_interest,
-                    "quality_level": resolved_quality,
-                    "active": True,
-                }
-            )
-            provenance.pop("payload_hash", None)
-            provenance.pop("payload_hash_version", None)
-            paper.metadata_json = {
-                **(paper.metadata_json or {}),
-                FEEDBACK_PROVENANCE_KEY: provenance,
-            }
-    log_operation(
-        session,
-        actor="user",
-        action="paper.metadata_updated",
-        entity_type="paper",
-        entity_id=paper.id,
-        detail={
-            "fields": sorted(changes),
-            "manually_changed_bibliographic_fields": sorted(manually_changed),
-            "tags_updated": tag_ids is not None,
-            "evaluation_updated": (
-                interest_level is not None
-                or quality_level is not None
-                or update_agent_score_confirmation
-                or update_agent_quality_confirmation
-                or update_agent_interest_confirmation
-            ),
-        },
+    _apply_current_paper_changes(
+        session, paper, payload.model_dump(exclude_unset=True), actor="user"
     )
-    session.commit()
     return _serialize_paper(session, paper, detail=True)
 
 
@@ -1398,8 +812,7 @@ def cancel_reading(paper_id: str, session: Annotated[Session, Depends(get_sessio
     previous_status = paper.status
     paper.status = "candidate"
     paper.pending_feedback = {}
-    paper.is_interested = False
-    paper.is_quality = False
+    paper.user_score = None
     paper.reading_completed_at = None
     removed_links = session.query(PaperNode).filter(PaperNode.paper_id == paper.id).delete()
     removed_progress = (
@@ -1461,115 +874,44 @@ def cancel_reading(paper_id: str, session: Annotated[Session, Depends(get_sessio
 
 @router.post("/{paper_id}/finish")
 def finish_reading(
-    paper_id: str,
-    payload: FinishReading,
-    session: Annotated[Session, Depends(get_session)],
+    paper_id: str, payload: FinishReading, session: Annotated[Session, Depends(get_session)]
 ) -> dict:
     paper = _paper_or_404(session, paper_id)
+    if paper.status not in {"reading", "feedback_pending"}:
+        raise HTTPException(409, "Paper must be in reading state")
+    if payload.post_read_summary is not None:
+        paper.post_read_summary = payload.post_read_summary.strip() or None
     paper.status = "feedback_pending"
-    structured = payload.completion_summary_structured
-    if structured is not None:
-        save_completion_summary(paper, structured.model_dump())
-    elif payload.summary:
-        paper.completion_summary = payload.summary
-        metadata = dict(paper.metadata_json or {})
-        metadata.pop(COMPLETION_SUMMARY_METADATA_KEY, None)
-        paper.metadata_json = metadata
-        migrate_legacy_completion_summary(paper)
-    paper.pending_feedback = payload.model_dump(
-        exclude={"summary", "completion_summary_structured"}
-    )
-    log_operation(
-        session,
-        actor="agent" if payload.summary or structured is not None else "user",
-        action="paper.reading_summarized",
-        entity_type="paper",
-        entity_id=paper.id,
-    )
+    paper.pending_feedback = payload.model_dump(exclude={"post_read_summary"})
     session.commit()
     return _serialize_paper(session, paper, detail=True)
 
 
 @router.post("/{paper_id}/confirm-feedback")
 def confirm_feedback(
-    paper_id: str,
-    payload: ConfirmFeedback,
-    session: Annotated[Session, Depends(get_session)],
+    paper_id: str, payload: ConfirmFeedback, session: Annotated[Session, Depends(get_session)]
 ) -> dict:
     paper = _paper_or_404(session, paper_id)
-    source_brief_item_id = payload.source_brief_item_id
-    existing_provenance = (paper.metadata_json or {}).get(FEEDBACK_PROVENANCE_KEY)
-    if (
-        source_brief_item_id is None
-        and paper.status == "completed"
-        and isinstance(existing_provenance, dict)
-    ):
-        candidate = existing_provenance.get("brief_item_id")
-        source_brief_item_id = candidate if isinstance(candidate, str) else None
-    reading_provenance = (paper.metadata_json or {}).get(READING_PROVENANCE_KEY)
-    if source_brief_item_id is None and isinstance(reading_provenance, dict):
-        candidate = reading_provenance.get("brief_item_id")
-        source_brief_item_id = candidate if isinstance(candidate, str) else None
-    if source_brief_item_id is None:
-        ignore_provenance = (paper.metadata_json or {}).get(IGNORE_PROVENANCE_KEY)
-        candidate = (
-            ignore_provenance.get("brief_item_id") if isinstance(ignore_provenance, dict) else None
-        )
-        source_brief_item_id = candidate if isinstance(candidate, str) else None
-    if source_brief_item_id:
+    source_id = payload.source_brief_item_id or (
+        (paper.metadata_json or {}).get(READING_PROVENANCE_KEY) or {}
+    ).get("brief_item_id")
+    if source_id:
         try:
-            validate_brief_item_source(session, paper.id, source_brief_item_id)
+            validate_brief_item_source(session, paper.id, source_id)
         except ValueError as exc:
-            raise HTTPException(status_code=422, detail=str(exc)) from exc
+            raise HTTPException(422, str(exc)) from exc
     try:
-        node_selections = _prospective_node_selections(session, payload)
+        selections = _prospective_node_selections(session, payload)
     except ValueError as exc:
-        raise HTTPException(status_code=422, detail=str(exc)) from exc
-    attempted_hash = _confirmed_feedback_hash(
-        session, paper, payload, source_brief_item_id, node_selections
-    )
+        raise HTTPException(422, str(exc)) from exc
+    digest = _confirmed_feedback_hash(session, paper, payload, source_id, selections)
+    provenance = (paper.metadata_json or {}).get(FEEDBACK_PROVENANCE_KEY) or {}
     if paper.status == "completed":
-        hash_matches = bool(
-            isinstance(existing_provenance, dict)
-            and existing_provenance.get("payload_hash") == attempted_hash
-        )
-        if (
-            not hash_matches
-            and isinstance(existing_provenance, dict)
-            and existing_provenance.get("payload_hash_version") == 3
-            and payload.resolved_quality_level != "poor"
-        ):
-            hash_matches = existing_provenance.get("payload_hash") == _confirmed_feedback_hash_v3(
-                session,
-                paper,
-                payload,
-                source_brief_item_id,
-                node_selections,
-            )
-        if (
-            not hash_matches
-            and isinstance(existing_provenance, dict)
-            and existing_provenance.get("payload_hash_version") == 2
-            and payload.resolved_interest_level != "ignored"
-            and payload.resolved_quality_level != "poor"
-            and not payload.node_links
-            and not payload.new_nodes
-        ):
-            hash_matches = existing_provenance.get("payload_hash") == _confirmed_feedback_hash_v2(
-                session, paper, payload, source_brief_item_id
-            )
-        if (
-            isinstance(existing_provenance, dict)
-            and existing_provenance.get("active", True)
-            and hash_matches
-        ):
+        if provenance.get("payload_hash") == digest:
             return _serialize_paper(session, paper, detail=True)
-        raise HTTPException(status_code=409, detail="Paper feedback is already confirmed")
+        raise HTTPException(409, "Paper feedback is already confirmed")
     if paper.status != "feedback_pending":
-        raise HTTPException(
-            status_code=409,
-            detail="Paper must be summarized before feedback confirmation",
-        )
+        raise HTTPException(409, "Paper must be summarized before feedback confirmation")
     claim = session.execute(
         update(Paper)
         .where(Paper.id == paper.id, Paper.status == "feedback_pending")
@@ -1578,103 +920,39 @@ def confirm_feedback(
     )
     if claim.rowcount != 1:
         session.rollback()
-        paper = _paper_or_404(session, paper_id)
-        concurrent_provenance = (paper.metadata_json or {}).get(FEEDBACK_PROVENANCE_KEY)
-        if (
-            paper.status == "completed"
-            and isinstance(concurrent_provenance, dict)
-            and concurrent_provenance.get("active", True)
-            and concurrent_provenance.get("payload_hash") == attempted_hash
-        ):
-            return _serialize_paper(session, paper, detail=True)
-        raise HTTPException(status_code=409, detail="Paper feedback confirmation is already active")
+        raise HTTPException(409, "Paper feedback confirmation is already active")
     paper.status = "completed"
-    interest_level = payload.resolved_interest_level
-    quality_level = payload.resolved_quality_level
-    paper.is_interested = interest_level in {"high", "interested"}
-    paper.is_quality = quality_level in {"good", "excellent"}
+    paper.user_score = payload.user_score
     paper.reading_completed_at = datetime.now(UTC)
     paper.pending_feedback = {}
-    if payload.completion_summary_structured is not None:
-        save_completion_summary(paper, payload.completion_summary_structured.model_dump())
+    if payload.post_read_summary is not None:
+        paper.post_read_summary = payload.post_read_summary.strip() or None
     if payload.personal_comment is not None:
-        paper.metadata_json = {
-            **paper.metadata_json,
-            "personal_comment": payload.personal_comment.strip() or None,
-        }
-    selected_tag_ids = (
-        set(payload.tag_ids)
-        if payload.tag_ids is not None
-        else set(
-            session.scalars(select(PaperTag.tag_id).where(PaperTag.paper_id == paper.id)).all()
+        paper.user_note = payload.personal_comment.strip() or None
+    if payload.tag_ids is not None or payload.new_tags:
+        ids = (
+            payload.tag_ids
+            if payload.tag_ids is not None
+            else list(session.scalars(select(PaperTag.tag_id).where(PaperTag.paper_id == paper.id)))
         )
-    )
-    for name in payload.new_tags:
-        normalized = name.strip()
-        if not normalized:
-            continue
-        tag = session.scalar(select(Tag).where(func.lower(Tag.name) == normalized.lower()))
-        if tag is None:
-            tag = Tag(name=normalized)
-            session.add(tag)
-            session.flush()
-        selected_tag_ids.add(tag.id)
-    session.query(PaperTag).filter(PaperTag.paper_id == paper.id).delete()
-    for tag_id in selected_tag_ids:
-        if session.get(Tag, tag_id):
-            session.add(PaperTag(paper_id=paper.id, tag_id=tag_id))
-    tag_names = list(session.scalars(select(Tag.name).where(Tag.id.in_(selected_tag_ids))).all())
-    try:
-        selected_node_ids = _apply_node_selections(session, paper, node_selections)
-    except ValueError as exc:
-        raise HTTPException(status_code=422, detail=str(exc)) from exc
-    structured = completion_summary_structured(paper, include_user_attitude=True)
-    _replace_selected_node_progress(session, paper, selected_node_ids, structured)
-    previous_revision = (
-        int(existing_provenance.get("revision") or 0)
-        if isinstance(existing_provenance, dict)
-        else 0
-    )
-    confirmed_at = datetime.now(UTC)
-    revision = previous_revision + 1
-    evidence_key = f"paper:{paper.id}:feedback:{revision}"
-    payload_hash = feedback_payload_hash(
-        interest_level=interest_level,
-        quality_level=quality_level,
-        create_node=payload.create_node,
-        tag_names=tag_names,
-        node_selections=node_selections,
-        user_attitude=(structured or {}).get("user_attitude"),
-        personal_comment=(paper.metadata_json or {}).get("personal_comment"),
-        source_brief_item_id=source_brief_item_id,
-    )
+        _replace_paper_tags(session, paper.id, ids, payload.new_tags)
+    selected_nodes = _apply_node_selections(session, paper, selections)
+    _replace_selected_node_progress(session, paper, selected_nodes)
+    revision = int(provenance.get("revision") or 0) + 1
+    key = f"paper:{paper.id}:feedback:{revision}"
     paper.metadata_json = {
-        **paper.metadata_json,
-        "create_node_requested": bool(payload.new_nodes) or payload.create_node,
+        **(paper.metadata_json or {}),
         FEEDBACK_PROVENANCE_KEY: {
-            "schema_version": 2,
-            "payload_hash_version": 4,
+            "schema_version": 3,
             "revision": revision,
-            "evidence_key": evidence_key,
-            "confirmed_at": confirmed_at.isoformat(),
-            "brief_item_id": source_brief_item_id,
-            "interest_level": interest_level,
-            "quality_level": quality_level,
-            "selected_node_ids": selected_node_ids,
-            "payload_hash": payload_hash,
+            "evidence_key": key,
+            "confirmed_at": paper.reading_completed_at.isoformat(),
+            "brief_item_id": source_id,
+            "selected_node_ids": selected_nodes,
+            "payload_hash": digest,
             "active": True,
         },
     }
-    ignore_provenance = paper.metadata_json.get(IGNORE_PROVENANCE_KEY)
-    if isinstance(ignore_provenance, dict):
-        paper.metadata_json = {
-            **paper.metadata_json,
-            IGNORE_PROVENANCE_KEY: {
-                **ignore_provenance,
-                "active": False,
-                "replaced_at": confirmed_at.isoformat(),
-            },
-        }
     log_operation(
         session,
         actor="user",
@@ -1682,15 +960,9 @@ def confirm_feedback(
         entity_type="paper",
         entity_id=paper.id,
         detail={
-            "evidence_key": evidence_key,
-            "feedback_revision": revision,
-            "source_brief_item_id": source_brief_item_id,
-            "interest_level": interest_level,
-            "interested": paper.is_interested,
-            "quality_level": quality_level,
-            "create_node": payload.create_node,
-            "tag_count": len(selected_tag_ids),
-            "node_count": len(selected_node_ids),
+            "evidence_key": key,
+            "source_brief_item_id": source_id,
+            "user_score": paper.user_score,
         },
     )
     session.commit()
@@ -1717,9 +989,7 @@ def fetch_pdf(paper_id: str, session: Annotated[Session, Depends(get_session)]) 
 
 
 @router.get("/{paper_id}/pdf")
-def get_pdf(
-    paper_id: str, session: Annotated[Session, Depends(get_session)]
-) -> Response:
+def get_pdf(paper_id: str, session: Annotated[Session, Depends(get_session)]) -> Response:
     paper = _paper_or_404(session, paper_id)
     if source_url := arxiv_pdf_url(paper):
         return RedirectResponse(source_url, status_code=302)
@@ -2124,3 +1394,69 @@ def create_tag(payload: TagCreate, session: Annotated[Session, Depends(get_sessi
     session.add(item)
     session.commit()
     return model_dict(item)
+
+
+def _apply_current_paper_changes(
+    session: Session, paper: Paper, changes: dict, *, actor: str
+) -> None:
+    _normalize_model_identity_fields(changes)
+    ids = changes.pop("tag_ids", None)
+    names = changes.pop("new_tags", [])
+    group_changed = "research_group_id" in changes
+    group_id = changes.pop("research_group_id", None)
+    group_summary = changes.pop("research_group_summary", None)
+    suggestions = changes.pop("suggested_tags", None)
+    if "authors" in changes and changes["authors"] is not None:
+        changes["authors"] = preserve_author_details_for_unchanged_names(
+            paper.authors or [], changes["authors"]
+        )
+    original = {key: getattr(paper, key, None) for key in changes}
+    if "metadata_json" in changes:
+        forbidden = {
+            "completion_summary_structured",
+            "open_questions",
+            "full_analysis",
+            "summary",
+            "screening_feedback",
+            "metadata_enrichment",
+        }
+        if forbidden.intersection(changes["metadata_json"] or {}):
+            raise HTTPException(422, "Obsolete fields are not accepted in metadata_json")
+        changes["metadata_json"] = {
+            **(paper.metadata_json or {}),
+            **(changes["metadata_json"] or {}),
+        }
+    if changes.get("title"):
+        changes["normalized_title"] = normalize_title(changes["title"])
+    for key, value in changes.items():
+        setattr(paper, key, value)
+    if actor == "user":
+        record_manual_bibliographic_changes(paper, original, changes)
+    if group_summary is not None:
+        paper.metadata_json = {
+            **(paper.metadata_json or {}),
+            RESEARCH_GROUP_SUMMARY_KEY: group_summary,
+        }
+    if suggestions is not None:
+        paper.metadata_json = {**(paper.metadata_json or {}), "suggested_tags": suggestions}
+    if ids is not None or names:
+        _replace_paper_tags(session, paper.id, ids or [], names)
+    if group_changed:
+        if group_id:
+            group = session.get(ResearchGroup, group_id)
+            if group is None:
+                raise HTTPException(404, "Research group not found")
+            assign_research_group(session, paper, group)
+        else:
+            clear_research_group(session, paper)
+    if not group_changed and ((paper.metadata_json or {}).get(RESEARCH_GROUP_PROFILE_KEY)):
+        upsert_group_from_paper(session, paper)
+    log_operation(
+        session,
+        actor=actor,
+        action="paper.updated",
+        entity_type="paper",
+        entity_id=paper.id,
+        detail={"fields": sorted(changes)},
+    )
+    session.commit()

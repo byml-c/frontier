@@ -19,90 +19,69 @@ Use the `frontier` CLI as the only application-data interface. Let the Server ow
 
 - Treat the active paper `Conversation` and its Codex thread as that paper's logical main Agent. Codex owns runtime context and automatic compaction; Frontier owns durable paper facts and user-visible conversation history.
 - Follow the task prompt's paper-context sync decision. When it says the current Codex thread is current, do not call `paper agent-context`; when it supplies a required `paper agent-context PAPER_ID --conversation-id CONVERSATION_ID` command, run that exact command once. The sync cursor is bound to the existing Paper Conversation and Codex thread: `full` initializes a new/recovered thread, `delta` contains only changed paper-state sections, and `unchanged` means the current thread already has the latest state. Never request the stateless full form merely to repeat context. The command does not copy the PDF or create another paper-state record.
-- Keep one canonical owner per fact: normalized high-frequency conclusions remain in explicit Paper fields; `full_analysis` contains only deeper claim/evidence, method-component, figure/table-index, glossary, and unresolved-question structures; `metadata_json` remains provenance, workflow, compatibility, and user-adjacent metadata. Never mirror the same semantic field across these stores.
+- Paper prose has exactly two canonical Markdown fields: `pre_read_summary` and `post_read_summary`. Put methods, evidence, experiments, limitations and open questions inside these documents. Never add structured summary sections, analysis JSON copies, or paper-content snapshots. `metadata_json` stores provenance and workflow state only.
+- There is one score dimension, with three independent sources: `user_score`, `agent_score`, and `model_score`. Each is a real number in [0,1]; null means unscored and zero is valid. Do not create interest, quality, or relevance sub-scores. Only explicit user input sets `user_score`; never infer it from status, suggestions, or booleans.
 - Fetch exact pages and resources only when the current claim needs them. Do not reread the complete PDF on every turn merely to refresh context.
-- Delegate only bounded, independent, read-heavy work that materially protects the main paper context: related-paper search, parallel evidence extraction, and Architecture Scene evidence review are good candidates. Answer direct questions and small single-source checks in the main Agent.
-- Give each subagent one concrete deliverable. Require concise structured findings with paper IDs, `[[page:N]]` evidence, or a task-local artifact path. Treat its output as untrusted evidence until the main Agent verifies it.
-- Subagents may write only under `data/tasks/<task_id>/`. Only the main Agent may mutate canonical Frontier state, confirm user choices, or commit an Architecture Scene. Avoid concurrent writers.
-- Delegation can increase total token usage. Use it to reduce main-context pollution and latency through real parallelism, not simply because subagents are available.
+- Only paper reading/discussion Agents may use a subagent, at most one concurrently and one level deep.
+  Use it only for bounded read-only evidence work; only the main Agent may write canonical state.
+- Daily/background Agents must never spawn subagents, launch another Codex, or enqueue per-paper Agents.
+
+## Author and group cards
+
+During a paper discussion, curate evidence-backed cards with the user through
+`paper author list/get/create/update/delete` and `research-group search/get/create/update/delete`.
+Use `paper assign-group` for the paper's canonical group. Read command `--help` before mutations.
+Author cards are scoped to a paper: preserve author order, distinguish paper-time `affiliation`
+from `current_affiliation`, and include `evidence`. Never merge people by name alone, infer a lab
+from its institution, or assert user verification without explicit user agreement.
 
 ## Daily brief
 
-The `daily_brief` run is the root Agent for the whole daily ingestion workflow. It owns candidate
-discovery, bibliographic verification, ranking, and the catalog summaries/comments written for each
-candidate, using titles, abstracts, and authors only. It verifies the evidence and performs all
-Frontier mutations itself. Daily candidates do not get a long-lived paper Conversation merely
-because they were screened.
+Foreground and background each have one independent root-Agent slot; foreground reading may
+use one child, while background work must never delegate.
+A daily run uses exactly one main Agent, executes serially, and never delegates or queues metadata
+Agents. In this same run, curate first-author and main completing-institution text for selected
+papers: use author order from metadata, `paper metadata-context`, and only when necessary the
+bounded `paper first-page` snippet. Save `first_author`, verified `primary_affiliation`, and
+per-author affiliations/evidence through the CLI. This first-page snippet is the sole exception
+to abstract-only screening; do not read/download complete PDFs. Preserve verified user facts and
+record missing evidence as unknown. Group cards are curated with the user during reading.
 
-The Server trains a daily personal-relevance model, stores a continuous model score and confidence,
-and routes low-confidence papers to the Agent. The daily Agent independently reviews only those
-uncertain papers, writes a continuous Agent relevance score, catalog summaries, comments, and
-recommendation reasons. Human relevance ratings remain five-level. Daily screening does not assess
-paper quality before reading.
-It must not download PDFs, read full texts, preprocess documents, or queue detailed analysis,
-regardless of rank or tier. Preserve existing detailed fields; do not write or clear `Paper.summary`,
-`problem`, `innovation`, `experiment`, `limitations`, `open_questions`, or `full_analysis`.
-Detailed analysis is generated only on the user's explicit request through the manual paper-analysis
-workflow. The daily Agent must never write `completion_summary` or `completion_summary_structured`;
-those belong exclusively to the paper main Agent after explicit reading completion.
+The daily Agent owns discovery, abstract-based screening, bibliography checks, ranking and publication.
+It uses no long-lived paper Conversations and does not download full PDFs or generate full-text
+analysis. Preserve existing `post_read_summary`, explicit user scores, notes and verified metadata.
 
-1. Start with `interest context`. It is the bounded, rebuildable handoff from confirmed paper
-   feedback and includes explicit interest memories, seed interests, the active graph, positive and
-   negative topic evidence, recent user attitude, recommendation attribution, and calibration.
-   Confirmed feedback outranks Agent suggestions and graph structure; interest and quality remain
-   independent axes.
-   When confirmed evidence changed, use `interest profile-update` to refresh the one derived semantic
-   profile with evidence-key citations, then reload `interest context` once before creating the
-   brief. It is a rebuildable cache, not a second owner of paper facts.
-2. Read `setting list`, then run `source arxiv-sync --date YYYY-MM-DD` once using the task's brief
-   date. The cutoff is that date's scheduled daily update time (normally 09:05 Asia/Shanghai), not
-   the wall clock when the Agent reaches discovery. Retries use the same date and discovery batch.
-   The Server trains the current relevance
-   model from human five-level labels, fetches every arXiv update between the durable
-   `lastUpdatedDate` cursor and this fixed brief cutoff, records every fetched item in staging,
-   deduplicates against the whole library, and applies the embodied-intelligence domain gate.
-   There is no raw-scan or prefilter numeric cap, and `totalResults` must equal the verified fetched
-   count for complete coverage. Retry a failed sync unchanged.
-3. Use the sync routing. `paper_ids` contains confident relevant and low-confidence review papers;
-   `agent_review_paper_ids` requires Agent abstract review; `model_filtered_paper_ids` are
-   high-confidence low-relevance papers retained in the library but excluded from today's pool.
-   Only this sync's discovery batch is eligible. Never refill from recent library candidates.
-   Exclude papers already recommended in any published brief or explicitly rated/commented on by
-   the user, even when their reading status is still `candidate`.
-   Do not rescreen every confident candidate or use author prestige to override the model.
-4. Score each Agent-review paper with a continuous `relevance_score` in `[0,1]`, save exactly two
-   decimals, and clear `model_review_required`. Human ratings remain five levels; the five values
-   are only calibration anchors for Agent scores. Save the verified eligible IDs with
-   `task candidate-pool TASK_ID --data @data/tasks/TASK_ID/candidate-pool.json`; there is no 120-item
-   cap. Supply `discovery_complete` from sync and notes for shortages, review exceptions, or failures.
-   Include `discovery_run_id` from the sync's `run_id`; the Server verifies the batch and brief date.
-   Recovery without a run ID may reuse only saved same-date pools, with eligibility rechecked.
-5. Rank by continuous relevance, breaking ties by explicit topic preferences and recency; select
-   20–50 for the final brief within `brief_limit`.
-   Do not generate quality, topic-relevance, or author-influence scores, or blend them into relevance.
-   Leave `research_score` null for abstract-only candidates; preserve genuine full-text analysis and
-   user-confirmed feedback. Quality belongs to post-reading evaluation, not daily ranking.
-   Explain shortages rather than inventing candidates or refilling from already-ingested papers.
-   Existing papers remain in the library for manual reading, but are not rediscovered in the daily batch.
-6. Assess every selected paper from its title, abstract, and authors. Do not read full PDFs or
-   generate detailed analysis, even for the leading papers. `fulltext_limit` does not apply to daily runs.
-7. Record a concise `catalog_summary`, an informative comment, a continuous relevance score, and a
-   recommendation reason. For every final item, extract `model_short_name` and one to four
-   `search_aliases` only when title or abstract gives a stable method/model name; these are
-   paper-level search fields, never topic tags. Never overwrite the user's screening note. Do not
-   infer detailed experimental results or limitations beyond the abstract.
-8. Do not attach daily or candidate papers to the graph. Record probable relevance in paper analysis or recommendation fields until the user completes reading and confirms feedback.
-9. Do not add paper-backed node progress during the daily workflow.
-10. Create one dated brief with the context `source_digest` as `interest_context_digest`, add ranked
-    items, verify the limits, and publish it. The Server freezes the calibration/profile snapshot
-    used for later evaluation. Include the current `task_id` so pool membership is validated.
-    The publish endpoint queues abstract translations independently when configured. End the daily
-    workflow after publication; there is no automatic full-text analysis stage.
-    If the complete window contains no eligible new papers, save an empty pool with explanatory
-    notes and publish an empty dated brief; do not fill it with older or already-rated papers.
-11. Save only durable user preference or reusable workflow lessons as memory.
+1. Read `interest context` and `setting list`. Confirmed scalar user scores and explicit preferences
+   are the evidence for personalization. Refresh a stale derived profile with evidence-key citations
+   through `interest profile-update`, then reload context once.
+2. Run `source arxiv-sync --date YYYY-MM-DD` once for the task date. It fixes the cutoff at that
+   date's configured daily time, trains from explicit user scores, stages every arXiv update since
+   the durable cursor, deduplicates and applies the domain gate. There is no daily numeric scan cap.
+   Retry incomplete coverage unchanged. Recover interrupted runs from saved same-date candidate
+   pools when the task prompt specifies recovery source IDs; recheck current eligibility.
+3. Use only this discovery batch. Independently review `agent_review_paper_ids` using title,
+   abstract and authors; preserve confident model routing. Save a continuous `agent_score` and clear
+   `model_review_required`. Do not copy model predictions into Agent scores. Exclude previously
+   published recommendations and explicitly rated or commented papers. Never refill from old papers.
+4. Save the complete eligible pool with `task candidate-pool`, `paper_ids`, `discovery_complete`,
+   `discovery_run_id` and notes for shortages or failures. Recovery without a discovery run ID may
+   only reuse same-date saved pools.
+5. Rank by `agent_score`, falling back to `model_score`; null is unknown. Select 20–50 papers within
+   `brief_limit`. Verify first-author/main-institution text inline as described above. For final
+   items write a concise `pre_read_summary` Markdown combining overview, grounded highlights and
+   recommendation reason. Do not infer detailed results beyond source evidence. Extract
+   `model_short_name` and `search_aliases` only from explicit metadata evidence.
+6. Do not attach candidate papers to the research graph or create paper-backed graph progress.
+7. Create one dated brief with the current task ID and the context `source_digest` as
+   `interest_context_digest`, add ranked members and publish. Brief membership is fixed at publication;
+   all displayed paper content comes from the current Paper record. Never create content snapshots.
+   The Server may queue independent abstract translation requests; no further Codex job is required.
+   Explain shortages. For an empty complete window, save an empty pool with notes and publish an
+   empty brief. Stop after publication.
+8. Save only durable explicit preferences or reusable workflow lessons as memory.
 
-Do not invent author roles, affiliations, experimental results, or limitations. Use `null`, “未标注”, or a concrete failure when evidence is absent.
+Do not invent roles, affiliations or experimental results. Unknown facts remain null or are described
+as unknown. Group cards are curated during user reading, without separate metadata Agents.
 
 ## Identify a specified paper
 
@@ -115,25 +94,6 @@ When a user or task names a paper, author, arXiv ID, method, or keyword, especia
 5. A unique arXiv ID is already sufficient identification. Do not force a confirmation for a clear exact match or for broad topic discovery; broad discovery may follow the normal candidate workflow.
 
 Never silently choose between ambiguous papers or claim to have compared full texts after reading only search metadata.
-
-## Metadata enrichment at ingestion
-
-This is a separate Agent job from daily scoring and paper reading. It runs for newly ingested
-papers and owns authors, affiliations, corresponding authors, research groups, and group tags.
-
-- Read `paper metadata-context PAPER_ID` first.
-- Search the durable group index in English and Chinese before creating anything:
-  `research-group search "<lab name>"`, institution, acronym, PI, and aliases.
-- If affiliation is ambiguous, read only `paper first-page PAPER_ID --max-chars 2500`; do not
-  fetch or retain the complete PDF. Official lab pages or public source pages may be consulted;
-  record the URL in the evidence note.
-- Reuse an exact lab/institution/PI match. Do not overwrite a user-verified group's identity.
-- Create a new group only when no reliable match exists, with `verification_status: "candidate"`.
-- Bind with `paper assign-group`; the Server makes `Paper.research_group_id` canonical and creates
-  the group tag.
-- Correct only evidence-backed bibliographic fields with `paper update`.
-- Never translate abstracts, write scores, write `Paper.summary`, or modify the research graph.
-- Finish every paper with `paper metadata-complete`, including unresolved group evidence.
 
 ## Computation
 
@@ -148,7 +108,7 @@ When a task identifies one user-added paper and a brief date:
 
 1. Treat it as an unlimited manual recommendation; do not collect or rank unrelated candidates.
 2. Read the complete PDF before judging it, rendering evidence-bearing figures or tables when needed.
-3. Verify bibliographic metadata and save the normal recommendation analysis fields.
+3. Verify bibliographic metadata and save `pre_read_summary`, `post_read_summary`, and a justified `agent_score`.
 4. Save Agent tag proposals as `suggested_tags`; do not replace the user's selected tags.
 5. Do not attach the paper to the graph before user-confirmed reading is `completed`.
 
@@ -196,18 +156,16 @@ When the user explicitly finishes reading, run this workflow on the same active 
 
 Then:
 
-1. Synthesize the PDF, annotations, notes, and conversation.
-2. Produce `completion_summary_structured` with separate `problem`, `innovation`, `experiment`,
-   `limitations`, `open_questions`, and `user_attitude` fields. Cite every material paper claim in
-   the first five fields as `[[page:N]]`; infer user attitude only from the
-   user's own annotations, notes, or conversation.
-3. Suggest one explicit interest level (`ignored`, `low`, `neutral`, `high`, or `interested`), one
-   explicit quality level (`poor`, `below_average`, `normal`, `good`, or `excellent`),
-   tags, and concrete graph-node candidates. Existing-node candidates include the exact node ID;
-   new-node candidates include a distinct core research question and paper-specific relationship
-   reason.
-4. Save suggestions with `paper finish`.
-5. Never confirm feedback, select tags or nodes, or admit a paper to the quality library for the user.
+1. Synthesize verified paper evidence, annotations and discussion into one `post_read_summary`
+   Markdown document, with material paper claims cited as `[[page:N]]`. No fixed section fields are
+   required. Keep private user attitudes in `user_note`, not in public paper summaries.
+2. Suggest an optional scalar `suggested_score` in [0,1], tags, and concrete graph-node candidates.
+   Existing-node candidates include the exact node ID; new ones include a distinct research question
+   and paper-specific relationship reason. Suggestions do not set `user_score`.
+3. Save through `paper finish` using `post_read_summary`, `suggested_score`, `suggested_tags`, and
+   `suggested_nodes`. The paper must already be in reading status.
+4. Let the user confirm their score (including null), tags and graph links. Never confirm on behalf
+   of the user or invent a second rating dimension.
 
 ## Maintain the graph
 

@@ -17,7 +17,6 @@ from .config import PROJECT_ROOT, settings
 from .database import SessionLocal
 from .interactive_stream import (
     _stop_process,
-    evict_idle_codex_app_servers,
     register_codex_run,
     stream_codex_prompt,
     unregister_codex_run,
@@ -187,313 +186,108 @@ def _paper_agent_context_instruction(
 
 
 def build_prompt(task: TaskRun) -> str:
-    payload = task.payload_json
-    ambiguous_paper_action = (
-        "ask the user to confirm the intended paper before importing anything"
-        if task.kind in {"paper_chat", "global_chat", "graph_maintenance"}
-        else "do not import it; report that user confirmation is required"
-    )
-    research_capabilities = (
-        "When the task or user names a paper, author, arXiv ID, method, or keyword, first search "
-        "the local paper library using `uv run frontier paper list --query '<title, author, "
-        "identifier, or keyword>' --limit 20`. Reuse a reliable local match and its cached full "
-        "text or structured resources instead of searching or importing it again. When a specific "
-        "paper is not already available, especially for a comparison, search arXiv without "
-        "importing it using `uv run frontier source "
-        "arxiv-search '<focused title/author query>' --max-results 10 --no-ingest`. If title, "
-        "author, and year do not identify one result reliably, "
-        f"{ambiguous_paper_action}. If there is one reliable match, import and download it "
-        "only when its metadata or full text is needed. Do not impose this confirmation step on "
-        "broad topic discovery or a uniquely identified arXiv ID. "
-        "Use `uv run frontier paper resources PAPER_ID` when exact formula TeX, original figures, "
-        "tables, bibliography entries, or internal citation targets are needed; inspect a returned "
-        "local asset path with the image viewer. "
-        "You may calculate with `uv run python`; NumPy, SciPy, scikit-learn, pandas, and "
-        "opencv-python are installed project dependencies. Put task-specific temporary scripts and "
-        f"artifacts only under `data/tasks/{task.id}/`. Never run `uv add`, install undeclared "
-        "dependencies, modify application data files, or access the database directly. Report the "
-        "calculation inputs, formula or metric definition, sample size, and missing-value handling."
-    )
-    delegation_policy = (
-        "Use Codex subagents selectively for bounded, independent, read-heavy work that would "
-        "otherwise pollute this paper's main context, such as related-paper discovery, parallel "
-        "evidence extraction, or an Architecture Scene evidence review. Keep direct questions and "
-        "small single-source checks in the main Agent. Give each subagent a narrow deliverable and "
-        "require concise structured findings with paper identifiers, page evidence, or a task-local "
-        "artifact path. Subagents may read Frontier state and write only task-scoped artifacts under "
-        f"`data/tasks/{task.id}/`; only the main Agent may run canonical Frontier mutations or commit "
-        "an Architecture Scene. Validate every subagent result before using it. Delegation is an "
-        "optimization for main-context quality, not a default, because it can increase total token use. "
-        "The runtime permits at most one concurrent subagent and one delegation level; never ask a "
-        "subagent to delegate further or attempt to bypass those limits. "
+    payload = task.payload_json or {}
+    reading = task.kind in {
+        "paper_chat",
+        "global_chat",
+        "manual_paper_analysis",
+        "paper_metadata_analysis",
+        "architecture_generation",
+        "finish_reading",
+    }
+    delegation = (
+        "Reading Agents may use at most one concurrent read-only subagent, no nested delegation. "
+        "Only the main Agent may mutate Frontier state. "
+        if reading
+        else "Never spawn subagents, start another Codex process, or queue per-paper Agent tasks. "
     )
     workflow_common = (
-        "Use the project-local `frontier-research` skill. "
-        "Operate application data only through `uv run frontier` CLI commands. "
-        "Never edit the SQLite database or application data files directly. "
-        "When this workflow reads a complete paper for reusable analysis, store only incremental "
-        "deep knowledge in `Paper.full_analysis` (for example schema version, source PDF version, "
-        "claim/evidence items, method components, figure/table index, glossary, and unresolved "
-        "questions). Never copy summary, problem, innovation, experiment, limitations, completion "
-        "summary, tags, or workflow/provenance metadata into `full_analysis`; keep those in their "
-        "existing canonical Paper fields. Do not use `metadata_json` as another knowledge store. "
-        "Write every persisted user-facing Agent-generated prose field in concise Simplified "
-        "Chinese, even when the paper and source material are in English. Keep technical terms, "
-        "formulas, and proper names in their original language when that improves precision. "
-        "For mathematical expressions, use `\\(...\\)` for inline math and `\\[...\\]` for "
-        "display math. Put display delimiters on their own correctly indented Markdown lines; "
-        "do not use dollar-sign math delimiters. "
-        f"The task id is {task.id}. {delegation_policy}{research_capabilities}"
+        "Use the project-local frontier-research skill and `uv run frontier` CLI for application data. "
+        "Never access SQLite or edit Server files directly. "
+        + delegation
+        + "Paper content has exactly two Markdown fields: pre_read_summary (before reading) and "
+        "post_read_summary (after reading). Put all findings, evidence, methods, experiments and "
+        "limitations into those Markdown documents; do not create separate summary fields or JSON copies. "
+        "There is one score dimension, from 0 to 1; null means unknown and 0 is a valid score. "
+        "Agent may write agent_score; model_score belongs to the prediction service; user_score belongs "
+        "only to explicit user input. Never infer user_score from status, suggestions or booleans. "
+        "Write persisted prose in Simplified Chinese; preserve technical names and formulas. "
+        r"Use \( ... \) for inline math and \[ ... \] for display math. Cite paper evidence with [[page:N]]. "
+        "For authors/groups use paper author list/get/create/update/delete, research-group "
+        "search/get/create/update/delete and paper assign-group. Verify paper-time affiliations, "
+        "distinguish current affiliations, and preserve user-confirmed evidence. "
+        f"Temporary artifacts belong only under data/tasks/{task.id}/. "
+        "Search the local library first with frontier paper list --query; ask for confirmation when "
+        "a named paper is ambiguous. Never run uv add or install dependencies. "
     )
     interactive_common = (
-        "You are the Frontier research assistant. Respond directly without announcing a plan, "
-        "reading instruction files, or describing routine tool use. Use `uv run frontier` only when "
-        "application context or a requested mutation requires it; never edit data files directly. "
-        "Use concise Simplified Chinese for the final answer and every public progress or reasoning "
-        "summary. Keep technical terms, formulas, and proper names in their original language when "
-        "that improves precision. "
-        "Format responses with concise Markdown. When formulas materially improve the explanation, "
-        "use `\\(...\\)` for inline math and `\\[...\\]` for display math. Put display delimiters "
-        "on their own correctly indented Markdown lines; do not use dollar-sign math delimiters. "
-        f"The task id is {task.id}. {delegation_policy}{research_capabilities}"
+        workflow_common + "Respond directly to the user's question without routine tool narration. "
     )
-    if task.kind == "paper_metadata_enrichment":
-        paper_ids = [
-            str(value)
-            for value in (payload.get("paper_ids") or [])
-            if isinstance(value, str)
-        ][:10]
-        return f"""{workflow_common}
-
-Process metadata enrichment for these newly ingested papers:
-{json.dumps(paper_ids, ensure_ascii=False)}
-
-For each paper, in order:
-1. Read `frontier paper metadata-context PAPER_ID`.
-2. Inspect the title, abstract, ordered authors, affiliations, source URL, and current group.
-3. Search the existing group index before creating anything. Run several focused queries with
-   `frontier research-group search "<query>" --limit 20` using the English lab name, Chinese
-   translation, institution, acronym, PI name, and any alias found in the abstract or paper page.
-   Search both English and Chinese when either is plausible. Treat an exact institution plus lab
-   or PI match as the same group; do not create a duplicate because of punctuation, abbreviation,
-   or translated naming.
-4. If the affiliation or group identity is still ambiguous, run
-   `frontier paper first-page PAPER_ID --max-chars 2500`. This returns only a short HTML/PDF
-   snippet and does not create a document cache. Use only explicit evidence from the snippet.
-   You may also consult an official lab page or other public source when the local index is
-   ambiguous; record the URL in the evidence note. Never invent a group from a generic institution.
-5. If an existing group is the same lab, reuse it. Do not overwrite a user-verified group's name
-   or institution. You may add a missing alias or research focus with
-   `frontier research-group update GROUP_ID --data @data/tasks/{task.id}/group-update.json`.
-6. If no existing group matches, create exactly one new group with
-   `frontier research-group create --data @data/tasks/{task.id}/group.json`. Use
-   `verification_status: "candidate"`, the explicit lab/group name when available, the institution,
-   and a concise research focus. If only an institution is explicit, create an institution-level
-   group and mark confidence `low`; never invent a lab name.
-7. Bind the paper with `frontier paper assign-group PAPER_ID GROUP_ID`. The server creates the
-   group tag automatically.
-8. Use `frontier paper update PAPER_ID --data @data/tasks/{task.id}/paper.json` only for
-   evidence-backed bibliographic corrections: ordered authors, `first_author`,
-   `primary_affiliation`, and `corresponding_author`. Do not write `summary`, scores,
-   translations, recommendation fields, or long paper analysis.
-9. If the evidence is insufficient, leave the group unbound and record the concrete missing
-   evidence in the final summary; do not guess.
-10. Finish each paper with
-    `frontier paper metadata-complete PAPER_ID --status completed --note "<brief evidence>"`.
-    Use `--status failed` only for a concrete source/tool failure; an unresolved group is still a
-    completed metadata pass with an explanatory note.
-
-Do not translate abstracts. Do not score the paper. Do not write `Paper.summary`. Do not modify
-the research graph. Keep all temporary JSON under `data/tasks/{task.id}/`. Finish with a compact
-JSON summary of papers processed, group matches, groups created, and unresolved papers.
-"""
     if task.kind == "daily_brief":
         run_date = (
             payload.get("date") or datetime.now(ZoneInfo(settings.timezone)).date().isoformat()
         )
         recovery_sources = payload.get("recovery_source_task_ids") or []
-        if recovery_sources and not payload.get("fresh_discovery"):
-            discovery_start = f"""This is recovery of an interrupted or explicitly regenerated daily brief.
-Read `frontier task get SOURCE_TASK_ID` for each of these same-date source tasks:
-{json.dumps(recovery_sources)}.
-Union and deduplicate their saved candidate_pool.paper_ids. Recheck the current paper records;
-retain only status=candidate papers, respecting current user feedback. These are this day's
-previously discovered candidates, not arbitrary old-library refill. Reuse evidence-backed analyses
-already saved, without changing user feedback or reading-completion fields.
-Do NOT run arxiv-discover again in this recovery: library deduplication would hide these papers.
-Use the recovered union as the discovery batch, screen/rank it using the current interests, and
-save the resulting candidate pool under the CURRENT task ID before creating or publishing the brief.
-Keep discovery_complete false if any source pool had incomplete coverage; preserve its scan/prefilter
-limits in the new pool notes. Explain recovery and the number of recovered candidates in the brief.
-The following discovery rules describe normal fresh runs; for this recovery, the saved same-date
-batch replaces external discovery and ingestion. All remaining scoring and publication rules apply."""
-        else:
-            discovery_start = (
-                f"After any required interest-profile refresh, run `frontier source arxiv-sync --date {run_date}` "
-                "exactly once. It advances the durable arXiv cursor only after all pages are fetched. "
-                "Retry a failed sync unchanged; do not replace it with ad-hoc keyword discovery."
-            )
-        return f"""{workflow_common}
-
-Run the daily paper workflow for {run_date}. Start with
-`frontier interest context --recent-limit 30`; this bounded projection is the canonical handoff from
-paper-reading Agents and user-confirmed feedback. It contains explicit interest priors, confirmed
-positive and negative interest, quality judgments, final user-selected tags, private attitude
-summaries, recommendation attribution, and historical calibration. Treat explicit user screening
-feedback and confirmed feedback as strong evidence; Agent scores are weak calibration evidence.
-Keep interest and paper quality as
-independent axes. A neutral judgment is neither positive nor negative interest. An ignored
-recommendation is weak negative-interest evidence, not proof of low
-paper quality. Do not learn from Agent suggestions or unread candidates unless the user explicitly
-supplied screening labels or a screening comment.
-Treat every recommendation without user-confirmed feedback as missing data, regardless of its age,
-rank, or whether reading was started. Never interpret not opening, not reading, or not confirming a
-paper as neutral or negative evidence; exclude those papers from hit-rate and calibration
-denominators. Only `completed` feedback and explicit `ignored` actions are observations in the
-confirmed calibration set; explicit screening feedback is a separate pre-reading evidence stream.
-Only explicit screening feedback, `completed` feedback, and explicit `ignored` actions are observations. Ignore any
-workflow memory that infers preferences from non-response, and never create such a memory.
-For `candidate`, `reading`, or `feedback_pending` papers, canonical `interest_level` and
-`quality_level` are null. Legacy `is_interested=false` and `is_quality=false` values on those papers
-are storage defaults, not user judgments; never use them as ranking or learning evidence.
-If confirmed feedback exists and `layers.semantic_profile` is missing, marked `stale`, or its
-metadata `feedback_digest` differs from the current `feedback_digest`, rebuild that single derived profile with
-`frontier interest profile-update`. Include only durable cross-paper preferences, keep positive and
-negative evidence, and cite the provided `evidence_key` values in each semantic preference. Never
-copy paper summaries into the profile or create additional feedback-profile memories. A 409 means
-evidence changed; reload `interest context` and retry once before ranking. After a successful profile
-update, reload `interest context` once and use that new `source_digest` for brief creation.
-You are the single daily-workflow root Agent responsible for reviewing model-uncertain candidates,
-bibliographic verification, final ranking, and the catalog summaries and comments saved for every
-selected paper. The Server owns cursor discovery, domain gating, model scoring, and confidence
-routing. You must verify evidence that needs review, make the final ranking decision, and perform
-every Frontier mutation yourself. Candidate analysis must not use or create a paper-reading Conversation;
-that long-lived main Agent is reserved for papers the user actively reads and discusses.
-Use an abstract-only workflow: score candidates, write
-`catalog_summary` and comments, create the brief, and publish it so the user can start reading
-immediately. The publish endpoint queues abstract translations independently. Do not wait for
-metadata enrichment or group tags before publication. End the daily workflow after publication;
-do not download PDFs, read full texts, preprocess documents, or queue detailed analysis for any
-daily candidate, regardless of rank, tier, `fulltext_limit`, or `featured_limit`.
-Write only pre-reading catalog fields such as `Paper.catalog_summary` and recommendation analysis.
-Detailed analysis is generated only when the user explicitly requests it through the manual
-paper-analysis workflow. Do not write or clear `Paper.summary`, `problem`, `innovation`, `experiment`,
-`limitations`, `open_questions`, or `Paper.full_analysis` in the daily workflow; preserve any existing
-analysis. Never write `completion_summary` or `completion_summary_structured`; those are
-user-reading conclusions owned exclusively by the paper main Agent after the user finishes reading.
-Use the context's `source_digest` when creating the brief as `interest_context_digest`. Adjust
-discovery and ranking using topic affinities, recent semantic attitude evidence, hit rates, and
-Brier scores for interest. When feedback support is small, avoid overfitting and keep modest
-cross-domain exploration. If interest hit rate is weak, tighten personal relevance. Quality feedback
-belongs to post-reading evaluation; do not predict quality or use quality scores for daily ranking.
-The graph describes research
-questions and accumulated evidence; it is not by itself proof that the user likes a topic.
-Read `frontier setting list`. Discovery is cursor-based and must be served by
-`frontier source arxiv-sync`. The Server trains the current personal-relevance model from all
-available human five-level labels, fetches every arXiv record whose `lastUpdatedDate` falls between
-the committed cursor and the scheduled update time for this brief's date, applies the embodied-intelligence domain gate,
-and scores every promoted paper with a continuous relevance score and confidence. There is no raw
-scan or prefilter numeric cap. Completion means every reported `totalResults` page was fetched and
-deduplicated.
-{discovery_start}
-The sync response binds `paper_ids` to `run_id` and `brief_date`. Use only this discovery batch;
-never query recent library candidates as a substitute. In fresh runs include `discovery_run_id`
-equal to the sync `run_id` when saving the candidate pool. Recovery may reuse only saved same-date
-pools. Already recommended or explicitly rated papers are not eligible.
-The response separates `paper_ids` (confident relevant plus low-confidence review cases),
-`agent_review_paper_ids` (confidence below the model threshold, weak training support, or score near
-the decision boundary), and `model_filtered_paper_ids`. Inspect the Agent review IDs from title,
-abstract and authors and write a continuous `relevance_score` for each. A confident model score is
-already the initial continuous `relevance_score`; do not force scores into five levels and do not
-rescore every confident candidate. After reviewing an Agent-review paper, save the continuous score
-and `model_review_required=false`. Human ratings remain five-level and are owned by the Web user.
-If an Agent-reviewed paper is clearly outside the embodied/perception scope, leave it out of the
-candidate pool and explain the exception. Never override model scores merely from author prestige.
-Use `coverage_complete` from the sync response. Never substitute narrow keyword searches for cursor
-discovery except for individual paper verification. Keep shortlist IDs and progress in task-scoped
-scratch files as needed.
-Save this intermediate pool with `frontier task candidate-pool {task.id} --data @data/tasks/{task.id}/candidate-pool.json`.
-The JSON contains `paper_ids`, `discovery_complete`, and `notes` explaining shortages or incomplete
-coverage. Read `frontier task get {task.id}` to verify persistence. Choose the final brief only from
-this saved pool. Create the brief with `task_id={task.id}` so the Server can validate pool membership.
-Assign a continuous personal-relevance score to model-review candidates, then choose a continuous
-final brief between 20 and 50 papers (never more than the configured brief limit). Store
-`relevance_score` as a continuous value in `[0,1]` with exactly two decimal places. Human five-level
-anchors are 0.00 (不相关), 0.25 (较不相关), 0.50 (一般), 0.75 (较相关), and 1.00 (高度相关);
-Agent scores may interpolate between them. Rank the entire eligible pool by continuous relevance;
-break ties using explicit topic preferences and recency without changing stored scores.
-Do not generate `research_score`, `topic_relevance_score`, or
-`author_influence_score` in this daily workflow. Quality is unknown before reading: leave
-`research_score` null for abstract-only candidates. Never reinterpret an old abstract-based quality
-prediction as a reading judgment. Preserve genuine full-text analysis and user-confirmed feedback.
-Bibliographic metadata, research groups, and group tags
-are owned by the ingestion metadata Agent. Do not repeat affiliation/group extraction or create
-groups in this daily scoring run; use the existing fields and leave missing values blank.
-For every paper that enters the final 20–50, save a concise Simplified-Chinese
-`catalog_summary` (not `Paper.summary`) and a concise, information-dense Agent comment for every
-final brief item; do not put the entire eligible intermediate pool in the brief. The comment must explain what the work does
-and its concrete methodological or empirical highlight, such as the proposed mechanism, benchmark,
-real-robot result, or a reported limitation. Never present an abstract-only comment as a quality
-judgment. Do not repeat the relevance rating in `agent_comment`; it belongs in `relevance_score`.
-For each final item, also derive a concise `model_short_name` when the title or abstract provides a
-stable method/model name, plus one to four short `search_aliases` covering acronym expansions,
-notation variants, or a useful Chinese shorthand. Do not invent a model name, use a generic family
-such as VLA alone as the method name, or turn topical tags into aliases. These are paper-level
-search fields, not tags. Never overwrite the user's `screening_feedback` note.
-Before ranking or adding a paper, inspect its existing record and exclude every paper whose
-status is not `candidate`; papers in `reading`, `feedback_pending`, `completed`, or `ignored` status
-must never appear in the daily recommendations. Screen and score the pool from titles, abstracts,
-and authors only. Every selected paper needs a catalog summary, concise comment, and a continuous relevance score,
-and a recommendation reason; abstract translations are queued by the publish endpoint. Do not publish
-a failure message as a one-paper brief. If there are no eligible papers, save an empty pool with
-coverage and explanatory notes, then publish an empty dated brief explaining that no new eligible
-papers were found; never refill it from older papers. If fewer than 20 eligible papers exist after broad discovery,
-report the shortage explicitly and do not fabricate extra papers. Catalog summaries, Agent comments,
-and recommendation reasons must be written in Simplified Chinese. Do not attach daily
-or candidate papers to research nodes, create paper-backed node progress, or otherwise treat them
-as accumulated evidence: graph connection is allowed only after the user completes reading and
-confirms feedback, so the paper status is `completed`. You may describe probable graph relevance
-in the recommendation fields. Create and publish exactly one brief for the date as soon as ranking,
-catalog summaries, comments, and brief membership are ready. Finish immediately after publication
-with a short JSON-like summary containing brief_id and counts; there is no automatic full-text
-analysis stage.
-"""
-    if task.kind in {"manual_paper_analysis", "paper_metadata_analysis"}:
-        paper_id = payload["paper_id"]
-        destination = (
-            f"as an unlimited manual recommendation for the {payload['date']} brief"
-            if task.kind == "manual_paper_analysis"
-            else "because the user explicitly requested refreshed metadata and analysis"
+        discovery_step = (
+            f"Read source tasks {json.dumps(recovery_sources)}. "
+            "Union and deduplicate their saved candidate_pool.paper_ids; retain only status=candidate papers. "
+            "Recheck current human ratings and prior recommendations. Do NOT run arxiv-discover again "
+            "or rediscover with arxiv-sync. Preserve their discovery_run_id when available."
+            if recovery_sources
+            else f"Run `frontier source arxiv-sync --date {run_date}` once; retry incomplete coverage unchanged. "
+            "Use only this discovery_run_id and its returned candidate IDs."
         )
-        return f"""{workflow_common}
-
-Process paper {paper_id} {destination}. Load its current metadata, download the PDF, and read the complete extracted full text before
-making a recommendation. Use rendered pages when figures, tables, or layout carry material evidence.
-This is a stateless catalog/brief analysis run, not the paper's long-lived reading Agent. Do not
-create or resume a paper Conversation and do not infer the user's attitude from unrelated history.
-Do not stop after writing the summary. Complete the bibliography block in the same run: inspect the
-first PDF/HTML page (including superscript affiliation markers and correspondence footnotes), then
-verify and update the ordered author list, `first_author`, `primary_affiliation`, and
-`corresponding_author`. Also write a concise Simplified-Chinese `research_group_summary` describing
-the first institution and the main completed research focus of its lab or team. arXiv abstract
-metadata is authoritative for author order but usually does not contain affiliations or a reliable
-corresponding-author mapping; never infer a role from author position or seniority. If the source
-does not explicitly support a field, leave it null and state that evidence is unavailable.
-In the same `frontier paper update`, include `metadata_json.research_group_profile` with this
-shape: `name`, `institution`, `homepage_url`, `aliases`, `research_focus`,
-`representative_contributions`, `paper_contribution`, `is_representative`, `confidence`, and
-`evidence`. Keep the profile concise and evidence-backed. `research_focus` is a short list of
-durable directions; `representative_contributions` is a short list of the group's notable completed
-work themes, not invented paper titles. This profile is merged into the shared research-group index
-and must not overwrite a user-verified group.
-Save a concise Simplified-Chinese one-line summary, an information-dense Agent comment describing
-what the work does and its main highlight, problem, innovation,
-experiment evidence, limitations, open_questions, research score, relevance score, recommendation reason, and
-`suggested_tags` with
-`frontier paper update`. Use explicit unavailable/evidence-insufficient wording for fields that cannot
-be established. Do not attach the paper to the graph or add node progress before user-confirmed
-reading is completed. Finish with a short summary of fields updated and any concrete source failure.
+        return (
+            workflow_common
+            + f"""
+Run the whole daily workflow for {run_date} serially in this single background Agent.
+Read frontier interest context and frontier setting list. If the derived profile is stale, update it
+using explicit evidence keys with interest profile-update, then reload interest context once.
+{discovery_step}
+Review agent_review_paper_ids only;
+respect confident model scores and preserve all user feedback. Use titles, abstracts and authors
+for screening. Do not read full texts, download complete PDFs or create paper Conversations.
+For selected papers, verify first_author and primary_affiliation with paper metadata-context and,
+only when needed, a bounded paper first-page snippet. This affiliation snippet is the sole
+exception to abstract-only screening. Unknown affiliation stays null. Do not create groups here.
+Save the complete eligible pool using `frontier task candidate-pool {task.id}` with paper_ids,
+discovery_complete, discovery_run_id and notes. Rank eligible candidate papers by agent_score,
+falling back to model_score; null is unknown, never a zero. Exclude already recommended or human-rated
+papers. For the final 20–50 papers (within brief_limit), save pre_read_summary as concise Markdown
+combining an overview, evidence-backed highlights and the recommendation reason, plus agent_score.
+Preserve existing post_read_summary. Extract model_short_name/search_aliases only from source evidence.
+Create one brief with task_id={task.id}, date and interest_context_digest=source_digest; add the ranked
+papers and publish. Daily pages read current Paper records: never create a paper-content snapshot.
+If fewer papers exist, explain the shortage; if none exist, save an empty complete pool with notes
+and publish an empty brief. Never refill from old library papers. Stop after publication.
 """
+        )
+    if task.kind in {"manual_paper_analysis", "paper_metadata_analysis"}:
+        return (
+            workflow_common
+            + f"""
+Read paper {payload["paper_id"]} fully via frontier paper download/text and relevant rendered pages.
+Write a source-grounded post_read_summary Markdown document and a concise pre_read_summary;
+include page citations, author/affiliation evidence and unknowns. Save agent_score if justified.
+Do not write user_score or confirm feedback. Do not create a paper Conversation for this one-shot task.
+"""
+        )
+    if task.kind == "finish_reading":
+        paper_id = str(payload["paper_id"])
+        sync = _paper_agent_context_instruction(
+            paper_id, payload.get("conversation_id"), payload.get("paper_context_sync_required")
+        )
+        return (
+            workflow_common
+            + f"""
+{sync}
+Consolidate the current discussion and verified paper evidence into one post_read_summary Markdown
+for paper {paper_id}. Do not reread the whole PDF merely to refresh context. Include findings,
+limitations and open questions naturally in Markdown; no fixed form or required section fields.
+Use frontier paper finish with post_read_summary, optional suggested_score, suggested_tags and
+suggested_nodes. Suggestions are not user_score. The user confirms ratings, tags and graph links.
+"""
+        )
     if task.kind == "architecture_generation":
         paper_id = payload["paper_id"]
         work_path = f"data/tasks/{task.id}/scene.architecture.json"
@@ -533,61 +327,6 @@ install or launch a browser automation dependency. Commit the complete file with
 architecture commit`, the checkout revision, and task id {task.id}. Do not modify Server data files
 directly and do not finish without a successful commit. Return one concise Chinese sentence stating
 that the architecture is ready and mentioning any important evidence limitation.
-"""
-    if task.kind == "finish_reading":
-        paper_id = payload["paper_id"]
-        context_instruction = _paper_agent_context_instruction(
-            paper_id,
-            payload.get("conversation_id"),
-            payload.get("paper_context_sync_required"),
-        )
-        return f"""{workflow_common}
-
-Prepare the completion summary for paper {paper_id} as that paper's long-lived main Agent.
-{context_instruction} Synthesize
-the accumulated Codex thread, annotations, notes, and reusable `full_analysis`. Read only missing exact
-PDF pages or structured resources needed to support the final summary; do not reload the complete paper
-when the accumulated evidence is sufficient. Write the complete saved summary in Simplified
-Chinese. Save `completion_summary_structured` with exactly these fields: `problem`, `innovation`,
-`experiment`, `limitations`, `open_questions`, and `user_attitude`. Every material paper
-claim in the first five fields must cite a page as [[page:N]]. Derive `user_attitude` only from the
-user's annotations, notes, and conversation; state that evidence is insufficient instead of
-inventing an attitude. Save suggested tags and the structured summary with `frontier paper finish`.
-Also save `suggested_interest_level` as exactly one of `ignored`, `low`, `neutral`, `high`, or
-`interested`. Save `suggested_quality_level` independently as exactly one of `poor`,
-`below_average`, `normal`, `good`, or `excellent`.
-Read the active research nodes and save concise `suggested_nodes` candidates. Each candidate must
-contain `name`, `core_question`, a paper-specific `reason`, optional `domain`, and `node_id` when it
-matches an existing node exactly. Propose a new node only when its core research question is genuinely
-distinct; never use a merely similar existing node to suppress a justified new candidate.
-Do not confirm interest, quality, tags, or node selection on the user's behalf. Do not send the
-legacy `summary` field when `completion_summary_structured` is available; the Server creates its
-compatibility Markdown.
-After saving, return only one concise Chinese sentence confirming completion. Do not narrate loaded
-context, tool calls, internal reasoning, or intermediate work in the final response.
-"""
-    if task.kind == "translate":
-        text = payload["text"]
-        target = payload.get("target_language", "简体中文")
-        page_context = payload.get("page_context", "")
-        word_mode = len(text.split()) <= 3 and "\n" not in text
-        format_instruction = (
-            "This is a word or short term. Return two concise Markdown lines: `**基础释义**：...` "
-            "for its standard academic meaning and `**上下文释义**：...` for its meaning in the "
-            "selected paper context."
-            if word_mode
-            else "Return only a precise, natural translation."
-        )
-        context_instruction = (
-            f"\nPage context:\n{page_context}" if word_mode and page_context else ""
-        )
-        return f"""Translate the following academic text into {target}. {format_instruction}
-Preserve technical terms and symbols; add the original English term in parentheses only when it
-prevents ambiguity. Do not call tools and do not add unrelated commentary.
-
-Text:
-{text}
-{context_instruction}
 """
     if task.kind in {"paper_chat", "global_chat", "graph_maintenance"}:
         message = payload.get("message", "")
@@ -728,14 +467,6 @@ def _run_abstract_translation_batch_task(task_id: str) -> None:
         task.result_json = {"translated": translated, "failed": len(errors), "errors": errors}
         task.error = "; ".join(errors.values()) if errors else None
         task.finished_at = utcnow()
-        brief_id = (task.payload_json or {}).get("brief_id")
-        brief = session.get(Brief, brief_id) if brief_id else None
-        if brief:
-            brief.snapshot_json = {
-                **(brief.snapshot_json or {}),
-                "abstract_translation_status": "failed" if errors and not translated else "ready",
-                "abstract_translation_errors": errors,
-            }
         session.commit()
 
 
@@ -846,11 +577,25 @@ def _codex_exec_command(
     output_path: str,
     *,
     session_id: str | None = None,
+    task_kind: str | None = None,
 ) -> list[str]:
     command = [settings.codex_command, "--strict-config"]
     if settings.codex_profile:
         command.extend(["--profile", settings.codex_profile])
-    command.extend(codex_subagent_limit_args())
+    command.extend(
+        codex_subagent_limit_args(
+            allow_subagents=task_kind
+            in {
+                None,
+                "paper_chat",
+                "paper_analysis",
+                "manual_paper_analysis",
+                "paper_metadata_analysis",
+                "architecture_generation",
+                "finish_reading",
+            }
+        )
+    )
     if session_id:
         command.extend(["exec", "resume"])
     else:
@@ -881,25 +626,23 @@ def run_task(task_id: str) -> None:
             return
         task_kind = task.kind
         is_translation = bool(
-            task and task.kind in {"translate", "abstract_translation_batch", PAPER_ABSTRACT_TRANSLATION_KIND}
+            task
+            and task.kind
+            in {"translate", "abstract_translation_batch", PAPER_ABSTRACT_TRANSLATION_KIND}
         )
-        is_podcast_render = bool(task and task.kind == "podcast_episode_render")
-        uses_app_server = bool(task and (task.payload_json or {}).get("conversation_id"))
+        uses_app_server = bool(
+            task and task.kind != "daily_brief" and (task.payload_json or {}).get("conversation_id")
+        )
         remaining_seconds = _remaining_task_seconds(task, settings.agent_task_timeout_seconds)
-        if not is_translation and not is_podcast_render and remaining_seconds <= 0:
+        if not is_translation and remaining_seconds <= 0:
             _fail_expired_queued_task(session, task)
             return
-    if is_podcast_render:
-        from .services.podcast_generation import run_podcast_render_task
-
-        run_podcast_render_task(task_id)
-        return
     if is_translation and task and task.kind == "abstract_translation_batch":
         _run_abstract_translation_batch_task(task_id)
         return
-        if is_translation and task and task.kind == PAPER_ABSTRACT_TRANSLATION_KIND:
-            _run_paper_abstract_translation_task(task_id)
-            return
+    if is_translation and task and task.kind == PAPER_ABSTRACT_TRANSLATION_KIND:
+        _run_paper_abstract_translation_task(task_id)
+        return
     if is_translation:
         _run_translation_task(task_id)
         return
@@ -919,7 +662,6 @@ def run_task(task_id: str) -> None:
             deadline=deadline,
             cancelled=no_longer_queued,
         ):
-            evict_idle_codex_app_servers()
             _run_codex_task(
                 task_id,
                 timeout_seconds=max(0.001, deadline - time.monotonic()),
@@ -1239,6 +981,7 @@ def _run_codex_task(task_id: str, *, timeout_seconds: float | None = None) -> No
         command = _codex_exec_command(
             prompt,
             str(output_path),
+            task_kind=task.kind,
             session_id=(
                 conversation.codex_session_id
                 if conversation and conversation.codex_session_id
@@ -1356,9 +1099,7 @@ def _run_codex_task(task_id: str, *, timeout_seconds: float | None = None) -> No
                 final_error = "Agent finished without publishing the required daily brief."
             elif task.kind in {"manual_paper_analysis", "paper_metadata_analysis"}:
                 paper = session.get(Paper, task.payload_json.get("paper_id"))
-                if not paper or not all(
-                    (paper.summary, paper.agent_comment, paper.recommendation_reason)
-                ):
+                if not paper or not all((paper.pre_read_summary,)):
                     final_status = "failed"
                     final_error = (
                         "Agent finished without saving the required paper analysis fields."

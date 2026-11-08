@@ -4,7 +4,7 @@ from datetime import date
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
@@ -20,8 +20,6 @@ from ..models import (
     Annotation,
     DailyReply,
     DailyReview,
-    DailyReviewRevision,
-    DailySelection,
     DailySelectionItem,
     Paper,
     PaperNode,
@@ -30,9 +28,6 @@ from ..models import (
     Tag,
 )
 from ..services.common import RESEARCH_GROUP_SUMMARY_KEY, log_operation, model_dict
-from ..services.completion_summary import (
-    completion_summary_structured,
-)
 from ..services.daily_selections import (
     DailySelectionAppendConflictError,
     append_daily_selection,
@@ -50,8 +45,9 @@ class DailySelectionRequest(BaseModel):
 
 
 class DailyReviewCreate(BaseModel):
-    score: int = Field(ge=1, le=6)
-    confidence: int = Field(ge=1, le=5)
+    model_config = ConfigDict(extra="forbid")
+
+    score: float = Field(ge=0, le=1, strict=True)
     content: str = Field(min_length=1, max_length=12_000)
 
 
@@ -102,18 +98,8 @@ def _public_paper(session: Session, paper: Paper) -> dict:
         "arxiv_id": paper.arxiv_id,
         "published_at": paper.published_at.isoformat() if paper.published_at else None,
         "status": paper.status,
-        "catalog_summary": paper.catalog_summary,
-        "summary": paper.summary,
-        "agent_comment": paper.agent_comment,
-        "problem": paper.problem,
-        "innovation": paper.innovation,
-        "experiment": paper.experiment,
-        "limitations": paper.limitations,
-        "open_questions": (paper.metadata_json or {}).get("open_questions"),
-        "recommendation_reason": paper.recommendation_reason,
-        "completion_summary_structured": completion_summary_structured(
-            paper, include_user_attitude=False
-        ),
+        "pre_read_summary": paper.pre_read_summary,
+        "post_read_summary": paper.post_read_summary,
         "tags": [dict(row._mapping) for row in tags],
         "nodes": [dict(row._mapping) for row in nodes],
     }
@@ -161,19 +147,11 @@ def _serialize_review(session: Session, review: DailyReview, viewer_id: str) -> 
     replies = session.scalars(
         select(DailyReply).where(DailyReply.review_id == review.id).order_by(DailyReply.created_at)
     ).all()
-    initial_score = session.scalar(
-        select(DailyReviewRevision.previous_score)
-        .where(DailyReviewRevision.review_id == review.id)
-        .order_by(DailyReviewRevision.created_at, DailyReviewRevision.id)
-        .limit(1)
-    )
     return {
         "id": review.id,
         "author": anonymous_profile(review.device_id),
         "is_mine": review.device_id == viewer_id,
         "score": review.score,
-        "initial_score": initial_score if initial_score is not None else review.score,
-        "confidence": review.confidence,
         "content": review.content,
         "created_at": model_dict(review)["created_at"],
         "updated_at": model_dict(review)["updated_at"],
@@ -187,12 +165,6 @@ def _public_daily_paper_or_404(session: Session, paper_id: str) -> Paper:
         .where(DailySelectionItem.paper_id == paper_id)
         .limit(1)
     )
-    if not selected:
-        selected = session.scalar(
-            select(DailySelection.selection_date)
-            .where(DailySelection.paper_id == paper_id)
-            .limit(1)
-        )
     paper = session.get(Paper, paper_id)
     if not selected or not paper:
         raise HTTPException(status_code=404, detail="这篇论文不在每日精选中")
@@ -215,7 +187,7 @@ def _discussion(session: Session, paper: Paper, viewer_id: str) -> dict:
         "viewer": anonymous_profile(viewer_id),
         "can_rotate_identity": not has_posted,
         "review_count": len(reviews),
-        "average_score": round(average, 2) if average is not None else None,
+        "average_score": average,
         "reviews": [_serialize_review(session, review, viewer_id) for review in reviews],
     }
 
@@ -304,7 +276,6 @@ def create_review(
         paper_id=paper.id,
         device_id=viewer_id,
         score=payload.score,
-        confidence=payload.confidence,
         content=content,
     )
     session.add(review)
@@ -340,23 +311,9 @@ def update_my_review(
     )
     if not review:
         raise HTTPException(status_code=404, detail="你还没有评审这篇论文")
-    changed = (
-        review.score != payload.score
-        or review.confidence != payload.confidence
-        or review.content != content
-    )
+    changed = review.score != payload.score or review.content != content
     if changed:
-        session.add(
-            DailyReviewRevision(
-                review_id=review.id,
-                previous_score=review.score,
-                score=payload.score,
-                previous_confidence=review.confidence,
-                confidence=payload.confidence,
-            )
-        )
         review.score = payload.score
-        review.confidence = payload.confidence
         review.content = content
         session.commit()
     return _serialize_review(session, review, viewer_id)

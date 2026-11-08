@@ -1,39 +1,26 @@
 import type { BriefItem, Paper } from "../types";
-import { INTEREST_OPTIONS, QUALITY_OPTIONS } from "./paperEvaluation.ts";
 import { matchExcerpt, queryTerms } from "./textMatches.ts";
 
-export type RatingSource = "interest" | "quality" | "agent" | "model";
+export type RatingSource = "user" | "agent" | "model";
 export type PaperOrder = "default" | "rating_desc" | "rating_asc" | "published_desc" | "published_asc" | "title";
-export type RatingQuery = { ratingSource: RatingSource; ratingLevel: string; sort: PaperOrder };
+export type RatingQuery = { ratingSource: RatingSource; scoreMin: string; scoreMax: string; rated: string; sort: PaperOrder };
 
 export const RATING_SOURCES = [
-  { value: "interest", label: "我的相关度" },
-  { value: "agent", label: "Agent 相关度" },
-  { value: "model", label: "模型相关度" },
-  { value: "quality", label: "我的质量评价" },
+  { value: "user", label: "人工评分" }, { value: "agent", label: "Agent 评分" },
+  { value: "model", label: "模型评分" },
 ] as const;
 
-export function ratingOptions(source: RatingSource) {
-  return source === "quality" ? QUALITY_OPTIONS : INTEREST_OPTIONS;
-}
-
 export function paperRating(paper: Paper, source: RatingSource): number | null {
-  if (source === "agent" || source === "model") {
-    const value = source === "agent" ? paper.relevance_score : paper.model_relevance_score;
-    return value == null || !Number.isFinite(value) ? null : value;
-  }
-  const value = source === "quality"
-    ? paper.quality_level ?? paper.screening_quality_level
-    : paper.interest_level ?? paper.screening_interest_level;
-  const index = ratingOptions(source).findIndex((option) => option.value === value);
-  return index < 0 ? null : index / 4;
+  const score = { user: paper.user_score, agent: paper.agent_score, model: paper.model_score }[source];
+  return score == null || !Number.isFinite(score) ? null : score;
 }
 
-export function ratingMatches(paper: Paper, source: RatingSource, level: string): boolean {
-  if (level === "") return true;
-  const score = paperRating(paper, source);
-  if (level === "-1") return score == null;
-  return score != null && Math.round(score * 4) === Number(level);
+export function ratingMatches(paper: Paper, query: RatingQuery): boolean {
+  const score = paperRating(paper, query.ratingSource);
+  if (query.rated === "false") return score == null;
+  if (score == null) return query.rated !== "true" && query.scoreMin === "" && query.scoreMax === "";
+  return (query.scoreMin === "" || score >= Number(query.scoreMin)) &&
+    (query.scoreMax === "" || score <= Number(query.scoreMax));
 }
 
 function compareNullable(a: number | string | null, b: number | string | null, descending: boolean): number {
@@ -43,12 +30,10 @@ function compareNullable(a: number | string | null, b: number | string | null, d
   return descending ? -result : result;
 }
 
-export function briefPaper(item: BriefItem): Paper {
-  return { ...item.paper, status: item.current_status, interest_level: item.interest_level ?? item.paper.interest_level, quality_level: item.quality_level ?? item.paper.quality_level };
-}
+export function briefPaper(item: BriefItem): Paper { return item.paper; }
 
 export function queryBriefItems(items: BriefItem[], query: RatingQuery): BriefItem[] {
-  return items.filter((item) => ratingMatches(briefPaper(item), query.ratingSource, query.ratingLevel)).sort((a, b) => {
+  return items.filter((item) => ratingMatches(briefPaper(item), query)).sort((a, b) => {
     let result = 0;
     if (query.sort.startsWith("rating_")) {
       result = compareNullable(paperRating(briefPaper(a), query.ratingSource), paperRating(briefPaper(b), query.ratingSource), query.sort === "rating_desc");
@@ -65,7 +50,7 @@ export type TextQuery = { q: string; title_q: string; affiliation_q: string; key
 export type LibraryQuery = TextQuery & { published_from: string; published_to: string; scope: string } & RatingQuery;
 export const EMPTY_LIBRARY_QUERY: LibraryQuery = {
   q: "", title_q: "", affiliation_q: "", keyword_q: "", tag_q: "",
-  published_from: "", published_to: "", scope: "all", ratingSource: "interest", ratingLevel: "", sort: "default",
+  published_from: "", published_to: "", scope: "all", ratingSource: "user", scoreMin: "", scoreMax: "", rated: "", sort: "default",
 };
 
 export function libraryQueryParams(query: LibraryQuery, collection: boolean, page: number): URLSearchParams {
@@ -73,11 +58,11 @@ export function libraryQueryParams(query: LibraryQuery, collection: boolean, pag
   for (const key of ["q", "title_q", "affiliation_q", "keyword_q", "tag_q", "published_from", "published_to"] as const) {
     if (query[key].trim()) params.set(key, query[key].trim());
   }
-  if (query.ratingLevel !== "") params.set("rating_level", query.ratingLevel);
+  if (query.scoreMin !== "") params.set("score_min", query.scoreMin);
+  if (query.scoreMax !== "") params.set("score_max", query.scoreMax);
+  if (query.rated !== "") params.set("rated", query.rated);
   if (collection) params.set("library", "true");
-  if (query.scope === "quality") params.set("quality", "true");
-  else if (query.scope === "interested") params.set("interested", "true");
-  else if (query.scope !== "all") params.set("status", query.scope);
+  if (query.scope !== "all") params.set("status", query.scope);
   return params;
 }
 
@@ -86,13 +71,10 @@ export function libraryMatchSnippets(paper: Paper, query: TextQuery): Array<{ la
   const unitTerms = queryTerms(query.q, query.affiliation_q);
   const candidates = [
     { label: "摘要", text: paper.abstract, terms: keywordTerms },
-    { label: "总结", text: paper.summary, terms: keywordTerms },
-    { label: "目录摘要", text: paper.catalog_summary, terms: keywordTerms },
+    { label: "读前简介", text: paper.pre_read_summary, terms: keywordTerms },
     { label: "模型 / 别名", text: [paper.model_short_name, ...(paper.search_aliases || [])].filter(Boolean).join(" · "), terms: keywordTerms },
     { label: "单位 / 课题组", text: [paper.primary_affiliation, paper.research_group?.name, paper.research_group?.institution, ...(paper.research_group?.aliases || [])].filter(Boolean).join(" · "), terms: unitTerms },
-    { label: "简记", text: paper.screening_feedback, terms: queryTerms(query.q) },
-    { label: "Agent 简评", text: paper.agent_comment, terms: keywordTerms },
-    { label: "推荐理由", text: paper.recommendation_reason, terms: keywordTerms },
+    { label: "简记", text: paper.user_note, terms: queryTerms(query.q) },
     { label: "关键词", text: Array.isArray(paper.metadata_json?.keywords) ? paper.metadata_json.keywords.join(" · ") : String(paper.metadata_json?.keywords || ""), terms: keywordTerms },
   ];
   return candidates.flatMap(({ label, text, terms }) => {

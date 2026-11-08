@@ -12,11 +12,10 @@ uv run frontier paper create --data '{"title":"...","source":"manual"}'
 uv run frontier paper add-arxiv 2410.24164
 uv run frontier paper add-url https://example.org/paper
 uv run frontier paper upload /absolute/path/paper.pdf
-uv run frontier paper update PAPER_ID --data '{"summary":"...","research_score":0.9}'
+uv run frontier paper update PAPER_ID --data '{"pre_read_summary":"...","post_read_summary":"...","agent_score":0.731}'
 uv run frontier paper metadata-context PAPER_ID
 uv run frontier paper first-page PAPER_ID --max-chars 2500
 uv run frontier paper assign-group PAPER_ID GROUP_ID
-uv run frontier paper metadata-complete PAPER_ID --status completed --note "explicit affiliation"
 uv run frontier paper download PAPER_ID
 uv run frontier paper text PAPER_ID
 uv run frontier paper text PAPER_ID --page 7
@@ -27,7 +26,8 @@ uv run frontier paper resources PAPER_ID --kind figure --block-id BLOCK_ID
 uv run frontier paper agent-context PAPER_ID
 uv run frontier paper agent-context PAPER_ID --conversation-id CONVERSATION_ID
 uv run frontier paper context PAPER_ID
-uv run frontier paper finish PAPER_ID --data '{"completion_summary_structured":{"problem":"... [[page:1]]","innovation":"... [[page:4]]","experiment":"... [[page:7]]","limitations":"... [[page:12]]","open_questions":"... [[page:12]]","user_attitude":"..."},"suggested_interest_level":"interested","suggested_quality_level":"excellent","suggested_tags":["VLA"],"suggested_nodes":[{"node_id":"EXISTING_NODE_ID","name":"VLA","core_question":"如何让机器人把视觉与语言理解转化为可泛化的动作策略？","reason":"论文为该问题提供新证据"}]}'
+uv run frontier paper finish PAPER_ID --data '{"post_read_summary":"## 结论\n\n... [[page:4]]","suggested_score":0.8,"suggested_tags":["VLA"],"suggested_nodes":[{"node_id":"EXISTING_NODE_ID","name":"VLA","core_question":"如何泛化动作策略？","reason":"论文为该问题提供新证据"}]}'
+uv run frontier paper list --rating-source user --score-min 0.7 --score-max 1 --rated
 ```
 
 `paper list --query` searches the saved library by title, abstract, all authors, primary
@@ -36,11 +36,15 @@ before an external search so an existing paper and its cached full text can be r
 
 Use the task prompt's `paper agent-context --conversation-id` command only when it says synchronization is required. The first/new thread receives `full`, later state changes receive `delta`, and unchanged state skips the command entirely. The stateless form remains available for manual inspection. Both omit PDF text; follow them with targeted `paper text --page`, `paper resources`, or `paper render-page` calls for exact evidence. Use the larger `paper context` only for workflows that genuinely need page-separated full text.
 
-`full_analysis` is the reusable deep-analysis slot. Keep only non-duplicated structures such as claim/evidence items, method components, figure/table indexes, glossary entries, unresolved questions, a schema version, and the source PDF version. Explicit Paper summary fields remain canonical for their respective conclusions; `metadata_json` is not a second paper-knowledge store.
+Paper content has exactly two Markdown fields: `pre_read_summary` and `post_read_summary`.
+Methods, evidence, limitations and conclusions belong inside those documents; do not duplicate them
+in JSON or snapshots. `metadata_json` is provenance and workflow state only. Ratings have one scalar
+dimension and three sources: `user_score`, `agent_score`, `model_score`, all [0,1]. Null is unscored;
+zero is valid. Only explicit user input sets `user_score`; Agent updates write `agent_score` and the
+prediction service owns `model_score`. Private user commentary belongs in `user_note`.
 
-`paper finish` stores the six completion-summary sections structurally. The Server also renders a
-legacy Markdown `completion_summary` for older private clients. `user_attitude` is private and is
-excluded from daily and brief summary payloads.
+`paper finish` updates the single post-reading Markdown document and optional suggestions. It does
+not confirm the user's score or create structured summary fields. Start reading before finishing.
 
 ## Research groups
 
@@ -52,12 +56,12 @@ uv run frontier research-group create --data @data/tasks/TASK_ID/group.json
 uv run frontier research-group update GROUP_ID --data @data/tasks/TASK_ID/group-update.json
 ```
 
-The metadata Agent must search by English name, Chinese name, institution, acronym, PI, and
+During user-guided curation, search by English name, Chinese name, institution, acronym, PI, and
 existing aliases before creating a group. Reuse an exact institution/lab or PI match. Create a
 group only when no reliable match exists; use `verification_status: "candidate"` for a new group.
 `paper assign-group` makes `Paper.research_group_id` canonical and creates the group tag. Use
 `paper first-page` when the affiliation is ambiguous; it returns a short non-persisted snippet.
-The metadata Agent does not translate abstracts, score papers, or write `Paper.summary`.
+Daily first-author and institution checks run inline in the single daily Agent. No separate metadata Agent is started.
 
 Use `paper resources` for the cached structured arXiv HTML representation. It returns formula TeX,
 figure and table captions plus local asset paths, searchable table text, bibliography entries, and
@@ -105,7 +109,7 @@ The next window starts at the previous committed cutoff. Same-date retries reuse
 do not advance the cutoff. Save its `run_id` as `discovery_run_id` in the candidate-pool payload.
 The pool excludes previously published recommendations and explicit user screening feedback.
 
-Daily discovery retrieves category/date pages internally, without narrow interest keywords or ingestion.
+The separate ad-hoc `arxiv-discover` command retrieves category/date pages internally, without narrow interest keywords or ingestion.
 One call scans up to 300 raw metadata records (3 days by default, expanding to 7 days from Monday
 through Wednesday to cover announcement delays), excludes ALL library matches by
 version-independent arXiv ID, normalized DOI or title, removes batch duplicates, and returns at most
@@ -113,7 +117,7 @@ version-independent arXiv ID, normalized DOI or title, removes batch duplicates,
 `next_offset` is null: do not repeatedly fetch more batches. `total_results` is the upstream query size;
 `scan_capped` and `prefilter_capped` expose truncation. Pass `coverage_complete` as discovery_complete.
 `candidate_lookback_days` defines the inclusive UTC submission-date window. Semantic domain screening
-must precede ingestion. Use `abstract_limit` as the post-interest target (default 100, ±20%).
+must precede ingestion. This bounded ad-hoc command is not the daily cursor workflow.
 Save `{"paper_ids":["..."],"discovery_complete":true,"notes":"..."}` as the intermediate pool;
 select the final 20–50 only from that pool. Shortages or incomplete coverage require notes.
 Before saving each final recommendation, recheck first author, first affiliation, and corresponding author
@@ -151,22 +155,8 @@ uv run frontier brief get BRIEF_ID
 uv run frontier brief publish BRIEF_ID
 ```
 
-Published briefs are immutable. `featured` and total item counts are enforced by Server settings.
-
-## Paper narrations and daily podcast
-
-```bash
-uv run frontier narration get PAPER_ID
-uv run frontier podcast get BRIEF_ID
-uv run frontier podcast generate BRIEF_ID
-```
-
-Publishing a brief automatically queues its single-speaker Chinese podcast when
-`FRONTIER_ALIYUN_TTS_API_KEY` is configured. `podcast generate` is the explicit generation and
-retry entry point. The render task first persists one source-grounded narration per paper, then
-combines them into the episode script and Alibaba Cloud audio. Use the low-level `narration commit`,
-`podcast commit`, and `podcast status` commands only for controlled Agent/service workflows; inspect
-their JSON fields with `--help` and the matching `get` command before committing a revision.
+Published brief membership is immutable; the displayed paper content always reads the current Paper.
+Total recommendation count is bounded by `brief_limit`; manual additions are separate.
 
 ## Memory, settings, tasks, and backup
 
@@ -185,8 +175,28 @@ uv run frontier backup
 
 `interest context` is the daily Agent's compact closed-loop input. It derives confirmed positive
 and negative evidence from canonical Paper state, attributes feedback to immutable Brief items when
-possible, and reports hit-rate and score calibration without copying paper facts into Memory.
+possible, and reports continuous score calibration without copying paper facts into Memory.
 `interest profile-update` compare-and-swaps the one derived semantic profile against the context
 `feedback_digest` and rejects stale or unknown evidence references.
 
 Memory kinds are normally `interest_profile` and `agent_experience`. Paper facts belong to paper analysis or graph nodes, not memory.
+
+
+## Author and institution cards
+
+```bash
+uv run frontier paper author list PAPER_ID
+uv run frontier paper author get PAPER_ID AUTHOR_ID
+uv run frontier paper author create PAPER_ID --data '{"name":"Author","affiliation":"Paper institution","evidence":"Paper first page"}'
+uv run frontier paper author update PAPER_ID AUTHOR_ID --data '{"affiliation":"Corrected institution","current_affiliation":"Current institution","evidence":"Verified source"}'
+uv run frontier paper author delete PAPER_ID AUTHOR_ID
+uv run frontier research-group search --q 'Lab'
+uv run frontier research-group create --data '{"name":"Lab","institution":"University"}'
+uv run frontier research-group update GROUP_ID --data '{"institution":"Corrected university"}'
+uv run frontier research-group delete GROUP_ID
+uv run frontier paper assign-group PAPER_ID GROUP_ID
+```
+
+Author cards remain paper-scoped and retain stable IDs. Deleting a group detaches its author,
+paper, and group-tag associations without deleting papers or authors. Automatic per-paper metadata
+Agents are retired; daily first-author/institution curation belongs to the single daily Agent.

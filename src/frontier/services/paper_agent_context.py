@@ -21,8 +21,6 @@ from ..models import (
     Tag,
 )
 from .common import as_json_value
-from .completion_summary import completion_summary_structured
-from .interest_evidence import paper_interest_level, paper_quality_level
 from .paper_conversations import find_paper_conversation
 from .paper_sources import paper_source_version
 
@@ -43,17 +41,12 @@ _PAPER_FACT_FIELDS = (
     "published_at",
     "status",
     "ignored_reason",
-    "summary",
-    "agent_comment",
-    "problem",
-    "innovation",
-    "experiment",
-    "limitations",
-    "research_score",
-    "relevance_score",
-    "recommendation_reason",
-    "is_interested",
-    "is_quality",
+    "user_score",
+    "user_note",
+    "agent_score",
+    "model_score",
+    "pre_read_summary",
+    "post_read_summary",
     "reading_completed_at",
     "pending_feedback",
 )
@@ -68,8 +61,6 @@ _SYNC_SCHEMA_VERSION = 1
 # durable paper-state delta.
 _SYNC_SECTION_KEYS = (
     "paper",
-    "full_analysis",
-    "completion_summary_structured",
     "metadata",
     "tags",
     "nodes",
@@ -86,9 +77,6 @@ def _pdf_version(paper: Paper) -> str | None:
 def _paper_facts(paper: Paper) -> dict[str, Any]:
     return {
         **{field: as_json_value(getattr(paper, field)) for field in _PAPER_FACT_FIELDS},
-        "interest_level": paper_interest_level(paper),
-        "quality_level": paper_quality_level(paper),
-        "open_questions": (paper.metadata_json or {}).get("open_questions"),
     }
 
 
@@ -364,19 +352,13 @@ def _raw_paper_agent_context(
         "schema_version": 1,
         "request_context": {"query": normalized_query},
         "paper": _paper_facts(paper),
-        "full_analysis": paper.full_analysis or {},
-        "completion_summary_structured": completion_summary_structured(
-            paper, include_user_attitude=True
-        ),
         "metadata": _curated_metadata(paper),
         "tags": [dict(row._mapping) for row in tags],
         "nodes": [dict(row._mapping) for row in nodes],
         "annotations": _annotations(session, paper.id),
         "reading_progress": _reading_progress(session, paper.id),
         "conversation": (
-            _conversation_summary(session, paper.id)
-            if include_recent_messages
-            else None
+            _conversation_summary(session, paper.id) if include_recent_messages else None
         ),
         "architecture": _architecture_summary(session, paper.id, current_pdf_version=pdf_version),
         "document": {
@@ -391,17 +373,6 @@ def _raw_paper_agent_context(
 def _bounded_context(context: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
     result = dict(context)
     limits: dict[str, Any] = {}
-
-    analysis = context.get("full_analysis") or {}
-    analysis_size = _json_chars(analysis)
-    if analysis_size > _FULL_ANALYSIS_CHAR_BUDGET:
-        result["full_analysis"] = _compact_json(analysis, _FULL_ANALYSIS_CHAR_BUDGET)
-        limits["full_analysis"] = {
-            "truncated": True,
-            "original_chars": analysis_size,
-            "delivered_chars": _json_chars(result["full_analysis"]),
-            "hint": "Use exact paper pages or structured resources for omitted detail.",
-        }
 
     annotations = context.get("annotations") or []
     compact_annotations = [_compact_annotation(item) for item in annotations]

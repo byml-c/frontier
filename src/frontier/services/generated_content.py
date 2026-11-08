@@ -5,34 +5,7 @@ from collections.abc import Iterable, Mapping
 from typing import Any
 
 PAPER_ANALYSIS_PROSE_FIELDS = frozenset(
-    {
-        "catalog_summary",
-        "summary",
-        "agent_comment",
-        "problem",
-        "innovation",
-        "experiment",
-        "limitations",
-        "open_questions",
-        "recommendation_reason",
-        "completion_summary",
-        "research_group_summary",
-    }
-)
-
-COMPLETION_SUMMARY_PROSE_FIELDS = frozenset(
-    {
-        "problem",
-        "innovation",
-        "experiment",
-        "limitations",
-        "open_questions",
-        "user_attitude",
-        # Accepted only as compatibility input while old queued tasks drain.
-        "research_question",
-        "evidence_and_contribution",
-        "experiments",
-    }
+    {"pre_read_summary", "post_read_summary", "research_group_summary"}
 )
 
 _CJK_CHARACTER = re.compile(r"[\u3400-\u4dbf\u4e00-\u9fff]")
@@ -55,13 +28,3 @@ def non_chinese_prose_fields(
         if isinstance(value, str) and value.strip() and not _CJK_CHARACTER.search(value):
             invalid.append(field)
     return sorted(invalid)
-
-
-def non_chinese_structured_summary_fields(payload: Mapping[str, Any]) -> list[str]:
-    summary = payload.get("completion_summary_structured")
-    if not isinstance(summary, Mapping):
-        return []
-    return [
-        f"completion_summary_structured.{field}"
-        for field in non_chinese_prose_fields(summary, fields=COMPLETION_SUMMARY_PROSE_FIELDS)
-    ]

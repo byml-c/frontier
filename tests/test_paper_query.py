@@ -40,9 +40,9 @@ def query_db(client):
             model_short_name="ForceVLA",
             search_aliases=["触觉策略"],
             published_at=date(2026, 10, 20),
-            relevance_score=0.91,
-            model_relevance_score=0.6,
-            screening_feedback={"interest_level": "high"},
+            user_score=0.75,
+            agent_score=0.91,
+            model_score=0.6,
         )
         b = Paper(
             title="World Representation",
@@ -50,13 +50,14 @@ def query_db(client):
             primary_affiliation="MIT",
             published_at=date(2026, 10, 21),
             status="completed",
-            relevance_score=0.125,
-            model_relevance_score=0.9,
+            user_score=0.9,
+            agent_score=0.125,
+            model_score=0.9,
             metadata_json={
                 "feedback_provenance": {
                     "active": True,
-                    "interest_level": "high",
-                    "quality_level": "excellent",
+                    "interest_score": "high",
+                    "quality_score": "excellent",
                 }
             },
         )
@@ -65,9 +66,9 @@ def query_db(client):
             title="100% robot_under control",
             normalized_title="100 robot under control",
             published_at=date(2026, 10, 22),
-            relevance_score=0.0,
-            model_relevance_score=0.0,
-            screening_feedback={"interest_level": "ignored"},
+            user_score=0.0,
+            agent_score=0.0,
+            model_score=0.0,
         )
         tags = [Tag(name="WAM"), Tag(name="机器人"), Tag(name="Perception")]
         session.add_all([a, b, c, d, *tags])
@@ -103,8 +104,9 @@ def test_library_combines_date_rating_title_affiliation_keyword_and_tag(client, 
             "affiliation_q": "清华",
             "keyword_q": "触觉策略",
             "tag_q": "WAM 机器人",
-            "rating_source": "interest",
-            "rating_level": 3,
+            "rating_source": "user",
+            "score_min": 0.7,
+            "score_max": 0.8,
         },
     )
     assert _ids(response) == [a.id]
@@ -136,26 +138,31 @@ def test_dates_are_inclusive_and_invalid_ranges_are_rejected(client, query_db):
     )
 
 
-def test_rating_sources_buckets_and_nulls_are_independent(client, query_db):
+def test_rating_sources_and_nulls_are_independent(client, query_db):
     _, (a, b, c, d) = query_db
-    assert set(
-        _ids(client.get("/api/papers", params={"rating_source": "interest", "rating_level": 3}))
-    ) == {a.id, b.id}
-    assert _ids(
-        client.get("/api/papers", params={"rating_source": "quality", "rating_level": 4})
-    ) == [b.id]
-    assert _ids(
-        client.get("/api/papers", params={"rating_source": "agent", "rating_level": 1})
-    ) == [b.id]
-    assert _ids(
-        client.get("/api/papers", params={"rating_source": "agent", "rating_level": 0})
-    ) == [d.id]
-    assert _ids(
-        client.get("/api/papers", params={"rating_source": "model", "rating_level": 4})
-    ) == [b.id]
-    assert _ids(
-        client.get("/api/papers", params={"rating_source": "interest", "rating_level": -1})
-    ) == [c.id]
+    for source, minimum, maximum, expected in [
+        ("user", 0.7, 0.8, [a.id]),
+        ("agent", 0.1, 0.2, [b.id]),
+        ("agent", 0, 0, [d.id]),
+        ("model", 0.8, 1, [b.id]),
+    ]:
+        assert (
+            _ids(
+                client.get(
+                    "/api/papers",
+                    params={
+                        "rating_source": source,
+                        "score_min": minimum,
+                        "score_max": maximum,
+                    },
+                )
+            )
+            == expected
+        )
+    assert _ids(client.get("/api/papers", params={"rating_source": "user", "rated": False})) == [
+        c.id
+    ]
+    assert client.get("/api/papers", params={"rating_source": "quality"}).status_code == 422
 
 
 def test_sorting_happens_before_pagination_with_missing_ratings_last(client, query_db):
@@ -182,16 +189,19 @@ def test_text_fields_treat_sql_wildcards_as_literal_characters(client, query_db)
     assert _ids(client.get("/api/papers", params={"title_q": "robot_under"})) == [d.id]
 
 
-def test_inactive_feedback_uses_the_same_legacy_fallback_as_paper_payload(client, query_db):
+def test_only_explicit_current_score_is_exposed(client, query_db):
     session, (_, b, *_rest) = query_db
-    b.metadata_json = {"feedback_provenance": {"active": False, "quality_level": "excellent"}}
+    b.user_score = None
+    b.metadata_json = {"feedback_provenance": {"active": True, "quality_score": "excellent"}}
     session.commit()
-    response = client.get("/api/papers", params={"rating_source": "quality", "rating_level": 2})
-    assert _ids(response) == [b.id]
-    assert response.json()["items"][0]["quality_level"] == "normal"
+    response = client.get("/api/papers", params={"rating_source": "user", "rated": False})
+    assert b.id in _ids(response)
+    paper = next(p for p in response.json()["items"] if p["id"] == b.id)
+    assert paper["user_score"] is None
+    assert "quality_score" not in paper
 
 
-def test_library_cli_forwards_multidimensional_query(monkeypatch):
+def test_library_cli_forwards_continuous_score_query(monkeypatch):
     captured = {}
 
     def request(method, path, **kwargs):
@@ -207,11 +217,15 @@ def test_library_cli_forwards_multidimensional_query(monkeypatch):
         published_from="2026-10-01",
         published_to="2026-10-28",
         rating_source="agent",
-        rating_level=4,
+        score_min=0.4,
+        score_max=0.9,
+        rated=True,
         sort="rating_desc",
         offset=50,
     )
     assert captured["params"]["title_q"] == "world"
     assert captured["params"]["affiliation_q"] == "清华"
-    assert captured["params"]["rating_level"] == 4
+    assert captured["params"]["score_min"] == 0.4
+    assert captured["params"]["score_max"] == 0.9
+    assert captured["params"]["rated"] is True
     assert captured["params"]["offset"] == 50

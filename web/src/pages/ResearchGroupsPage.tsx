@@ -82,7 +82,7 @@ export function ResearchGroupsPage() {
       ) : !groups.data?.length ? (
         <Empty
           title="还没有课题组档案"
-          body="入库 Agent 会搜索已有组，确认或创建课题组后自动沉淀到这里。"
+          body="在论文讨论中核实课题组与单位，调用 CLI 保存后会显示在这里。"
         />
       ) : (
         <Grid container spacing={2.5}>

@@ -1,3 +1,4 @@
+import { userScoreLabel } from "../components/score";
 import AddRounded from "@mui/icons-material/AddRounded";
 import CloudUploadRounded from "@mui/icons-material/CloudUploadRounded";
 import EditNoteRounded from "@mui/icons-material/EditNoteRounded";
@@ -46,7 +47,7 @@ import { Empty, ErrorState, Loading } from "../components/States";
 import { ExpandablePaperText } from "../components/ExpandablePaperText";
 import { HighlightText } from "../components/HighlightText";
 import { RatingQueryControls } from "../components/RatingQueryControls";
-import { EMPTY_LIBRARY_QUERY, RATING_SOURCES, libraryMatchSnippets, libraryQueryParams, paperRating, ratingOptions, type LibraryQuery } from "../components/paperQuery";
+import { EMPTY_LIBRARY_QUERY, RATING_SOURCES, libraryMatchSnippets, libraryQueryParams, paperRating, type LibraryQuery } from "../components/paperQuery";
 import { queryTerms } from "../components/textMatches";
 import ExpandMoreRounded from "@mui/icons-material/ExpandMoreRounded";
 import type { DailyPayload, Paper, Tag } from "../types";
@@ -158,8 +159,6 @@ export function LibraryPage() {
                   <MenuItem value="completed" key="completed">已精读</MenuItem>,
                   <MenuItem value="ignored" key="ignored">已忽略</MenuItem>,
                 ] : [
-                  <MenuItem value="quality" key="quality">优质论文</MenuItem>,
-                  <MenuItem value="interested" key="interested">感兴趣</MenuItem>,
                 ]}
               </Select>
             </FormControl>
@@ -173,7 +172,6 @@ export function LibraryPage() {
           <Stack direction={{ xs: "column", md: "row" }} spacing={1.5} sx={{ mt: 2 }}>
             <RatingQueryControls value={filters} onChange={updateFilters} defaultSortLabel="阅读状态优先" />
           </Stack>
-          {(filters.ratingSource === "agent" || filters.ratingSource === "model") && <Typography variant="caption" color="text.secondary" sx={{ display: "block", mt: 1 }}>连续相关度按五档范围筛选，排序使用原始分数。</Typography>}
           <Accordion disableGutters elevation={0} sx={{ mt: 1.5, "&:before": { display: "none" } }}>
             <AccordionSummary expandIcon={<ExpandMoreRounded />} sx={{ px: 0 }}><Typography variant="body2">标题、单位、关键词、标签匹配{[filters.title_q, filters.affiliation_q, filters.keyword_q, filters.tag_q].filter(Boolean).length ? ` · ${[filters.title_q, filters.affiliation_q, filters.keyword_q, filters.tag_q].filter(Boolean).length} 项条件` : ""}</Typography></AccordionSummary>
             <AccordionDetails sx={{ px: 0 }}>
@@ -185,7 +183,6 @@ export function LibraryPage() {
                   renderInput={(params) => <TextField {...params} size="small" label="标签包含" />}
                   renderOption={(props, option) => { const { key, ...rest } = props; return <li key={key} {...rest} aria-label={option}><HighlightText text={option} terms={queryTerms(filters.tag_q)} /></li>; }} />
               </Box>
-              <Typography variant="caption" color="text.secondary" sx={{ display: "block", mt: 1 }}>不同条件同时满足；这四项文本可用空格分隔多个词，匹配处会高亮。</Typography>
             </AccordionDetails>
           </Accordion>
           <Button size="small" onClick={() => updateFilters({ ...EMPTY_LIBRARY_QUERY })}>清除查询条件</Button>
@@ -285,7 +282,7 @@ function PaperCard({
   const unitTerms = queryTerms(query.q, query.affiliation_q);
   const snippets = libraryMatchSnippets(paper, query);
   const score = paperRating(paper, query.ratingSource);
-  const scoreLabel = score == null ? "未评分" : ratingOptions(query.ratingSource)[Math.round(score * 4)]?.label || "未评分";
+  const scoreLabel = query.ratingSource === "user" ? userScoreLabel(score) : score == null ? "未评分" : String(score);
   function openFromCard(event: MouseEvent<HTMLElement> | KeyboardEvent<HTMLElement>) {
     const target = event.target as Element;
     if (target.closest("button, a, input, textarea, select, [role=button]")) return;
@@ -371,7 +368,7 @@ function PaperCard({
         </Typography>
         <Box sx={{ mt: 1 }}>
           <ExpandablePaperText lines={3}>
-            {paper.summary || paper.catalog_summary || paper.abstract || "摘要与分析信息待补充。"}
+            {paper.pre_read_summary || paper.abstract || "摘要与分析信息待补充。"}
           </ExpandablePaperText>
         </Box>
         {!!snippets.length && <Stack spacing={.5} sx={{ mt: 1.5, p: 1.25, borderRadius: 1, bgcolor: "action.hover" }}>

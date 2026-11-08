@@ -1,103 +1,11 @@
 from __future__ import annotations
 
-from datetime import UTC, date, datetime
+from datetime import date
 
 from frontier.api import briefs as briefs_api
 from frontier.config import settings
 from frontier.database import SessionLocal
-from frontier.models import Brief, BriefItem, Paper, PodcastEpisode, TaskRun
-from frontier.services.podcast_content import episode_payload
-
-
-def test_void_and_regenerate_completed_daily_brief_keeps_audit_and_voids_audio(
-    client, monkeypatch
-) -> None:
-    target_date = date(2041, 2, 3)
-    with SessionLocal() as session:
-        paper = Paper(
-            title="Published daily paper",
-            normalized_title="published daily paper",
-            source="manual",
-        )
-        task = TaskRun(
-            kind="daily_brief",
-            status="completed",
-            payload_json={"date": target_date.isoformat()},
-        )
-        interrupted = TaskRun(
-            kind="daily_brief",
-            status="failed",
-            payload_json={
-                "date": target_date.isoformat(),
-                "candidate_pool": {"paper_ids": ["earlier-candidate"]},
-            },
-        )
-        session.add_all([paper, task, interrupted])
-        session.flush()
-        task.payload_json = {
-            **task.payload_json,
-            "candidate_pool": {"paper_ids": [paper.id]},
-        }
-        interrupted_id = interrupted.id
-        brief = Brief(
-            brief_date=target_date,
-            title="Published daily brief",
-            status="published",
-            published_at=datetime.now(UTC),
-            task_id=task.id,
-            snapshot_json={"paper_ids": [paper.id]},
-        )
-        session.add(brief)
-        session.flush()
-        session.add(
-            BriefItem(brief_id=brief.id, paper_id=paper.id, rank=1, tier="featured")
-        )
-        episode = PodcastEpisode(
-            brief_id=brief.id,
-            language="zh-CN",
-            status="ready",
-            source_digest="sha256:old",
-            audio_path="podcasts/old.wav",
-            published_at=datetime.now(UTC),
-        )
-        session.add(episode)
-        session.commit()
-        brief_id = brief.id
-        old_task_id = task.id
-        episode_id = episode.id
-
-    monkeypatch.setattr(settings, "enable_codex_runs", True)
-    submitted: list[str] = []
-    monkeypatch.setattr(briefs_api, "submit_task", submitted.append)
-
-    response = client.post(f"/api/briefs/{brief_id}/void-and-regenerate")
-
-    assert response.status_code == 200
-    payload = response.json()
-    assert payload["brief_id"] == brief_id
-    assert payload["status"] == "queued"
-    assert payload["id"] != old_task_id
-    assert submitted == [payload["id"]]
-
-    with SessionLocal() as session:
-        brief = session.get(Brief, brief_id)
-        assert brief is not None
-        assert brief.status == "draft"
-        assert brief.task_id == payload["id"]
-        assert brief.published_at is None
-        assert not session.query(BriefItem).filter_by(brief_id=brief_id).count()
-        episode = session.get(PodcastEpisode, episode_id)
-        assert episode is not None
-        assert episode.status == "voided"
-        assert episode.audio_path is None
-        assert episode_payload(session, brief_id)["audio_url"] is None
-        replacement = session.get(TaskRun, payload["id"])
-        assert replacement is not None and replacement.kind == "daily_brief"
-        assert replacement.payload_json["date"] == target_date.isoformat()
-        assert set(replacement.payload_json["recovery_source_task_ids"]) == {
-            old_task_id,
-            interrupted_id,
-        }
+from frontier.models import Brief, BriefItem, Paper, TaskRun
 
 
 def test_fresh_daily_run_recovers_same_date_interrupted_pools(client, monkeypatch) -> None:
@@ -161,10 +69,8 @@ def test_recover_failed_draft_rebuilds_ranking_and_preserves_papers_and_manual_i
             title="Scored candidate",
             normalized_title="scored candidate",
             source="manual",
-            catalog_summary="已有摘要级总结",
-            research_score=0.8,
-            relevance_score=0.9,
-            screening_feedback={"comment": "用户已有筛选意见"},
+            pre_read_summary="已有摘要级总结",
+            agent_score=0.9,
         )
         manual = Paper(title="Manual addition", normalized_title="manual addition", source="manual")
         session.add_all([paper, manual])
@@ -185,14 +91,16 @@ def test_recover_failed_draft_rebuilds_ranking_and_preserves_papers_and_manual_i
             status="draft",
             task_id=task.id,
             introduction="Old introduction",
-            snapshot_json={"interest_context_digest_used": "old-digest"},
+            interest_context_digest="old-digest",
         )
         session.add(brief)
         session.flush()
-        session.add_all([
-            BriefItem(brief_id=brief.id, paper_id=paper.id, rank=1, tier="featured"),
-            BriefItem(brief_id=brief.id, paper_id=manual.id, rank=2, tier="manual"),
-        ])
+        session.add_all(
+            [
+                BriefItem(brief_id=brief.id, paper_id=paper.id, rank=1, tier="featured"),
+                BriefItem(brief_id=brief.id, paper_id=manual.id, rank=2, tier="manual"),
+            ]
+        )
         session.commit()
         brief_id, paper_id, manual_id, old_task_id = brief.id, paper.id, manual.id, task.id
 
@@ -206,23 +114,21 @@ def test_recover_failed_draft_rebuilds_ranking_and_preserves_papers_and_manual_i
     with SessionLocal() as session:
         brief = session.get(Brief, brief_id)
         assert brief.task_id == task_id
-        assert brief.snapshot_json == {}
+        assert brief.interest_context_digest is None
         assert brief.introduction is None
         items = list(session.scalars(select(BriefItem).where(BriefItem.brief_id == brief_id)))
         assert [(item.paper_id, item.tier) for item in items] == [(manual_id, "manual")]
         paper = session.get(Paper, paper_id)
-        assert paper.catalog_summary == "已有摘要级总结"
-        assert paper.research_score == 0.8
-        assert paper.screening_feedback == {"comment": "用户已有筛选意见"}
+        assert paper.pre_read_summary == "已有摘要级总结"
         task = session.get(TaskRun, task_id)
         assert task.payload_json["recovery_source_task_ids"] == [old_task_id]
-        audit = session.scalar(select(OperationLog).where(
-            OperationLog.action == "brief.failed_publication_recovered",
-            OperationLog.entity_id == brief_id,
-        ))
-        assert audit.detail_json["previous_publication"]["snapshot_json"][
-            "interest_context_digest_used"
-        ] == "old-digest"
+        audit = session.scalar(
+            select(OperationLog).where(
+                OperationLog.action == "brief.failed_publication_recovered",
+                OperationLog.entity_id == brief_id,
+            )
+        )
+        assert audit.detail_json["previous_publication"]["interest_context_digest"] == "old-digest"
 
     repeated = client.post(f"/api/briefs/{brief_id}/recover-failed")
     assert repeated.status_code == 409

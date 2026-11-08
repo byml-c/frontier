@@ -20,12 +20,23 @@ logger = logging.getLogger(__name__)
 
 _CGROUP_CONTROLLERS = ("cpu", "io", "memory", "pids")
 _CGROUP_PERIOD_US = 100_000
-_ROOT_AGENT_SLOTS = threading.BoundedSemaphore(
-    settings.general_agent_max_concurrent_runs
-)
-_METADATA_AGENT_SLOTS = threading.BoundedSemaphore(
-    settings.metadata_agent_max_concurrent_runs
-)
+_ROOT_AGENT_SLOTS = threading.BoundedSemaphore(1)
+_BACKGROUND_AGENT_SLOTS = threading.BoundedSemaphore(1)
+_FOREGROUND_KINDS = {
+    "paper_chat",
+    "global_chat",
+    "paper_analysis",
+    "manual_paper_analysis",
+    "paper_metadata_analysis",
+    "architecture_generation",
+    "finish_reading",
+}
+
+
+def is_foreground_task(task_kind: str | None) -> bool:
+    return task_kind is None or task_kind in _FOREGROUND_KINDS
+
+
 _LAYOUT_LOCK = threading.Lock()
 _LAYOUT: _CgroupLayout | None = None
 _INITIALIZATION_ATTEMPTED = False
@@ -51,22 +62,17 @@ class _CgroupLayout:
     agents: Path
 
 
-def codex_subagent_limit_args() -> list[str]:
+def codex_subagent_limit_args(*, allow_subagents: bool = True) -> list[str]:
     """Return invocation-level limits that profiles cannot accidentally relax."""
-    if settings.codex_max_concurrent_subagents == 0:
-        concurrency = ["-c", "agents.enabled=false"]
-    else:
-        concurrency = [
-            "-c",
-            (
-                "agents.max_concurrent_threads_per_session="
-                f"{settings.codex_max_concurrent_subagents}"
-            ),
-        ]
+    if not allow_subagents or settings.codex_max_concurrent_subagents == 0:
+        return ["-c", "agents.enabled=false", "-c", "agents.max_depth=0"]
     return [
-        *concurrency,
         "-c",
-        f"agents.max_depth={settings.codex_subagent_max_depth}",
+        "agents.enabled=true",
+        "-c",
+        "agents.max_concurrent_threads_per_session=1",
+        "-c",
+        "agents.max_depth=1",
         "-c",
         f"agents.job_max_runtime_seconds={settings.codex_subagent_job_timeout_seconds}",
     ]
@@ -79,17 +85,13 @@ def root_agent_slot(
     deadline: float | None = None,
     cancelled: Callable[[], bool] | None = None,
 ) -> Iterator[None]:
-    """Acquire one global root-Agent slot with cancellation and deadline checks.
+    """Acquire one of the independent foreground/background root-Agent slots with cancellation and deadline checks.
 
     Ownership is deliberately not thread-local. Starlette may advance and close a
     synchronous streaming iterator on different worker threads, while a suspended
     worker thread may run unrelated requests.
     """
-    slots = (
-        _METADATA_AGENT_SLOTS
-        if task_kind == "paper_metadata_enrichment"
-        else _ROOT_AGENT_SLOTS
-    )
+    slots = _ROOT_AGENT_SLOTS if is_foreground_task(task_kind) else _BACKGROUND_AGENT_SLOTS
     if deadline is None and cancelled is None:
         slots.acquire()
     else:
@@ -253,9 +255,7 @@ def _data_device_ids() -> tuple[str, ...]:
     sysfs_device = Path("/sys/dev/block") / filesystem_device
     try:
         if (sysfs_device / "partition").exists():
-            parent_dev = (sysfs_device.resolve().parent / "dev").read_text(
-                encoding="utf-8"
-            ).strip()
+            parent_dev = (sysfs_device.resolve().parent / "dev").read_text(encoding="utf-8").strip()
             if re.fullmatch(r"\d+:\d+", parent_dev) and parent_dev not in candidates:
                 candidates.append(parent_dev)
     except OSError:

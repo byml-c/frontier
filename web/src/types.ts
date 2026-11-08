@@ -7,8 +7,6 @@ export type NodeRef = {
 
 export type Tag = { id: string; name: string; color?: string | null };
 
-export type InterestLevel = "ignored" | "low" | "neutral" | "high" | "interested";
-export type QualityLevel = "poor" | "below_average" | "normal" | "good" | "excellent";
 
 export type SuggestedNode = {
   node_id?: string | null;
@@ -33,78 +31,24 @@ export type NewConfirmedNode = {
   is_key?: boolean;
 };
 
-export type CompletionSummaryStructured = {
-  problem?: string | null;
-  innovation?: string | null;
-  experiment?: string | null;
-  limitations?: string | null;
-  open_questions?: string | null;
-  user_attitude?: string | null;
-};
-
 export type Paper = {
-  id: string;
-  title: string;
-  abstract?: string | null;
-  authors?: Array<{ name: string }>;
-  first_author?: string | null;
-  corresponding_author?: string | null;
-  primary_affiliation?: string | null;
-  research_group_id?: string | null;
-  research_group_summary?: string | null;
-  research_group?: ResearchGroup | null;
-  source: string;
-  source_url?: string | null;
-  pdf_url?: string | null;
-  pdf_source_url?: string | null;
-  html_source_url?: string | null;
-  doi?: string | null;
-  published_at?: string | null;
-  created_at?: string | null;
-  status: string;
-  catalog_summary?: string | null;
-  model_short_name?: string | null;
-  search_aliases?: string[];
-  summary?: string | null;
-  agent_comment?: string | null;
-  problem?: string | null;
-  innovation?: string | null;
-  experiment?: string | null;
-  limitations?: string | null;
-  open_questions?: string | null;
-  research_score?: number | null;
-  relevance_score?: number | null;
-  model_relevance_score?: number | null;
-  model_relevance_confidence?: number | null;
-  model_version?: string | null;
-  model_review_required?: boolean;
-  topic_relevance_score?: number | null;
-  author_influence_score?: number | null;
-  recommendation_reason?: string | null;
-  is_interested: boolean;
-  interest_level?: InterestLevel | null;
-  quality_level?: QualityLevel | null;
-  screening_interest_level?: InterestLevel | null;
-  screening_quality_level?: QualityLevel | null;
-  screening_feedback?: string | null;
-  agent_score_confirmed?: boolean;
-  agent_quality_confirmed?: boolean;
-  agent_interest_confirmed?: boolean;
-  abstract_translation?: string | null;
-  abstract_translation_status?: "ready" | "queued" | "failed" | "missing" | string | null;
-  abstract_translation_error?: string | null;
-  is_quality: boolean;
-  completion_summary?: string | null;
-  completion_summary_structured?: CompletionSummaryStructured | null;
-  pending_feedback?: Record<string, unknown>;
-  metadata_json?: Record<string, unknown>;
-  analysis_status?: "queued" | "processing" | "completed" | "failed" | null;
-  analysis_error?: string | null;
-  suggested_tags?: string[];
-  tags: Tag[];
-  nodes: NodeRef[];
-  has_pdf?: boolean;
-  pdf_version?: string | null;
+  id: string; title: string; abstract?: string | null;
+  authors?: Array<{ id?: string; name: string; affiliation?: string | null }>;
+  first_author?: string | null; corresponding_author?: string | null;
+  primary_affiliation?: string | null; research_group_id?: string | null;
+  research_group?: ResearchGroup | null; research_group_summary?: string | null;
+  source: string; source_url?: string | null; pdf_url?: string | null;
+  pdf_source_url?: string | null; html_source_url?: string | null;
+  arxiv_id?: string | null; arxiv_version?: number | null; doi?: string | null;
+  created_at?: string; published_at?: string | null; status: string; ignored_reason?: string | null;
+  pre_read_summary?: string | null; post_read_summary?: string | null;
+  user_score?: number | null; agent_score?: number | null; model_score?: number | null;
+  model_confidence?: number | null; model_version?: string | null; model_review_required?: boolean;
+  user_note?: string | null; model_short_name?: string | null; search_aliases?: string[];
+  pending_feedback?: { suggested_score?: number | null; suggested_tags?: string[]; suggested_nodes?: SuggestedNode[] };
+  metadata_json?: Record<string, unknown>; analysis_status?: string | null; analysis_error?: string | null;
+  abstract_translation?: string | null; abstract_translation_status?: string; abstract_translation_error?: string | null;
+  suggested_tags?: string[]; tags: Tag[]; nodes: NodeRef[]; has_pdf?: boolean; pdf_version?: string | null;
 };
 
 export type ResearchGroup = {
@@ -125,17 +69,8 @@ export type ResearchGroup = {
   evidence?: Record<string, unknown>;
 };
 
-export type BriefItem = {
-  id: string;
-  rank: number;
-  tier: "featured" | "related" | "manual";
-  paper: Paper;
-  current_status: string;
-  is_interested: boolean;
-  interest_level?: InterestLevel | null;
-  quality_level?: QualityLevel | null;
-  is_quality: boolean;
-};
+export type BriefItem = { id: string; rank: number; tier: "featured" | "related" | "manual";
+  paper: Paper };
 
 export type Brief = {
   id: string;
@@ -146,26 +81,6 @@ export type Brief = {
   published_at?: string | null;
   item_count?: number;
   items: BriefItem[];
-};
-
-export type PodcastStatus = "missing" | "queued" | "generating" | "processing" | "rendering" | "ready" | "failed";
-
-export type PodcastEpisode = {
-  id: string | null;
-  brief_id: string;
-  status: PodcastStatus | string;
-  title?: string | null;
-  script_text?: string | null;
-  audio_url?: string | null;
-  duration_ms?: number | null;
-  error?: string | null;
-  revision: number;
-};
-
-export type PodcastGenerationResult = {
-  id?: string;
-  task_id?: string;
-  status?: string;
 };
 
 export type ResearchNode = {
@@ -182,7 +97,7 @@ export type ResearchNode = {
   paper_count: number;
   parents?: NodeRef[];
   children?: NodeRef[];
-  papers?: Array<Pick<Paper, "id" | "title" | "first_author" | "published_at" | "status" | "is_quality"> & { reason?: string; is_key?: boolean }>;
+  papers?: Array<Pick<Paper, "id" | "title" | "first_author" | "published_at" | "status" | "user_score"> & { reason?: string; is_key?: boolean }>;
   progress?: Array<{ id: string; title: string; content: string; happened_at?: string; created_at: string }>;
   ideas?: Array<{ id: string; content: string; status: string; note?: string; created_at: string }>;
 };
@@ -230,7 +145,8 @@ export type PublicDailyPaper = {
   status: string;
   tags: Tag[];
   nodes: Array<Pick<NodeRef, "id" | "name">>;
-  completion_summary_structured?: Omit<CompletionSummaryStructured, "user_attitude"> | null;
+  pre_read_summary?: string | null;
+  post_read_summary?: string | null;
 };
 export type DailySelection = {
   date: string;
@@ -258,8 +174,6 @@ export type DailyReview = {
   author: AnonymousProfile;
   is_mine: boolean;
   score: number;
-  initial_score: number;
-  confidence: number;
   content: string;
   created_at: string;
   updated_at: string;

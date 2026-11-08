@@ -4,7 +4,7 @@ import re
 from contextlib import asynccontextmanager
 
 import uvicorn
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.responses import FileResponse, JSONResponse
@@ -18,8 +18,8 @@ from .api import (
     daily,
     graph,
     interests,
+    paper_authors,
     papers,
-    podcasts,
     research_groups,
     system,
 )
@@ -37,11 +37,8 @@ from .services.agent_runtime import initialize_agent_resource_manager
 from .services.architecture_scene import cleanup_stale_architecture_locks
 from .services.author_metadata import queue_cached_arxiv_author_metadata_backfill
 from .services.common import ensure_default_settings
-from .services.completion_summary import migrate_legacy_completion_summaries
-from .services.daily_selections import migrate_legacy_daily_selections
 from .services.document_reader import shutdown_document_worker
 from .services.document_runtime import reset_document_runtime
-from .services.paper_metadata import start_metadata_coordinator, stop_metadata_coordinator
 from .services.research_groups import migrate_research_group_links
 from .services.storage_migration import run_storage_migration
 from .services.task_dispatcher import start_task_dispatcher, stop_task_dispatcher
@@ -56,14 +53,10 @@ async def lifespan(_app: FastAPI):
     with SessionLocal() as session:
         ensure_default_settings(session)
         cleanup_stale_architecture_locks(session)
-        migrate_legacy_completion_summaries(session)
-        migrate_legacy_daily_selections(session)
         migrate_research_group_links(session)
         session.commit()
         if settings.storage_migration_mode != "off":
-            run_storage_migration(
-                session, dry_run=settings.storage_migration_mode == "dry-run"
-            )
+            run_storage_migration(session, dry_run=settings.storage_migration_mode == "dry-run")
             session.commit()
         recover_interrupted_tasks(session, started_before=startup_cutoff)
     reset_document_runtime()
@@ -73,13 +66,11 @@ async def lifespan(_app: FastAPI):
     if settings.enable_codex_runs:
         start_codex_app_server_pool()
     start_task_dispatcher()
-    start_metadata_coordinator()
     start_scheduler()
     try:
         yield
     finally:
         stop_scheduler()
-        stop_metadata_coordinator()
         stop_task_dispatcher(wait=False)
         cancel_all_codex_runs()
         stop_codex_app_server_pool()
@@ -121,9 +112,9 @@ async def protect_private_api(request: Request, call_next):  # type: ignore[no-u
             and bool(re.fullmatch(r"/api/daily/reviews/[0-9a-f-]+/replies", path))
         )
     )
-    protected_service_path = path == "/api" or path.startswith("/api/") or path in {
-        "/docs", "/redoc", "/openapi.json"
-    }
+    protected_service_path = (
+        path == "/api" or path.startswith("/api/") or path in {"/docs", "/redoc", "/openapi.json"}
+    )
     if (
         protected_service_path
         and not public_api
@@ -150,8 +141,8 @@ app.include_router(papers.tags_router)
 app.include_router(architectures.router)
 app.include_router(graph.router)
 app.include_router(briefs.router)
-app.include_router(podcasts.router)
 app.include_router(research_groups.router)
+app.include_router(paper_authors.router)
 app.include_router(interests.router)
 app.include_router(conversations.router)
 
@@ -168,6 +159,8 @@ if settings.web_dist_dir.exists():
 
     @app.get("/{path:path}", include_in_schema=False)
     def spa(path: str) -> FileResponse:
+        if path.startswith("api/"):
+            raise HTTPException(status_code=404, detail="API route not found")
         candidate = settings.web_dist_dir / path
         if candidate.is_file() and settings.web_dist_dir in candidate.resolve().parents:
             return FileResponse(candidate)

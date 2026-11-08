@@ -6,7 +6,7 @@ from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from ..models import DailySelection, DailySelectionItem
+from ..models import DailySelectionItem
 
 MAX_APPEND_ATTEMPTS = 5
 
@@ -88,27 +88,3 @@ def append_daily_selection(
         f"Could not append a daily selection for {selection_date} after "
         f"{MAX_APPEND_ATTEMPTS} attempts"
     )
-
-
-def migrate_legacy_daily_selections(session: Session) -> int:
-    """Copy the one-paper-per-day legacy rows into the multi-paper table.
-
-    The legacy table remains untouched so upgrades are reversible and no previously
-    published selection can be lost. Existing new-table rows win; a missing legacy
-    paper is appended after them.
-    """
-
-    migrated = 0
-    legacy_selections = session.scalars(
-        select(DailySelection).order_by(DailySelection.selection_date)
-    ).all()
-    for legacy in legacy_selections:
-        _, created = append_daily_selection(
-            session,
-            selection_date=legacy.selection_date,
-            paper_id=legacy.paper_id,
-        )
-        migrated += int(created)
-    if migrated:
-        session.commit()
-    return migrated

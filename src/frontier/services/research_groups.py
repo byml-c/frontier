@@ -9,7 +9,6 @@ from sqlalchemy.orm import Session
 
 from ..models import Paper, PaperTag, ResearchGroup, ResearchGroupPaper, Tag
 from .common import RESEARCH_GROUP_PROFILE_KEY, normalize_title
-from .paper_metadata import METADATA_ENRICHMENT_KEY
 
 
 def _clean(value: Any) -> str | None:
@@ -33,9 +32,7 @@ def ensure_group_tag(session: Session, group: ResearchGroup) -> Tag:
     if tag is not None:
         return tag
     if tag is None:
-        tag = session.scalar(
-            select(Tag).where(func.lower(Tag.name) == display_name.lower())
-        )
+        tag = session.scalar(select(Tag).where(func.lower(Tag.name) == display_name.lower()))
         if tag is not None and tag.research_group_id not in {None, group.id}:
             tag = None
             display_name = f"{group.name.strip()}（{group.institution.strip()}）"
@@ -75,19 +72,7 @@ def assign_research_group(
     if paper.research_group_id and paper.research_group_id != group.id:
         _remove_group_tag_from_paper(session, paper.id, paper.research_group_id)
     paper.research_group_id = group.id
-    state = (paper.metadata_json or {}).get(METADATA_ENRICHMENT_KEY)
-    if isinstance(state, dict) and state.get("status") in {"queued", "running"}:
-        paper.metadata_json = {
-            **(paper.metadata_json or {}),
-            METADATA_ENRICHMENT_KEY: {
-                **state,
-                "status": "completed",
-                "updated_at": datetime.now(UTC).isoformat(),
-            },
-        }
-    session.query(ResearchGroupPaper).filter(
-        ResearchGroupPaper.paper_id == paper.id
-    ).delete()
+    session.query(ResearchGroupPaper).filter(ResearchGroupPaper.paper_id == paper.id).delete()
     session.add(
         ResearchGroupPaper(
             group_id=group.id,
@@ -119,9 +104,7 @@ def clear_research_group(session: Session, paper: Paper) -> None:
         for key, value in (paper.metadata_json or {}).items()
         if key != RESEARCH_GROUP_PROFILE_KEY
     }
-    session.query(ResearchGroupPaper).filter(
-        ResearchGroupPaper.paper_id == paper.id
-    ).delete()
+    session.query(ResearchGroupPaper).filter(ResearchGroupPaper.paper_id == paper.id).delete()
 
 
 def upsert_group_from_paper(session: Session, paper: Paper) -> ResearchGroup | None:
@@ -171,14 +154,21 @@ def upsert_group_from_paper(session: Session, paper: Paper) -> ResearchGroup | N
     group.aliases = sorted({*(group.aliases or []), *aliases}, key=str.casefold)
     focus = [str(item).strip() for item in profile.get("research_focus", []) if str(item).strip()]
     group.research_focus = sorted({*(group.research_focus or []), *focus}, key=str.casefold)
-    contributions = [item for item in profile.get("representative_contributions", []) if isinstance(item, dict)]
-    existing_contributions = [item for item in (group.representative_contributions or []) if isinstance(item, dict)]
+    contributions = [
+        item for item in profile.get("representative_contributions", []) if isinstance(item, dict)
+    ]
+    existing_contributions = [
+        item for item in (group.representative_contributions or []) if isinstance(item, dict)
+    ]
     seen_contributions = {
         (str(item.get("topic") or "").strip(), str(item.get("summary") or "").strip())
         for item in existing_contributions
     }
     for contribution in contributions:
-        key = (str(contribution.get("topic") or "").strip(), str(contribution.get("summary") or "").strip())
+        key = (
+            str(contribution.get("topic") or "").strip(),
+            str(contribution.get("summary") or "").strip(),
+        )
         if key not in seen_contributions and any(key):
             existing_contributions.append(
                 {
@@ -212,14 +202,16 @@ def upsert_group_from_paper(session: Session, paper: Paper) -> ResearchGroup | N
         paper,
         group,
         contribution_summary=_clean(profile.get("paper_contribution"))
-        or _clean(paper.agent_comment),
+        or _clean(paper.pre_read_summary),
         evidence={"source": "agent", "note": _clean(profile.get("evidence"))},
         is_representative=bool(profile.get("is_representative")),
     )
     return group
 
 
-def serialize_group(session: Session, group: ResearchGroup, *, detail: bool = False) -> dict[str, Any]:
+def serialize_group(
+    session: Session, group: ResearchGroup, *, detail: bool = False
+) -> dict[str, Any]:
     papers = list(
         session.scalars(
             select(Paper)
@@ -228,9 +220,7 @@ def serialize_group(session: Session, group: ResearchGroup, *, detail: bool = Fa
         )
     )
     links = list(
-        session.scalars(
-            select(ResearchGroupPaper).where(ResearchGroupPaper.group_id == group.id)
-        )
+        session.scalars(select(ResearchGroupPaper).where(ResearchGroupPaper.group_id == group.id))
     )
     if not papers:
         # Legacy rows from before Paper.research_group_id became canonical.
@@ -245,9 +235,7 @@ def serialize_group(session: Session, group: ResearchGroup, *, detail: bool = Fa
             )
         )
         papers = list(
-            session.scalars(
-                select(Paper).where(Paper.id.in_([link.paper_id for link in links]))
-            )
+            session.scalars(select(Paper).where(Paper.id.in_([link.paper_id for link in links])))
         )
     links_by_paper = {link.paper_id: link for link in links}
     payload = {

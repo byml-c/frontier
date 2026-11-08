@@ -34,7 +34,6 @@ def _training_papers() -> list[Paper]:
                 abstract="Embodied visuomotor policy with tactile feedback.",
                 authors=[{"name": "Alice"}],
                 status="candidate",
-                screening_feedback={"interest_level": "interested"},
                 metadata_json={"categories": ["cs.RO"], "primary_category": "cs.RO"},
             )
         )
@@ -46,7 +45,6 @@ def _training_papers() -> list[Paper]:
                 abstract="Relational query planning and storage.",
                 authors=[{"name": "Bob"}],
                 status="candidate",
-                screening_feedback={"interest_level": "ignored"},
                 metadata_json={"categories": ["cs.DB"], "primary_category": "cs.DB"},
             )
         )
@@ -99,7 +97,6 @@ def test_cursor_sync_fetches_all_pages_and_commits_after_success(monkeypatch) ->
                 },
             ),
         )
-        monkeypatch.setattr(arxiv_sync, "queue_metadata_enrichment", lambda *_args, **_kwargs: None)
         result = arxiv_sync.sync_arxiv(
             session,
             now=datetime(2026, 10, 23, 3, 0, tzinfo=UTC),
@@ -258,7 +255,7 @@ def _mock_batch(monkeypatch, payloads):
     monkeypatch.setattr(arxiv_sync, "train_daily_ranker", lambda *a, **k: (ranker, model, {}))
 
     def score(_ranker, paper):
-        paper.model_relevance_score = 0.8
+        paper.model_score = 0.8
         paper.model_review_required = False
         return SimpleNamespace(score=0.8, confidence=0.9, review_required=False, support=0.9)
 
@@ -268,7 +265,6 @@ def _mock_batch(monkeypatch, payloads):
 
     monkeypatch.setattr(arxiv_sync, "score_paper", score)
     monkeypatch.setattr(arxiv_sync, "_fetch_oai_records", fetch)
-    monkeypatch.setattr(arxiv_sync, "queue_metadata_enrichment", lambda *a, **k: None)
     return calls
 
 
@@ -291,7 +287,7 @@ def test_brief_date_fixes_cutoff_and_limits_candidates_to_its_source_batch(monke
             title="Old candidate",
             normalized_title="old candidate",
             discovered_at=datetime(2026, 10, 26, 2, tzinfo=UTC),
-            model_relevance_score=0.95,
+            model_score=0.95,
             model_review_required=False,
         )
         session.add(old)
@@ -330,7 +326,7 @@ def test_same_brief_retry_reuses_batch_and_does_not_fetch_or_repeat_rated_papers
         assert replay["cursor"] == result["cursor"]
         assert len(calls) == 1
         paper = session.get(Paper, result["paper_ids"][0])
-        paper.screening_feedback = {"interest_level": "neutral"}
+        paper.user_score = 0.5
         session.commit()
         after_rating = arxiv_sync.sync_arxiv(
             session,
@@ -371,7 +367,8 @@ def test_partial_ingestion_recovers_only_the_same_window_staging(monkeypatch):
             session.commit()
             raise RuntimeError("interrupted after staging was committed")
 
-        monkeypatch.setattr(arxiv_sync, "queue_metadata_enrichment", interrupted)
+        original_routing = arxiv_sync._batch_candidate_routing
+        monkeypatch.setattr(arxiv_sync, "_batch_candidate_routing", interrupted)
         with pytest.raises(RuntimeError, match="interrupted"):
             arxiv_sync.sync_arxiv(
                 session,
@@ -379,7 +376,7 @@ def test_partial_ingestion_recovers_only_the_same_window_staging(monkeypatch):
                 now=datetime(2026, 10, 27, 2, tzinfo=UTC),
             )
         assert session.get(DiscoveryCursor, arxiv_sync.SYNC_CURSOR_ID).committed_through is None
-        monkeypatch.setattr(arxiv_sync, "queue_metadata_enrichment", lambda *a, **k: None)
+        monkeypatch.setattr(arxiv_sync, "_batch_candidate_routing", original_routing)
         recovered = arxiv_sync.sync_arxiv(
             session,
             through_date=date(2026, 10, 27),

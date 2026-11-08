@@ -7,6 +7,7 @@ from typing import Any
 from sqlalchemy import (
     JSON,
     Boolean,
+    CheckConstraint,
     Date,
     DateTime,
     Float,
@@ -38,6 +39,12 @@ class TimestampMixin:
 
 class Paper(Base, TimestampMixin):
     __tablename__ = "papers"
+    __table_args__ = tuple(
+        CheckConstraint(
+            f"{field} IS NULL OR ({field} >= 0 AND {field} <= 1)", name=f"ck_papers_{field}"
+        )
+        for field in ("user_score", "agent_score", "model_score", "model_confidence")
+    )
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
     title: Mapped[str] = mapped_column(Text, index=True)
@@ -62,32 +69,20 @@ class Paper(Base, TimestampMixin):
     last_considered_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     status: Mapped[str] = mapped_column(String(32), default="candidate", index=True)
     ignored_reason: Mapped[str | None] = mapped_column(Text)
-    catalog_summary: Mapped[str | None] = mapped_column(Text)
+    pre_read_summary: Mapped[str | None] = mapped_column(Text)
     model_short_name: Mapped[str | None] = mapped_column(String(255), index=True)
     search_aliases: Mapped[list[str]] = mapped_column(JSON, default=list)
-    summary: Mapped[str | None] = mapped_column(Text)
-    agent_comment: Mapped[str | None] = mapped_column(Text)
-    problem: Mapped[str | None] = mapped_column(Text)
-    innovation: Mapped[str | None] = mapped_column(Text)
-    experiment: Mapped[str | None] = mapped_column(Text)
-    limitations: Mapped[str | None] = mapped_column(Text)
-    full_analysis: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
-    research_score: Mapped[float | None] = mapped_column(Float)
-    relevance_score: Mapped[float | None] = mapped_column(Float)
-    model_relevance_score: Mapped[float | None] = mapped_column(Float)
-    model_relevance_confidence: Mapped[float | None] = mapped_column(Float)
     model_version: Mapped[str | None] = mapped_column(String(80), index=True)
     model_review_required: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
-    topic_relevance_score: Mapped[float | None] = mapped_column(Float)
-    author_influence_score: Mapped[float | None] = mapped_column(Float)
-    recommendation_reason: Mapped[str | None] = mapped_column(Text)
-    is_interested: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
-    is_quality: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
     reading_completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
-    completion_summary: Mapped[str | None] = mapped_column(Text)
     pending_feedback: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
-    screening_feedback: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
     metadata_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    post_read_summary: Mapped[str | None] = mapped_column(Text)
+    user_score: Mapped[float | None] = mapped_column(Float)
+    agent_score: Mapped[float | None] = mapped_column(Float)
+    model_score: Mapped[float | None] = mapped_column(Float)
+    model_confidence: Mapped[float | None] = mapped_column(Float)
+    user_note: Mapped[str | None] = mapped_column(Text)
 
 
 class ResearchGroup(Base, TimestampMixin):
@@ -112,12 +107,12 @@ class ResearchGroup(Base, TimestampMixin):
 
 class ResearchGroupPaper(Base, TimestampMixin):
     __tablename__ = "research_group_papers"
-    __table_args__ = (
-        UniqueConstraint("group_id", "paper_id", name="uq_research_group_paper"),
-    )
+    __table_args__ = (UniqueConstraint("group_id", "paper_id", name="uq_research_group_paper"),)
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
-    group_id: Mapped[str] = mapped_column(ForeignKey("research_groups.id", ondelete="CASCADE"), index=True)
+    group_id: Mapped[str] = mapped_column(
+        ForeignKey("research_groups.id", ondelete="CASCADE"), index=True
+    )
     paper_id: Mapped[str] = mapped_column(ForeignKey("papers.id", ondelete="CASCADE"), index=True)
     role: Mapped[str] = mapped_column(String(40), default="author_affiliation")
     contribution_summary: Mapped[str | None] = mapped_column(Text)
@@ -164,9 +159,7 @@ class ArchitectureAsset(Base, TimestampMixin):
     )
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
-    paper_id: Mapped[str] = mapped_column(
-        ForeignKey("papers.id", ondelete="CASCADE"), index=True
-    )
+    paper_id: Mapped[str] = mapped_column(ForeignKey("papers.id", ondelete="CASCADE"), index=True)
     content_hash: Mapped[str] = mapped_column(String(64), index=True)
     original_name: Mapped[str] = mapped_column(String(255))
     stored_name: Mapped[str] = mapped_column(String(128))
@@ -255,7 +248,7 @@ class Brief(Base, TimestampMixin):
     status: Mapped[str] = mapped_column(String(32), default="draft", index=True)
     published_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     task_id: Mapped[str | None] = mapped_column(String(36), index=True)
-    snapshot_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    interest_context_digest: Mapped[str | None] = mapped_column(String(80))
 
 
 class BriefItem(Base, TimestampMixin):
@@ -267,74 +260,6 @@ class BriefItem(Base, TimestampMixin):
     paper_id: Mapped[str] = mapped_column(ForeignKey("papers.id", ondelete="CASCADE"), index=True)
     rank: Mapped[int] = mapped_column(Integer)
     tier: Mapped[str] = mapped_column(String(32), default="related", index=True)
-    snapshot_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
-
-
-class PaperNarration(Base, TimestampMixin):
-    """Versioned, language-specific spoken script for one paper."""
-
-    __tablename__ = "paper_narrations"
-    __table_args__ = (
-        UniqueConstraint("paper_id", "language", name="uq_paper_narration_language"),
-    )
-
-    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
-    paper_id: Mapped[str] = mapped_column(
-        ForeignKey("papers.id", ondelete="CASCADE"), index=True
-    )
-    language: Mapped[str] = mapped_column(String(35), default="zh-CN")
-    status: Mapped[str] = mapped_column(String(32), default="draft", index=True)
-    revision: Mapped[int] = mapped_column(Integer, default=1)
-    script_markdown: Mapped[str | None] = mapped_column(Text)
-    speech_text: Mapped[str | None] = mapped_column(Text)
-    sections_json: Mapped[list[dict[str, Any]]] = mapped_column(JSON, default=list)
-    citations_json: Mapped[list[dict[str, Any]]] = mapped_column(JSON, default=list)
-    pronunciations_json: Mapped[list[dict[str, Any]]] = mapped_column(JSON, default=list)
-    source_digest: Mapped[str] = mapped_column(String(80), index=True)
-    source_pdf_version: Mapped[str | None] = mapped_column(String(128))
-    content_hash: Mapped[str | None] = mapped_column(String(80), index=True)
-    generation_task_id: Mapped[str | None] = mapped_column(String(36), index=True)
-    error: Mapped[str | None] = mapped_column(Text)
-
-
-class PodcastEpisode(Base, TimestampMixin):
-    """Versioned daily podcast script and its rendered audio metadata."""
-
-    __tablename__ = "podcast_episodes"
-    __table_args__ = (UniqueConstraint("brief_id", name="uq_podcast_episode_brief"),)
-
-    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
-    brief_id: Mapped[str] = mapped_column(
-        ForeignKey("briefs.id", ondelete="CASCADE"), index=True
-    )
-    language: Mapped[str] = mapped_column(String(35), default="zh-CN")
-    status: Mapped[str] = mapped_column(String(32), default="draft", index=True)
-    revision: Mapped[int] = mapped_column(Integer, default=1)
-    title: Mapped[str | None] = mapped_column(String(255))
-    script_text: Mapped[str | None] = mapped_column(Text)
-    speech_text: Mapped[str | None] = mapped_column(Text)
-    manifest_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
-    source_digest: Mapped[str] = mapped_column(String(80), index=True)
-    content_hash: Mapped[str | None] = mapped_column(String(80), index=True)
-    provider: Mapped[str | None] = mapped_column(String(50))
-    model: Mapped[str | None] = mapped_column(String(100))
-    voice: Mapped[str | None] = mapped_column(String(100))
-    audio_path: Mapped[str | None] = mapped_column(Text)
-    audio_content_hash: Mapped[str | None] = mapped_column(String(80), index=True)
-    duration_ms: Mapped[int | None] = mapped_column(Integer)
-    size_bytes: Mapped[int | None] = mapped_column(Integer)
-    generation_task_id: Mapped[str | None] = mapped_column(String(36), index=True)
-    published_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
-    error: Mapped[str | None] = mapped_column(Text)
-
-
-class DailySelection(Base, TimestampMixin):
-    __tablename__ = "daily_selections"
-
-    selection_date: Mapped[date] = mapped_column(Date, primary_key=True)
-    paper_id: Mapped[str] = mapped_column(
-        ForeignKey("papers.id", ondelete="CASCADE"), index=True
-    )
 
 
 class DailySelectionItem(Base, TimestampMixin):
@@ -354,9 +279,7 @@ class DailySelectionItem(Base, TimestampMixin):
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
     selection_date: Mapped[date] = mapped_column(Date, index=True)
-    paper_id: Mapped[str] = mapped_column(
-        ForeignKey("papers.id", ondelete="CASCADE"), index=True
-    )
+    paper_id: Mapped[str] = mapped_column(ForeignKey("papers.id", ondelete="CASCADE"), index=True)
     rank: Mapped[int] = mapped_column(Integer)
 
 
@@ -367,26 +290,10 @@ class DailyReview(Base, TimestampMixin):
     )
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
-    paper_id: Mapped[str] = mapped_column(
-        ForeignKey("papers.id", ondelete="CASCADE"), index=True
-    )
+    paper_id: Mapped[str] = mapped_column(ForeignKey("papers.id", ondelete="CASCADE"), index=True)
     device_id: Mapped[str] = mapped_column(String(32), index=True)
-    score: Mapped[int] = mapped_column(Integer)
-    confidence: Mapped[int] = mapped_column(Integer)
+    score: Mapped[float] = mapped_column(Float)
     content: Mapped[str] = mapped_column(Text)
-
-
-class DailyReviewRevision(Base, TimestampMixin):
-    __tablename__ = "daily_review_revisions"
-
-    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
-    review_id: Mapped[str] = mapped_column(
-        ForeignKey("daily_reviews.id", ondelete="CASCADE"), index=True
-    )
-    previous_score: Mapped[int] = mapped_column(Integer)
-    score: Mapped[int] = mapped_column(Integer)
-    previous_confidence: Mapped[int] = mapped_column(Integer)
-    confidence: Mapped[int] = mapped_column(Integer)
 
 
 class DailyReply(Base, TimestampMixin):
@@ -476,9 +383,7 @@ class PaperAgentContextSync(Base, TimestampMixin):
     conversation_id: Mapped[str] = mapped_column(
         ForeignKey("conversations.id", ondelete="CASCADE"), primary_key=True
     )
-    paper_id: Mapped[str] = mapped_column(
-        ForeignKey("papers.id", ondelete="CASCADE"), index=True
-    )
+    paper_id: Mapped[str] = mapped_column(ForeignKey("papers.id", ondelete="CASCADE"), index=True)
     codex_session_id: Mapped[str] = mapped_column(String(255))
     schema_version: Mapped[int] = mapped_column(Integer, default=1)
     revision: Mapped[str] = mapped_column(String(64))

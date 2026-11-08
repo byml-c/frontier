@@ -32,24 +32,15 @@ Frontier 本机 API 会通过 `NO_PROXY` 保持直连。修改后需要重启 `f
 
 `FRONTIER_CODEX_PROFILE` 只用于显式选择 `$CODEX_HOME/<name>.config.toml`。
 
-### 阿里云论文播客
-
-在 `.env` 中填写 `FRONTIER_ALIYUN_TTS_API_KEY` 后重启服务。默认使用北京地域的
-`qwen3-tts-instruct-flash` 与 `Cherry` 单人音色；endpoint、model、voice、朗读指令、超时、
-重试次数和分块长度均可通过同名前缀配置覆盖。密钥只由 Server 的播客渲染任务读取，
-不会传给 Codex 子进程。日报发布后会自动排队生成，也可在日报页面或通过
-`uv run frontier podcast generate BRIEF_ID` 手动生成。音频保存在
-`FRONTIER_DATA_DIR/audio/podcasts`，应与 SQLite 一并纳入运行数据备份策略。
 默认配置已经可用时应保持未设置；它不是 provider 名称，也不会自动创建
 `[model_providers.<id>]`。
 
 `FRONTIER_CODEX_APP_SERVER_MAX_WORKERS` 控制常驻 App Server 进程数上限，
-2C2G 部署默认为 1。首个 Agent 请求会创建 worker 并持续复用，其余 worker 只在并发请求需要时创建；
-已经加载的对话 thread 会优先回到同一 worker。启动日报等独立批任务前会驱逐空闲 worker，
-把 Agent 汇总内存让给批任务；下一次交互会按需重建。修改该配置后需要重启 Frontier 服务。
+当前强制为 1（兼容旧配置中的更高值）。首个 Agent 请求会创建唯一 worker 并持续复用；
+已经加载的对话 thread 会优先回到同一 worker。日报等后台批任务使用独立执行槽，不再驱逐前台的空闲 worker，以减少反复启动与读取。修改该配置后需要重启 Frontier 服务。
 
-2C2G 部署还应保留 `.env.example` 中的 Agent 限额：根 Agent 总并发为 1，单次 Codex
-会话最多并发 1 个子代理、委派深度为 1、单个子代理最长 30 分钟，批任务总时限为 3
+2C2G 部署还应保留 `.env.example` 中的 Agent 限额：前台和后台分别限制为 1 个根 Agent，总并发上限为 2，单次 Codex
+阅读会话最多并发 1 个子代理、委派深度为 1、单个子代理最长 30 分钟；每日后台任务禁止子代理。批任务总时限为 3
 小时（包含有界执行队列和资源槽等待），交互 turn 最长 1 小时。所有 Codex 命令都使用严格
 配置解析，旧版 CLI 不会静默忽略限额。日报全文下载和读取除 prompt 策略外，还由 Server
 的全局闸门强制串行。任务 claim 依赖单个 Frontier 服务进程；不要配置多个 Uvicorn worker。
@@ -150,7 +141,7 @@ tailscale serve status
 
 ## 5. 从开发机一键更新
 
-项目提供了固定部署到 SSH 别名 `SelfALI` 的脚本。它会在服务器的
+项目提供了固定部署到 SSH 别名 `Self-ALI` 的脚本。它会在服务器的
 `/home/byml/agent/frontier` 中执行仅快进拉取，随后从 `.env.example` 向服务器 `.env`
 补充 2C2G 资源管理所需的新配置，再同步前端依赖、构建 Web、重启并检查
 `frontier.service`：
@@ -167,7 +158,7 @@ tailscale serve status
 还会在重启前验证 systemd unit 已设置 `Delegate=yes`；未满足时停止部署，避免发布后所有
 Agent 因隔离不可用而失败。
 
-若 `Self_ALI` 使用非 root 用户，需要允许其无交互地重启和检查该服务。使用
+若 `Self-ALI` 使用非 root 用户，需要允许其无交互地重启和检查该服务。使用
 `sudo visudo -f /etc/sudoers.d/frontier-deploy` 添加以下规则，并把 `byml` 替换为实际
 SSH 用户；可用 `command -v systemctl` 确认 systemctl 的绝对路径：
 
@@ -198,6 +189,13 @@ arXiv 论文的 PDF、HTML 图片和公式资源由浏览器直接访问 `arxiv.
 `dry-run` 检查结果，再切换为 `auto`。`FRONTIER_DOCUMENT_RUNTIME_SLOTS=5` 控制实时文档槽位；
 服务重启会清空 `data/runtime/documents`，不会保留纯文本或 document 缓存。
 
-`FRONTIER_AGENT_MAX_CONCURRENT_RUNS` 是根 Agent 总预算，当前默认 6：
-general/日报/打分为 4，`FRONTIER_METADATA_AGENT_MAX_CONCURRENT_RUNS=2` 为课题组整理。
-两条 lane 各有独立队列和 worker，元信息整理不会占满日报打分通道。
+每日发现、筛选、日报和一作/主要完成单位整理由同一个后台 Agent 串行执行。
+不再启动独立的入库元数据 Agent，也不会重启遗留的 pending 元数据队列。
+前台和后台各有一个执行槽及串行队列，`FRONTIER_AGENT_MAX_CONCURRENT_RUNS=2`；旧部署值
+会归一为 2，前台 app-server 池限制为 1。阅读讨论不会被每日后台任务占用执行槽。每日后台任务强制禁用子 Agent；阅读讨论允许
+最多 1 个子 Agent，不允许嵌套委派。摘要翻译仍使用独立翻译服务，不启动 Codex Agent。
+
+作者与单位通过 `frontier paper author list/get/create/update/delete` 维护；
+课题组使用 `frontier research-group search/get/create/update/delete`，论文绑定使用
+`frontier paper assign-group PAPER_ID GROUP_ID`。作者卡片按论文保存，区分论文单位和现单位，
+保留证据，避免按同名作者错误合并。日常讨论核实后写入，论文信息中以逗号分隔文本编辑作者。

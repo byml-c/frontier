@@ -283,18 +283,12 @@ def cancel_task_run(session: Session, task: TaskRun) -> bool | None:
         return None
     if task.kind == "architecture_generation":
         document = session.scalar(
-            select(ArchitectureDocument).where(
-                ArchitectureDocument.generation_task_id == task.id
-            )
+            select(ArchitectureDocument).where(ArchitectureDocument.generation_task_id == task.id)
         )
         if document:
             document.status = "ready" if document.scene_json else "missing"
             document.error = None
             document.generation_task_id = None
-    elif task.kind == "podcast_episode_render":
-        from .podcast_generation import mark_podcast_task_failed
-
-        mark_podcast_task_failed(session, task, "播客生成已取消")
     release_agent_lock_for_task(session, task.id)
     session.commit()
     process_stopped = cancel_codex_run(task.id)

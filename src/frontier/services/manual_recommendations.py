@@ -16,15 +16,11 @@ DAILY_RECOMMENDATION_STATUS = "candidate"
 
 def is_daily_recommendation_eligible(paper: Paper) -> bool:
     """Unrated unread candidates may occupy an automatic recommendation slot."""
-    feedback = paper.screening_feedback or {}
-    observed = any(
-        feedback.get(key)
-        for key in (
-            "interest_level", "quality_level", "comment", "agent_score_confirmed",
-            "agent_interest_confirmed", "agent_quality_confirmed",
-        )
+    return (
+        paper.status == DAILY_RECOMMENDATION_STATUS
+        and paper.user_score is None
+        and not paper.user_note
     )
-    return paper.status == DAILY_RECOMMENDATION_STATUS and not observed
 
 
 def previously_recommended_paper_ids(
@@ -43,7 +39,7 @@ def previously_recommended_paper_ids(
 
 
 def _needs_analysis(paper: Paper) -> bool:
-    return not all((paper.summary, paper.agent_comment, paper.recommendation_reason))
+    return not bool(paper.post_read_summary)
 
 
 def _analysis_key(task: TaskRun) -> str:
@@ -132,10 +128,6 @@ def stage_manual_recommendation(
         )
         session.add(item)
         session.flush()
-        if brief.status == "published":
-            paper_ids = list(brief.snapshot_json.get("paper_ids", []))
-            if paper.id not in paper_ids:
-                brief.snapshot_json = {**brief.snapshot_json, "paper_ids": [*paper_ids, paper.id]}
         log_operation(
             session,
             actor="user",

@@ -13,7 +13,6 @@ from .config import settings
 from .services.generated_content import (
     PAPER_ANALYSIS_PROSE_FIELDS,
     non_chinese_prose_fields,
-    non_chinese_structured_summary_fields,
 )
 
 app = typer.Typer(no_args_is_help=True, help="Frontier Agent toolkit CLI")
@@ -27,10 +26,10 @@ setting_app = typer.Typer(no_args_is_help=True)
 source_app = typer.Typer(no_args_is_help=True)
 bootstrap_app = typer.Typer(no_args_is_help=True)
 architecture_app = typer.Typer(no_args_is_help=True)
-narration_app = typer.Typer(no_args_is_help=True)
-podcast_app = typer.Typer(no_args_is_help=True)
 research_group_app = typer.Typer(no_args_is_help=True)
 
+author_app = typer.Typer(no_args_is_help=True)
+paper_app.add_typer(author_app, name="author")
 app.add_typer(paper_app, name="paper")
 app.add_typer(graph_app, name="graph")
 app.add_typer(brief_app, name="brief")
@@ -41,8 +40,6 @@ app.add_typer(setting_app, name="setting")
 app.add_typer(source_app, name="source")
 app.add_typer(bootstrap_app, name="bootstrap")
 app.add_typer(architecture_app, name="architecture")
-app.add_typer(narration_app, name="narration")
-app.add_typer(podcast_app, name="podcast")
 app.add_typer(research_group_app, name="research-group")
 
 
@@ -62,12 +59,17 @@ class ApiClient:
 
     def request(self, method: str, path: str, **kwargs: Any) -> Any:
         try:
+            if "params" in kwargs:
+                kwargs["params"] = {k: v for k, v in kwargs["params"].items() if v is not None}
             with httpx.Client(trust_env=False) as http_client:
                 response = http_client.request(
                     method,
                     f"{self.base_url}{path}",
                     timeout=kwargs.pop("timeout", 120),
-                    headers={INTERNAL_TOKEN_HEADER: internal_api_token(), **kwargs.pop("headers", {})},
+                    headers={
+                        INTERNAL_TOKEN_HEADER: internal_api_token(),
+                        **kwargs.pop("headers", {}),
+                    },
                     **kwargs,
                 )
             response.raise_for_status()
@@ -133,8 +135,10 @@ def paper_list(
     affiliation_query: str | None = None,
     keyword_query: str | None = None,
     tag_query: str | None = None,
-    rating_source: str = "interest",
-    rating_level: int | None = None,
+    rating_source: str = "user",
+    score_min: float | None = None,
+    score_max: float | None = None,
+    rated: bool | None = None,
     sort: str = "default",
 ) -> None:
     emit(
@@ -156,7 +160,9 @@ def paper_list(
                 "keyword_q": keyword_query,
                 "tag_q": tag_query,
                 "rating_source": rating_source,
-                "rating_level": rating_level,
+                "score_min": score_min,
+                "score_max": score_max,
+                "rated": rated,
                 "sort": sort,
             },
         )
@@ -207,7 +213,7 @@ def paper_update(paper_id: str, data: str = typer.Option(..., help="JSON string 
 
 @paper_app.command("assign-group")
 def paper_assign_group(paper_id: str, group_id: str) -> None:
-    """Bind a paper to the canonical research group selected by the metadata Agent."""
+    """Bind a paper to the canonical research group curated during the paper conversation."""
     emit(
         client.request(
             "PATCH",
@@ -233,31 +239,6 @@ def paper_first_page(paper_id: str, max_chars: int = 2500) -> None:
             timeout=120,
         )
     )
-
-
-@paper_app.command("metadata-complete")
-def paper_metadata_complete(
-    paper_id: str,
-    status: str = typer.Option("completed", help="completed or failed"),
-    note: str | None = typer.Option(None, help="short evidence or unresolved reason"),
-) -> None:
-    emit(
-        client.request(
-            "POST",
-            f"/api/papers/{paper_id}/metadata-enrichment/complete",
-            json={"status": status, "note": note},
-        )
-    )
-
-
-@paper_app.command("metadata-retry")
-def paper_metadata_retry(paper_id: str) -> None:
-    emit(client.request("POST", f"/api/papers/{paper_id}/metadata-enrichment/retry"))
-
-
-@paper_app.command("metadata-retry-failed")
-def paper_metadata_retry_failed() -> None:
-    emit(client.request("POST", "/api/papers/metadata-enrichment/retry-failed"))
 
 
 @paper_app.command("ignore")
@@ -337,9 +318,7 @@ def paper_agent_context(
 @paper_app.command("resources")
 def paper_resources(
     paper_id: str,
-    kind: str | None = typer.Option(
-        None, help="Filter: formula, figure, table, or reference"
-    ),
+    kind: str | None = typer.Option(None, help="Filter: formula, figure, table, or reference"),
     block_id: str | None = typer.Option(None, help="Return resources from one document block"),
 ) -> None:
     """Read cached TeX, figures, tables, and internal references."""
@@ -354,20 +333,7 @@ def paper_resources(
 
 @paper_app.command("finish")
 def paper_finish(paper_id: str, data: str = typer.Option(..., help="JSON string or @file")) -> None:
-    payload = _require_chinese_agent_prose(parse_json(data), fields={"summary"})
-    invalid = non_chinese_structured_summary_fields(payload)
-    if invalid:
-        emit(
-            {
-                "ok": False,
-                "error": (
-                    "Agent-generated paper analysis must be written in Simplified Chinese. "
-                    "Rewrite the listed fields and retry the same command."
-                ),
-                "fields": invalid,
-            }
-        )
-        raise typer.Exit(1)
+    payload = _require_chinese_agent_prose(parse_json(data), fields={"post_read_summary"})
     emit(client.request("POST", f"/api/papers/{paper_id}/finish", json=payload))
 
 
@@ -473,11 +439,7 @@ def architecture_command(paper_id: str, data: str = typer.Option(...)) -> None:
     payload = parse_json(data)
     if isinstance(payload, list):
         payload = {"commands": payload}
-    emit(
-        client.request(
-            "POST", f"/api/papers/{paper_id}/architecture/commands", json=payload
-        )
-    )
+    emit(client.request("POST", f"/api/papers/{paper_id}/architecture/commands", json=payload))
 
 
 @architecture_app.command("upload-asset")
@@ -660,77 +622,6 @@ def research_group_update(
     emit(client.request("PATCH", f"/api/research-groups/{group_id}", json=parse_json(data)))
 
 
-@narration_app.command("get")
-def narration_get(paper_id: str, language: str = "zh-CN") -> None:
-    emit(
-        client.request(
-            "GET",
-            f"/api/papers/{paper_id}/narration",
-            params={"language": language},
-        )
-    )
-
-
-@narration_app.command("commit")
-def narration_commit(
-    paper_id: str,
-    data: str = typer.Option(..., help="JSON string or @file"),
-) -> None:
-    emit(
-        client.request(
-            "POST",
-            f"/api/papers/{paper_id}/narration/commit",
-            json=parse_json(data),
-        )
-    )
-
-
-@podcast_app.command("get")
-def podcast_get(brief_id: str, language: str = "zh-CN") -> None:
-    emit(
-        client.request(
-            "GET",
-            f"/api/briefs/{brief_id}/podcast",
-            params={"language": language},
-        )
-    )
-
-
-@podcast_app.command("generate")
-def podcast_generate(brief_id: str) -> None:
-    emit(client.request("POST", f"/api/briefs/{brief_id}/podcast/generate"))
-
-
-@podcast_app.command("commit")
-def podcast_commit(
-    brief_id: str,
-    data: str = typer.Option(..., help="JSON string or @file"),
-) -> None:
-    emit(
-        client.request(
-            "POST",
-            f"/api/briefs/{brief_id}/podcast/commit",
-            json=parse_json(data),
-        )
-    )
-
-
-@podcast_app.command("status")
-def podcast_status(
-    brief_id: str,
-    data: str = typer.Option(..., help="JSON string or @file"),
-    language: str = "zh-CN",
-) -> None:
-    emit(
-        client.request(
-            "PATCH",
-            f"/api/briefs/{brief_id}/podcast/status",
-            params={"language": language},
-            json=parse_json(data),
-        )
-    )
-
-
 @memory_app.command("list")
 def memory_list(kind: str | None = None, active: bool | None = None) -> None:
     emit(client.request("GET", "/api/memories", params={"kind": kind, "active": active}))
@@ -842,10 +733,14 @@ def source_arxiv_sync(
     date: str | None = typer.Option(None, help="Brief date (YYYY-MM-DD)"),
 ) -> None:
     """Sync the interval ending at this brief date's scheduled update time."""
-    emit(client.request(
-        "POST", "/api/sources/arxiv/sync",
-        params={"through_date": date} if date else None, timeout=660,
-    ))
+    emit(
+        client.request(
+            "POST",
+            "/api/sources/arxiv/sync",
+            params={"through_date": date} if date else None,
+            timeout=660,
+        )
+    )
 
 
 @source_app.command("arxiv-discover")
@@ -886,6 +781,44 @@ def bootstrap_bibtex(path: Path) -> None:
                 timeout=180,
             )
         )
+
+
+@author_app.command("list")
+def author_list(paper_id: str, q: str | None = None) -> None:
+    """List/search paper-scoped author cards with stable IDs."""
+    emit(client.request("GET", f"/api/papers/{paper_id}/authors", params={"q": q} if q else {}))
+
+
+@author_app.command("get")
+def author_get(paper_id: str, author_id: str) -> None:
+    emit(client.request("GET", f"/api/papers/{paper_id}/authors/{author_id}"))
+
+
+@author_app.command("create")
+def author_create(paper_id: str, data: str = typer.Option(..., help="JSON or @file")) -> None:
+    emit(client.request("POST", f"/api/papers/{paper_id}/authors", json=parse_json(data)))
+
+
+@author_app.command("update")
+def author_update(
+    paper_id: str, author_id: str, data: str = typer.Option(..., help="JSON or @file")
+) -> None:
+    emit(
+        client.request(
+            "PATCH", f"/api/papers/{paper_id}/authors/{author_id}", json=parse_json(data)
+        )
+    )
+
+
+@author_app.command("delete")
+def author_delete(paper_id: str, author_id: str) -> None:
+    emit(client.request("DELETE", f"/api/papers/{paper_id}/authors/{author_id}"))
+
+
+@research_group_app.command("delete")
+def research_group_delete(group_id: str) -> None:
+    """Delete a group card and detach its paper/author associations."""
+    emit(client.request("DELETE", f"/api/research-groups/{group_id}"))
 
 
 if __name__ == "__main__":

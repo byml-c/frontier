@@ -147,8 +147,7 @@ function PaperNoteCard({ note, editing, saving, saveError, onJump, onEdit, onCan
             value={content}
             onChange={(event) => setContent(event.target.value)}
             onKeyDown={handleEditorKeyDown}
-            placeholder="使用 Markdown 记录想法，也可以保持空白"
-            helperText="Ctrl/⌘ + Enter 保存，Esc 取消"
+            placeholder="记录想法"
           />
           {saveError && <Alert severity="error" sx={{ mt: 1 }}>{saveError}</Alert>}
           <Stack direction="row" justifyContent="flex-end" spacing={1} sx={{ mt: 1 }}>

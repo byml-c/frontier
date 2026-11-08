@@ -9,15 +9,12 @@ from sqlalchemy.orm import Session
 from sqlalchemy.pool import StaticPool
 
 from frontier import cli
-from frontier.agent_runner import build_prompt
 from frontier.database import Base, get_session
-from frontier.models import AppSetting, Brief, OperationLog, Paper, TaskRun
+from frontier.models import Brief, OperationLog, Paper, TaskRun
 from frontier.schemas import PaperCreate
 from frontier.services import discovery, ingest
 from frontier.services.common import (
     BROAD_DISCOVERY_DOMAINS,
-    BROAD_DISCOVERY_MIGRATION_ACTION,
-    BROAD_DISCOVERY_WINDOW_MIGRATION_ACTION,
     ensure_default_settings,
 )
 
@@ -67,7 +64,7 @@ def test_broad_recall_pages_beyond_100_without_keywords_or_ingestion(
     first = client.get("/api/sources/arxiv/discover", params={"through_date": "2026-10-10"}).json()
     assert first["next_offset"] is None
     assert first["total_results"] == 101
-    assert first["candidate_target"] == 100
+    assert "candidate_target" not in first
     assert first["since_date"] == "2026-10-08"
     assert first["domains"] == BROAD_DISCOVERY_DOMAINS
     assert first["raw_scanned"] == 101
@@ -178,8 +175,6 @@ def test_discovery_excludes_every_library_status_and_normalized_identity(
 
 
 def test_prefilter_bounds_raw_scan_and_agent_input_separately(client, discovery_db, monkeypatch):
-    discovery_db.get(AppSetting, "discovery_scan_limit").value_json = 250
-    discovery_db.commit()
     calls = []
 
     def page(_query, *, start, max_results):
@@ -194,9 +189,9 @@ def test_prefilter_bounds_raw_scan_and_agent_input_separately(client, discovery_
 
     monkeypatch.setattr(discovery, "search_arxiv_page", page)
     result = client.get("/api/sources/arxiv/discover").json()
-    assert calls == [(0, 100), (100, 100), (200, 50)]
-    assert result["raw_scanned"] == 250
-    assert result["coarse_match_count"] == 250
+    assert calls == [(0, 100), (100, 100), (200, 100)]
+    assert result["raw_scanned"] == 300
+    assert result["coarse_match_count"] == 300
     assert result["count"] == 120
     assert result["scan_capped"] and result["prefilter_capped"]
     assert result["scan_complete"] and not result["coverage_complete"]
@@ -422,63 +417,18 @@ def test_candidate_pool_requires_unique_unread_papers_and_explanations(client, d
 
 
 def test_candidate_pool_has_no_artificial_target_cap(client, discovery_db):
-    discovery_db.get(AppSetting, "abstract_limit").value_json = 5
     task = TaskRun(kind="daily_brief", status="running", payload_json={})
     papers = [Paper(title=str(i), normalized_title=str(i)) for i in range(7)]
     discovery_db.add_all([task, *papers])
     discovery_db.commit()
-    data = {"paper_ids": [p.id for p in papers[:6]], "discovery_complete": True}
+    data = {
+        "paper_ids": [p.id for p in papers[:6]],
+        "discovery_complete": True,
+        "notes": "本批次不足二十篇",
+    }
     assert client.put(f"/api/tasks/{task.id}/candidate-pool", json=data).status_code == 200
     data["paper_ids"] = [p.id for p in papers]
     assert client.put(f"/api/tasks/{task.id}/candidate-pool", json=data).status_code == 200
-
-
-@pytest.mark.parametrize("old_limit, expected", [(50, 100), (27, 27)])
-def test_discovery_settings_migrate_once_and_preserve_interests(old_limit, expected):
-    engine = create_engine("sqlite://")
-    Base.metadata.create_all(engine)
-    with Session(engine) as session:
-        session.add_all(
-            [
-                AppSetting(key="abstract_limit", value_json=old_limit),
-                AppSetting(key="candidate_lookback_days", value_json=14),
-                AppSetting(key="discovery_scan_limit", value_json=1000),
-                AppSetting(key="initial_interest_domains", value_json=["VLA", "WAM", "custom"]),
-                AppSetting(key="discovery_domains", value_json=["custom broad domain"]),
-            ]
-        )
-        session.commit()
-        ensure_default_settings(session)
-        assert session.get(AppSetting, "abstract_limit").value_json == expected
-        assert session.get(AppSetting, "initial_interest_domains").value_json == [
-            "VLA",
-            "WAM",
-            "custom",
-        ]
-        assert session.get(AppSetting, "discovery_domains").value_json == ["custom broad domain"]
-        assert session.get(AppSetting, "candidate_lookback_days").value_json == 3
-        assert session.get(AppSetting, "discovery_scan_limit").value_json == 300
-        session.get(AppSetting, "abstract_limit").value_json = 50
-        session.commit()
-        ensure_default_settings(session)
-        assert session.get(AppSetting, "abstract_limit").value_json == 50
-        assert (
-            session.scalar(
-                select(func.count(OperationLog.id)).where(
-                    OperationLog.action == BROAD_DISCOVERY_MIGRATION_ACTION
-                )
-            )
-            == 1
-        )
-        assert (
-            session.scalar(
-                select(func.count(OperationLog.id)).where(
-                    OperationLog.action == BROAD_DISCOVERY_WINDOW_MIGRATION_ACTION
-                )
-            )
-            == 1
-        )
-    engine.dispose()
 
 
 def test_discovery_settings_validation(client, discovery_db):
@@ -489,7 +439,7 @@ def test_discovery_settings_validation(client, discovery_db):
             ).status_code
             == 422
         )
-    assert client.put("/api/settings/abstract_limit", json={"value": 100}).status_code == 200
+    assert client.put("/api/settings/abstract_limit", json={"value": 100}).status_code == 422
 
 
 def test_cli_exposes_discovery_and_pool(monkeypatch):
@@ -509,23 +459,6 @@ def test_cli_exposes_discovery_and_pool(monkeypatch):
 
 def test_cli_arxiv_search_allows_retry_budget(monkeypatch):
     calls = []
-    monkeypatch.setattr(
-        cli.client, "request", lambda *args, **kwargs: calls.append(kwargs) or {}
-    )
+    monkeypatch.setattr(cli.client, "request", lambda *args, **kwargs: calls.append(kwargs) or {})
     cli.source_arxiv_search("cat:cs.RO", max_results=1, ingest=False)
     assert calls[0]["timeout"] == 660
-
-
-def test_daily_prompt_separates_recall_pool_and_brief():
-    prompt = " ".join(
-        build_prompt(
-            TaskRun(id="daily", kind="daily_brief", payload_json={"date": "2026-10-10"})
-        ).split()
-    )
-    assert "frontier source arxiv-sync" in prompt
-    assert "There is no raw scan or prefilter numeric cap" in prompt
-    assert "agent_review_paper_ids" in prompt
-    assert "continuous value in `[0,1]`" in prompt
-    assert "frontier task candidate-pool daily" in prompt
-    assert "Choose the final brief only from this saved pool" in prompt
-    assert "Assign only a five-level personal-relevance rating" not in prompt

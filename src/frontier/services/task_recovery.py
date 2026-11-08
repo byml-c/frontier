@@ -11,8 +11,6 @@ from ..models import ArchitectureDocument, Brief, Message, Paper, TaskRun, utcno
 from .architecture_scene import release_agent_lock_for_task
 from .common import log_operation
 from .manual_recommendations import set_manual_analysis_state
-from .paper_metadata import mark_metadata_enrichment_failed
-from .podcast_generation import mark_podcast_task_failed
 
 ACTIVE_TASK_STATUSES = {"queued", "running"}
 
@@ -195,8 +193,6 @@ def recover_interrupted_tasks(session: Session, started_before: datetime) -> int
 
         if task.kind in {"manual_paper_analysis", "paper_metadata_analysis"}:
             set_manual_analysis_state(session, task, "failed", error=error)
-        elif task.kind == "paper_metadata_enrichment":
-            mark_metadata_enrichment_failed(session, task, error)
         elif task.kind == "paper_abstract_translation":
             paper_id = (task.payload_json or {}).get("paper_id")
             paper = session.get(Paper, paper_id) if isinstance(paper_id, str) else None
@@ -211,8 +207,6 @@ def recover_interrupted_tasks(session: Session, started_before: datetime) -> int
                 paper.metadata_json = metadata
         if task.kind == "architecture_generation":
             _recover_architecture(session, task, error)
-        elif task.kind == "podcast_episode_render":
-            mark_podcast_task_failed(session, task, error)
         else:
             release_agent_lock_for_task(session, task.id)
 

@@ -1,4 +1,3 @@
-import type { PodcastEpisode, PodcastGenerationResult } from "./types";
 
 const API_ROOT = import.meta.env?.VITE_API_ROOT ?? "";
 
@@ -34,19 +33,6 @@ export async function api<T>(path: string, options: RequestInit = {}): Promise<T
 
 export function jsonBody(value: unknown): RequestInit {
   return { method: "POST", body: JSON.stringify(value) };
-}
-
-export async function getBriefPodcast(briefId: string): Promise<PodcastEpisode | null> {
-  try {
-    return await api<PodcastEpisode | null>(`/api/briefs/${briefId}/podcast`);
-  } catch (error) {
-    if (error instanceof ApiError && error.status === 404) return null;
-    throw error;
-  }
-}
-
-export function generateBriefPodcast(briefId: string): Promise<PodcastGenerationResult> {
-  return api(`/api/briefs/${briefId}/podcast/generate`, { method: "POST" });
 }
 
 export function apiAssetUrl(path: string): string {

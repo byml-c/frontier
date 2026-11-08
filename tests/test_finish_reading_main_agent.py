@@ -115,7 +115,7 @@ def test_finish_reading_stream_reuses_or_starts_main_thread(
     )
     assert response.status_code == 200, response.text
     assert '"type": "done"' in response.text
-    assert "Prepare the completion summary" in str(captured["prompt"])
+    assert "Consolidate the current discussion" in str(captured["prompt"])
     assert captured["session_id"] == initial_thread
     if initial_thread:
         recovery_prompt = str(captured["recovery_prompt"])

@@ -27,15 +27,13 @@ import { activitiesFromContext, type AgentActivityItem, failRunningActivities, u
 import { updateAgentStateFromStream } from "../components/agentRuntimeState";
 import { submitChatOnEnter } from "../components/chatInput";
 import { ConversationScroller } from "../components/ConversationScroller";
-import { CompletionSummaryEditor } from "../components/CompletionSummaryEditor";
-import { completionSummaryDraft, completionSummaryDraftIsComplete, type CompletionSummaryDraft } from "../components/completionSummary";
 import { activeConversationTask, isRequestAbort } from "../components/conversationTask";
 import { Modal } from "../components/Modal";
 import { MarkdownMessage } from "../components/MarkdownMessage";
 import { MobileConfirmAction } from "../components/MobileConfirmAction";
 import { PageHeader } from "../components/PageHeader";
 import { PaperMetadataDialog } from "../components/PaperMetadataDialog";
-import { PaperEvaluationToggleButtons } from "../components/PaperEvaluationToggleButtons";
+import { PaperScores } from "../components/PaperScores";
 import { PaperNotesPanel } from "../components/PaperNotesPanel";
 import { normalizeExactName } from "../components/exactName";
 import { PaperNodeSelector } from "../components/PaperNodeSelector";
@@ -49,7 +47,7 @@ import { ArchitectureMath } from "../features/architecture/ArchitectureTextView"
 import { ArchitectureWorkspace, type ArchitectureWorkspaceHandle } from "../features/architecture/ArchitectureWorkspace";
 import { architectureOperationIsActive } from "../features/architecture/types";
 import type { ArchitectureChatCard, ArchitectureCommand, ArchitectureDocument, ArchitectureReaderContext } from "../features/architecture/types";
-import type { AgentRuntimeState, Annotation, ConfirmedNodeLink, Conversation, InterestLevel, Message, NewConfirmedNode, Paper, PaperDocument, QualityLevel, ResearchNode, SuggestedNode, Tag } from "../types";
+import type { AgentRuntimeState, Annotation, ConfirmedNodeLink, Conversation, Message, NewConfirmedNode, Paper, PaperDocument, ResearchNode, SuggestedNode, Tag } from "../types";
 
 pdfjs.GlobalWorkerOptions.workerSrc = new URL("pdfjs-dist/build/pdf.worker.min.mjs", import.meta.url).toString();
 type SelectionPosition = {
@@ -471,31 +469,14 @@ function ConversationBubble({ message, onJump, retryDisabled = false, onRetry }:
 function renderCitations(content: string, onJump: (page: number) => void, inverted = false) { return <MarkdownMessage content={content} onJump={onJump} inverted={inverted} />; }
 
 
-function suggestedInterestLevel(paper: Paper): InterestLevel {
-  const candidate = paper.pending_feedback?.suggested_interest_level;
-  if (candidate === "ignored" || candidate === "low" || candidate === "neutral" || candidate === "high" || candidate === "interested") {
-    return candidate;
-  }
-  return paper.pending_feedback?.suggested_interested ? "interested" : "neutral";
-}
-
-function suggestedQualityLevel(paper: Paper): QualityLevel {
-  const candidate = paper.pending_feedback?.suggested_quality_level;
-  if (candidate === "poor" || candidate === "below_average" || candidate === "normal" || candidate === "good" || candidate === "excellent") {
-    return candidate;
-  }
-  return paper.pending_feedback?.suggested_quality ? "excellent" : "normal";
-}
-
 function FeedbackModal({ open, paper, processing, activities, processError, onClose, onSaved }: { open: boolean; paper: Paper; processing: boolean; activities: AgentActivityItem[]; processError: string; onClose: () => void; onSaved: () => void }) {
   const queryClient = useQueryClient();
-  const [interestLevel, setInterestLevel] = useState<InterestLevel>(() => suggestedInterestLevel(paper));
-  const [qualityLevel, setQualityLevel] = useState<QualityLevel>(() => suggestedQualityLevel(paper));
+  const [score, setScore] = useState<number | null>(paper.user_score ?? null);
   const [selected, setSelected] = useState<string[]>([]);
   const [newTags, setNewTags] = useState<string[]>([]);
   const [selectedNodeLinks, setSelectedNodeLinks] = useState<ConfirmedNodeLink[]>([]);
   const [newNodes, setNewNodes] = useState<NewConfirmedNode[]>([]);
-  const [summaryDraft, setSummaryDraft] = useState<CompletionSummaryDraft | null>(() => completionSummaryDraft(paper.completion_summary_structured));
+  const [summary, setSummary] = useState(paper.post_read_summary || "");
   const wasOpen = useRef(false);
   const wasProcessing = useRef(false);
   const tags = useQuery({ queryKey: ["tags"], queryFn: () => api<Tag[]>("/api/tags"), enabled: open });
@@ -507,13 +488,12 @@ function FeedbackModal({ open, paper, processing, activities, processError, onCl
   const availableNodes = nodes.data ?? [];
   const confirm = useMutation({
     mutationFn: () => api(`/api/papers/${paper.id}/confirm-feedback`, jsonBody({
-      interest_level: interestLevel,
-      quality_level: qualityLevel,
+      user_score: score,
       tag_ids: selected,
       new_tags: newTags,
       node_links: selectedNodeLinks,
       new_nodes: newNodes,
-      completion_summary_structured: summaryDraft && completionSummaryDraftIsComplete(summaryDraft) ? summaryDraft : undefined,
+      post_read_summary: summary,
     })),
     onSuccess: async () => {
       await Promise.all([
@@ -531,8 +511,7 @@ function FeedbackModal({ open, paper, processing, activities, processError, onCl
 
   useEffect(() => {
     if (open && (!wasOpen.current || (wasProcessing.current && !processing))) {
-      setInterestLevel(suggestedInterestLevel(paper));
-      setQualityLevel(suggestedQualityLevel(paper));
+      setScore(paper.user_score ?? null);
       setSelected(paper.tags.map((tag) => tag.id));
       setNewTags([]);
       setSelectedNodeLinks(
@@ -543,7 +522,7 @@ function FeedbackModal({ open, paper, processing, activities, processError, onCl
         })),
       );
       setNewNodes([]);
-      setSummaryDraft(completionSummaryDraft(paper.completion_summary_structured));
+      setSummary(paper.post_read_summary || "");
     }
     wasOpen.current = open;
     wasProcessing.current = processing;
@@ -584,7 +563,7 @@ function FeedbackModal({ open, paper, processing, activities, processError, onCl
   }
 
   const ready = !processing && !processError;
-  const summaryComplete = !summaryDraft || completionSummaryDraftIsComplete(summaryDraft);
+  const summaryComplete = Boolean(summary.trim());
   const nodesComplete = selectedNodeLinks.every((link) => link.reason.trim())
     && newNodes.every(
       (node) => node.name.trim() && node.core_question.trim() && node.reason.trim(),
@@ -598,22 +577,11 @@ function FeedbackModal({ open, paper, processing, activities, processError, onCl
             <AgentActivity items={activities} pending={processing} autoCollapseWhenComplete={ready} />
             {processError && <Alert severity="error">{processError}</Alert>}
             {ready && <>
-              {summaryDraft ? <CompletionSummaryEditor value={summaryDraft} onChange={setSummaryDraft} /> : <Alert severity="warning">本次整理没有生成结构化精读结论。</Alert>}
+              <TextField label="读后总结" multiline minRows={10} fullWidth value={summary} onChange={(event) => setSummary(event.target.value)} />
               {!summaryComplete && <Alert severity="warning">请补全所有精读总结后再保存。</Alert>}
               <Box>
                 <Typography variant="h3" sx={{ mb: 1 }}>你的判断</Typography>
-                <PaperEvaluationToggleButtons
-                  researchScore={paper.research_score}
-                  relevanceScore={paper.relevance_score}
-                  modelScore={paper.model_relevance_score}
-                  modelConfidence={paper.model_relevance_confidence}
-                  modelReviewRequired={paper.model_review_required}
-                  qualityLevel={qualityLevel}
-                  interestLevel={interestLevel}
-                  onQualityChange={setQualityLevel}
-                  onInterestChange={setInterestLevel}
-                />
-                <Typography variant="caption" color="text.secondary">质量与兴趣相互独立；“正常”和“相关”都不会作为负向评价。</Typography>
+                <PaperScores userScore={score} agentScore={paper.agent_score} modelScore={paper.model_score} onChange={setScore} />
               </Box>
               <Box>
                 <Typography variant="h3">标签</Typography>

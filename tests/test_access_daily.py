@@ -1,16 +1,10 @@
 from __future__ import annotations
 
-from datetime import date
-
 from fastapi.testclient import TestClient
-from sqlalchemy import func, select
 
 from frontier.auth import INTERNAL_TOKEN_HEADER, internal_api_token
 from frontier.config import settings
-from frontier.database import SessionLocal
-from frontier.models import DailySelection, DailySelectionItem
 from frontier.services import daily_selections as daily_selection_service
-from frontier.services.daily_selections import migrate_legacy_daily_selections
 
 
 def _paper(client: TestClient) -> dict:
@@ -25,88 +19,10 @@ def _paper(client: TestClient) -> dict:
             "first_author": "Ada",
             "primary_affiliation": "Frontier Lab",
             "metadata_json": {"research_group_summary": "Frontier Lab 主要完成具身操作研究。"},
-            "summary": "公开简介",
-            "agent_comment": "公开评语",
-            "problem": "研究问题",
         },
     )
     assert response.status_code == 200, response.text
     return response.json()["paper"]
-
-
-def test_daily_selection_exposes_only_read_only_share_data(client: TestClient) -> None:
-    paper = _paper(client)
-    structured = {
-        "problem": "解决的问题 [[page:1]]。",
-        "innovation": "创新内容 [[page:2]]。",
-        "experiment": "实验结果 [[page:3]]。",
-        "limitations": "局限性 [[page:4]]。",
-        "open_questions": "未解决问题 [[page:4]]。",
-        "user_attitude": "用户非常感兴趣，这是私有内容。",
-    }
-    finished = client.post(
-        f"/api/papers/{paper['id']}/finish",
-        json={
-            "completion_summary_structured": structured,
-            "suggested_interested": True,
-            "suggested_quality": True,
-        },
-    )
-    assert finished.status_code == 200, finished.text
-    structured = {
-        **structured,
-        "problem": "用户编辑后的问题 [[page:1]]。",
-        "user_attitude": "用户编辑后的态度仍然是私有内容。",
-    }
-    edited = client.patch(
-        f"/api/papers/{paper['id']}/metadata",
-        json={"completion_summary_structured": structured},
-    )
-    assert edited.status_code == 200, edited.text
-    annotation = client.post(
-        f"/api/papers/{paper['id']}/annotations",
-        json={
-            "kind": "note",
-            "page_number": 3,
-            "selected_text": "evidence",
-            "content": "我的笔记",
-            "position_json": {"rects": [[0.1, 0.2, 0.3, 0.04]]},
-            "color": "#fff19c",
-        },
-    )
-    assert annotation.status_code == 200
-    target = date(2026, 8, 14).isoformat()
-    selected = client.put(f"/api/daily/{target}", json={"paper_id": paper["id"]})
-    assert selected.status_code == 200
-    daily_payload = client.get(f"/api/daily?target_date={target}")
-    assert daily_payload.status_code == 200
-    assert daily_payload.json()["selection"]["paper"]["research_group_summary"] == (
-        "Frontier Lab 主要完成具身操作研究。"
-    )
-
-    response = client.get("/api/daily", params={"target_date": target})
-    assert response.status_code == 200
-    body = response.json()
-    assert body["available_dates"] == [target]
-    assert len(body["selections"]) == 1
-    assert body["selections"][0] == body["selection"]
-    assert body["selection"]["paper"]["title"] == "A Public Daily Paper"
-    assert body["selection"]["annotations"][0]["content"] == "我的笔记"
-    assert "position_json" not in body["selection"]["annotations"][0]
-    assert "pdf_path" not in body["selection"]["paper"]
-    assert "metadata_json" not in body["selection"]["paper"]
-    public_paper = body["selection"]["paper"]
-    assert public_paper["authors"] == [{"name": "Ada"}]
-    assert "private@example.edu" not in str(public_paper)
-    assert public_paper["completion_summary_structured"] == {
-        key: value for key, value in structured.items() if key != "user_attitude"
-    }
-    assert "user_attitude" not in public_paper["completion_summary_structured"]
-    serialized_public_paper = str(public_paper)
-    assert "用户编辑后的态度" not in serialized_public_paper
-    assert "completion_summary" not in public_paper
-    assert "is_interested" not in public_paper
-    assert "is_quality" not in public_paper
 
 
 def test_daily_selection_appends_multiple_papers_in_stable_order(client: TestClient) -> None:
@@ -242,11 +158,11 @@ def test_daily_discussions_are_independent_for_papers_on_the_same_day(
 
     first_review = client.post(
         f"/api/daily/papers/{first['id']}/reviews",
-        json={"score": 5, "confidence": 4, "content": "第一篇的独立评审。"},
+        json={"score": 0.8, "content": "第一篇的独立评审。"},
     )
     second_review = client.post(
         f"/api/daily/papers/{second['id']}/reviews",
-        json={"score": 3, "confidence": 2, "content": "第二篇的独立评审。"},
+        json={"score": 0.4, "content": "第二篇的独立评审。"},
     )
     assert first_review.status_code == 200, first_review.text
     assert second_review.status_code == 200, second_review.text
@@ -257,36 +173,6 @@ def test_daily_discussions_are_independent_for_papers_on_the_same_day(
     assert second_discussion["review_count"] == 1
     assert first_discussion["reviews"][0]["content"] == "第一篇的独立评审。"
     assert second_discussion["reviews"][0]["content"] == "第二篇的独立评审。"
-
-
-def test_legacy_daily_selection_migration_is_idempotent_and_preserves_source(
-    client: TestClient,
-) -> None:
-    paper = _paper(client)
-    target = date(2026, 8, 9)
-    with SessionLocal() as session:
-        legacy = session.get(DailySelection, target)
-        if not legacy:
-            session.add(DailySelection(selection_date=target, paper_id=paper["id"]))
-            session.commit()
-
-        assert migrate_legacy_daily_selections(session) == 1
-        assert migrate_legacy_daily_selections(session) == 0
-        count = session.scalar(
-            select(func.count(DailySelectionItem.id)).where(
-                DailySelectionItem.selection_date == target,
-                DailySelectionItem.paper_id == paper["id"],
-            )
-        )
-        migrated = session.scalar(
-            select(DailySelectionItem).where(
-                DailySelectionItem.selection_date == target,
-                DailySelectionItem.paper_id == paper["id"],
-            )
-        )
-        assert count == 1
-        assert migrated is not None and migrated.rank == 1
-        assert session.get(DailySelection, target) is not None
 
 
 def test_private_api_requires_a_trusted_device_while_daily_stays_public(
@@ -319,52 +205,6 @@ def test_private_api_requires_a_trusted_device_while_daily_stays_public(
         client.cookies.clear()
 
 
-def test_daily_legacy_fallback_never_uses_private_completion_summary(
-    client: TestClient,
-) -> None:
-    created = client.post(
-        "/api/papers",
-        json={
-            "title": "Legacy private completion summary",
-            "source": "manual",
-        },
-    )
-    assert created.status_code == 200, created.text
-    paper = created.json()["paper"]
-    updated = client.patch(
-        f"/api/papers/{paper['id']}",
-        json={
-            "problem": "旧论文的研究问题。",
-            "innovation": "旧论文的证据与贡献。",
-            "experiment": "旧论文的实验。",
-            "limitations": "旧论文的局限。",
-        },
-    )
-    assert updated.status_code == 200, updated.text
-    private_marker = "用户态度私有标记-legacy"
-    finished = client.post(
-        f"/api/papers/{paper['id']}/finish",
-        json={"summary": f"论文总结。{private_marker}"},
-    )
-    assert finished.status_code == 200, finished.text
-    target = date(2026, 8, 12).isoformat()
-    assert client.put(f"/api/daily/{target}", json={"paper_id": paper["id"]}).status_code == 200
-
-    public_paper = client.get("/api/daily", params={"target_date": target}).json()["selection"][
-        "paper"
-    ]
-
-    assert "completion_summary" not in public_paper
-    assert private_marker not in str(public_paper)
-    assert public_paper["completion_summary_structured"] == {
-        "problem": "旧论文的研究问题。",
-        "innovation": "旧论文的证据与贡献。",
-        "experiment": "旧论文的实验。",
-        "limitations": "旧论文的局限。",
-        "open_questions": "历史记录未单独记录未解决问题。",
-    }
-
-
 def test_daily_discussion_is_bound_to_the_paper_across_dates(client: TestClient) -> None:
     paper = _paper(client)
     for target in ("2026-08-14", "2026-08-15"):
@@ -381,19 +221,18 @@ def test_daily_discussion_is_bound_to_the_paper_across_dates(client: TestClient)
 
     created = client.post(
         f"/api/daily/papers/{paper['id']}/reviews",
-        json={"score": 5, "confidence": 4, "content": "**有价值**，但还需验证。"},
+        json={"score": 0.8, "content": "**有价值**，但还需验证。"},
     )
     assert created.status_code == 200, created.text
     review = created.json()
     assert review["is_mine"] is True
-    assert review["initial_score"] == 5
     assert len(review["author"]["name"]) == 4
     assert review["author"]["color"].startswith("#")
     assert client.post("/api/daily/identity/rotate").status_code == 409
 
     duplicate = client.post(
         f"/api/daily/papers/{paper['id']}/reviews",
-        json={"score": 3, "confidence": 3, "content": "不应创建第二份评审。"},
+        json={"score": 0.4, "content": "不应创建第二份评审。"},
     )
     assert duplicate.status_code == 409
 
@@ -406,11 +245,10 @@ def test_daily_discussion_is_bound_to_the_paper_across_dates(client: TestClient)
 
     updated = client.put(
         f"/api/daily/papers/{paper['id']}/reviews/mine",
-        json={"score": 4, "confidence": 3, "content": "更新后的 **评审**。"},
+        json={"score": 0.6, "content": "更新后的 **评审**。"},
     )
     assert updated.status_code == 200, updated.text
-    assert updated.json()["initial_score"] == 5
-    assert updated.json()["score"] == 4
+    assert updated.json()["score"] == 0.6
     assert len(updated.json()["replies"]) == 1
 
     discussion = client.get(f"/api/daily/papers/{paper['id']}/reviews")
@@ -418,13 +256,44 @@ def test_daily_discussion_is_bound_to_the_paper_across_dates(client: TestClient)
     body = discussion.json()
     assert body["paper_id"] == paper["id"]
     assert body["review_count"] == 1
-    assert body["average_score"] == 4.0
-    assert body["reviews"][0]["initial_score"] == 5
+    assert body["average_score"] == 0.6
     assert body["reviews"][0]["replies"][0]["content"].endswith("同意。")
     assert (
         client.post(
             f"/api/daily/papers/{paper['id']}/reviews",
-            json={"score": 7, "confidence": 4, "content": "invalid"},
+            json={"score": 7, "content": "invalid"},
         ).status_code
         == 422
+    )
+
+
+def test_public_daily_uses_current_markdown_without_private_notes(client):
+    paper = _paper(client)
+    url = f"/api/papers/{paper['id']}/metadata"
+    assert (
+        client.patch(
+            url,
+            json={
+                "pre_read_summary": "公开简介",
+                "post_read_summary": "公开结论",
+                "user_note": "仅私人备注",
+                "user_score": 0.71342,
+            },
+        ).status_code
+        == 200
+    )
+    assert client.put("/api/daily/2051-01-01", json={"paper_id": paper["id"]}).status_code == 200
+    public = client.get("/api/daily", params={"target_date": "2051-01-01"})
+    assert public.status_code == 200
+    current = public.json()["selections"][0]["paper"]
+    assert current["pre_read_summary"] == "公开简介"
+    assert current["post_read_summary"] == "公开结论"
+    assert "user_note" not in current and "metadata_json" not in current
+    assert "仅私人备注" not in public.text and "private@example.edu" not in public.text
+    assert client.patch(url, json={"pre_read_summary": "更新简介"}).status_code == 200
+    assert (
+        client.get("/api/daily", params={"target_date": "2051-01-01"}).json()["selections"][0][
+            "paper"
+        ]["pre_read_summary"]
+        == "更新简介"
     )

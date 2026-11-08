@@ -32,10 +32,8 @@ from ..services.arxiv_sync import sync_arxiv as sync_arxiv_cursor
 from ..services.backup import create_local_git_backup
 from ..services.bootstrap import import_bibtex
 from ..services.common import (
-    BRIEF_LIMIT_DEFAULT,
     BRIEF_LIMIT_MAX,
-    DAILY_TIME_DEFAULT,
-    FEATURED_LIMIT_DEFAULT,
+    DEFAULT_SETTINGS,
     get_setting,
     log_operation,
     model_dict,
@@ -50,11 +48,6 @@ from ..services.manual_recommendations import (
 )
 from ..services.paper_agent_context import paper_agent_context_sync_required
 from ..services.paper_conversations import get_or_create_paper_conversation
-from ..services.podcast_generation import (
-    PODCAST_TASK_KIND,
-    PodcastGenerationError,
-    get_or_create_podcast_task,
-)
 from ..services.research_day import current_research_date
 from ..services.service_checks import check_service
 from ..services.task_control import (
@@ -72,15 +65,8 @@ from ..services.translation_provider import stream_translation_prompt
 router = APIRouter(prefix="/api", tags=["system"])
 
 NUMERIC_SETTING_RANGES = {
-    "daily_hour": (0, 23),
-    "daily_minute": (0, 59),
-    "abstract_limit": (1, 500),
-    "fulltext_limit": (1, 10),
     "brief_limit": (1, BRIEF_LIMIT_MAX),
-    "featured_limit": (1, 10),
     "candidate_lookback_days": (1, 90),
-    "discovery_scan_limit": (100, 2_000),
-    "discovery_prefilter_limit": (50, 200),
 }
 
 
@@ -113,31 +99,15 @@ def _validate_setting_value(key: str, value: object) -> None:
 
 
 def _validate_setting_relationships(values: dict[str, object]) -> None:
-    if int(values.get("featured_limit", FEATURED_LIMIT_DEFAULT)) >= int(
-        values.get("brief_limit", BRIEF_LIMIT_DEFAULT)
-    ):
-        raise HTTPException(status_code=422, detail="featured_limit must be below brief_limit")
+    return None
 
 
 def _setting_changes(current: dict[str, object], payload: dict[str, object]) -> dict[str, object]:
-    """Validate all inputs before deriving consistent canonical/legacy schedule values."""
     for key, value in payload.items():
+        if key not in DEFAULT_SETTINGS:
+            raise HTTPException(422, f"Unknown setting: {key}")
         _validate_setting_value(key, value)
-    changes = dict(payload)
-    if "daily_time" in changes:
-        hour, minute = parse_daily_time(changes["daily_time"])
-    elif {"daily_hour", "daily_minute"} & changes.keys():
-        current_hour, current_minute = parse_daily_time(
-            current.get("daily_time", DAILY_TIME_DEFAULT)
-        )
-        hour = changes.get("daily_hour", current.get("daily_hour", current_hour))
-        minute = changes.get("daily_minute", current.get("daily_minute", current_minute))
-    else:
-        return changes
-    changes.update(
-        {"daily_time": f"{hour:02d}:{minute:02d}", "daily_hour": hour, "daily_minute": minute}
-    )
-    return changes
+    return dict(payload)
 
 
 def _save_setting_changes(session: Session, changes: dict[str, object]) -> None:
@@ -219,7 +189,7 @@ def update_setting(
         entity_id=key,
     )
     session.commit()
-    if key in {"daily_time", "daily_hour", "daily_minute"}:
+    if key == "daily_time":
         from ..scheduler import configure_jobs
 
         configure_jobs()
@@ -243,7 +213,7 @@ def update_settings(
         detail={"keys": sorted(payload)},
     )
     session.commit()
-    if {"daily_time", "daily_hour", "daily_minute"} & payload.keys():
+    if "daily_time" in payload:
         from ..scheduler import configure_jobs
 
         configure_jobs()
@@ -655,28 +625,6 @@ def retry_task(
             status_code=409,
             detail="请从论文架构页重新生成，以便先获取最新 revision 和编辑锁",
         )
-    if old.kind == PODCAST_TASK_KIND:
-        brief_id = (old.payload_json or {}).get("brief_id")
-        if not isinstance(brief_id, str):
-            raise HTTPException(status_code=422, detail="播客任务缺少 brief_id")
-        try:
-            claim = get_or_create_podcast_task(session, brief_id)
-        except PodcastGenerationError as exc:
-            raise HTTPException(status_code=409, detail=str(exc)) from exc
-        assert claim.task is not None
-        if claim.created:
-            claim.task.payload_json = {
-                **(claim.task.payload_json or {}),
-                "retry_of": old.id,
-            }
-            session.commit()
-        if claim.task.status == "queued":
-            background_tasks.add_task(submit_task, claim.task.id)
-        return {
-            "id": claim.task.id,
-            "status": claim.task.status,
-            "retry_of": old.id,
-        }
     if old.kind != "translate" and not settings.enable_codex_runs:
         raise HTTPException(status_code=503, detail="Agent 运行已在服务器设置中停用")
     try:
@@ -812,9 +760,9 @@ def save_candidate_pool(
         raise HTTPException(status_code=409, detail="Candidate pool requires an active daily task")
     if len(set(payload.paper_ids)) != len(payload.paper_ids):
         raise HTTPException(status_code=422, detail="Candidate pool contains duplicate papers")
-    target = int(get_setting(session, "abstract_limit", 100))
+    minimum_recommendations = min(20, int(get_setting(session, "brief_limit", 50)))
     if (
-        len(payload.paper_ids) < target * 0.8 or not payload.discovery_complete
+        len(payload.paper_ids) < minimum_recommendations or not payload.discovery_complete
     ) and not payload.notes.strip():
         raise HTTPException(
             status_code=422, detail="Explain candidate shortage or incomplete coverage"
@@ -827,18 +775,25 @@ def save_candidate_pool(
             status_code=422, detail="Candidate pool requires existing unrated unread papers"
         )
     if previously_recommended_paper_ids(session, payload.paper_ids):
-        raise HTTPException(status_code=422, detail="Candidate pool contains previously recommended papers")
+        raise HTTPException(
+            status_code=422, detail="Candidate pool contains previously recommended papers"
+        )
     task_payload = task.payload_json or {}
     if payload.discovery_run_id:
         run = session.get(DiscoveryRun, payload.discovery_run_id)
         result = (run.result_json or {}) if run else {}
         if (
-            not run or run.status != "completed"
+            not run
+            or run.status != "completed"
             or result.get("brief_date") != task_payload.get("date")
         ):
-            raise HTTPException(status_code=422, detail="Discovery batch does not match this brief date")
+            raise HTTPException(
+                status_code=422, detail="Discovery batch does not match this brief date"
+            )
         if not set(payload.paper_ids).issubset(result.get("paper_ids", [])):
-            raise HTTPException(status_code=422, detail="Candidate pool contains papers outside its discovery batch")
+            raise HTTPException(
+                status_code=422, detail="Candidate pool contains papers outside its discovery batch"
+            )
     elif task_payload.get("recovery_source_task_ids"):
         recovered_ids = set()
         for source_id in task_payload["recovery_source_task_ids"]:
@@ -847,10 +802,12 @@ def save_candidate_pool(
             if source_payload.get("date") == task_payload.get("date"):
                 recovered_ids.update(source_payload.get("candidate_pool", {}).get("paper_ids", []))
         if not set(payload.paper_ids).issubset(recovered_ids):
-            raise HTTPException(status_code=422, detail="Recovery may only reuse same-date candidate pools")
+            raise HTTPException(
+                status_code=422, detail="Recovery may only reuse same-date candidate pools"
+            )
     elif task_payload.get("discovery_mode") == "brief_date_cursor":
         raise HTTPException(status_code=422, detail="A dated discovery_run_id is required")
-    pool = {**payload.model_dump(), "target": target, "saved_at": utcnow().isoformat()}
+    pool = {**payload.model_dump(), "saved_at": utcnow().isoformat()}
     task.payload_json = {**(task.payload_json or {}), "candidate_pool": pool}
     log_operation(
         session,

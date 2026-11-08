@@ -5,6 +5,7 @@ import queue
 import threading
 
 from ..config import settings
+from .agent_runtime import is_foreground_task
 
 logger = logging.getLogger(__name__)
 
@@ -35,7 +36,9 @@ def _run_worker(work_queue: queue.Queue[str], lane: str) -> None:
                 try:
                     run_task(task_id)
                 except Exception:
-                    logger.exception("Dispatched %s task %s crashed outside its runner", lane, task_id)
+                    logger.exception(
+                        "Dispatched %s task %s crashed outside its runner", lane, task_id
+                    )
                 finally:
                     with _state_lock:
                         _accepted_task_ids.discard(task_id)
@@ -49,15 +52,15 @@ def _run_worker(work_queue: queue.Queue[str], lane: str) -> None:
 
 
 def start_task_dispatcher() -> None:
-    """Start separate general and metadata worker lanes once per process."""
+    """Start one foreground and one background serial worker."""
     global _stopping, _lane_queues
     with _state_lock:
         if _workers:
             return
         _stopping = False
         lane_counts = {
-            "general": settings.general_agent_max_concurrent_runs,
-            "metadata": settings.metadata_agent_max_concurrent_runs,
+            "general": 1,
+            "foreground": 1,
         }
         _lane_queues = {}
         for lane, worker_count in lane_counts.items():
@@ -82,7 +85,17 @@ def submit_task(
     fail_on_full: bool = True,
     lane: str = "general",
 ) -> bool:
-    """Submit without blocking; metadata has a queue independent from scoring."""
+    """Route to independent foreground/background queues; metadata is legacy background."""
+    if lane == "general":
+        from ..database import SessionLocal
+        from ..models import TaskRun
+
+        with SessionLocal() as session:
+            task = session.get(TaskRun, task_id)
+            if task is not None and is_foreground_task(task.kind):
+                lane = "foreground"
+    if lane == "metadata":
+        lane = "general"
     start_task_dispatcher()
     accepted = False
     with _state_lock:
@@ -111,8 +124,6 @@ def _fail_undispatched_task(task_id: str, *, error: str) -> None:
     from ..models import Paper, TaskRun, utcnow
     from .architecture_scene import mark_architecture_generation_failed
     from .manual_recommendations import set_manual_analysis_state
-    from .paper_metadata import mark_metadata_enrichment_failed
-    from .podcast_generation import mark_podcast_task_failed
 
     with SessionLocal() as session:
         task = session.get(TaskRun, task_id)
@@ -131,8 +142,6 @@ def _fail_undispatched_task(task_id: str, *, error: str) -> None:
         elif task.kind in {"manual_paper_analysis", "paper_metadata_analysis"}:
             set_manual_analysis_state(session, task, "failed", error=error)
             session.commit()
-        elif task.kind == "paper_metadata_enrichment":
-            mark_metadata_enrichment_failed(session, task, error)
         elif task.kind == "paper_abstract_translation":
             from .abstract_translation import ABSTRACT_TRANSLATION_STATE_KEY
 
@@ -148,15 +157,12 @@ def _fail_undispatched_task(task_id: str, *, error: str) -> None:
                 }
                 paper.metadata_json = metadata
             session.commit()
-        elif task.kind == "podcast_episode_render":
-            mark_podcast_task_failed(session, task, error)
-            session.commit()
         else:
             session.commit()
 
 
 def stop_task_dispatcher(*, wait: bool = False) -> None:
-    """Stop both lanes, fail queued work, and optionally join workers."""
+    """Stop the worker, fail queued work, and optionally join it."""
     global _stopping
     pending: list[str] = []
     with _state_lock:
@@ -193,11 +199,15 @@ def task_dispatcher_snapshot() -> dict[str, int | bool]:
     with _state_lock:
         general = _lane_queues.get("general")
         metadata = _lane_queues.get("metadata")
+        foreground = _lane_queues.get("foreground")
         return {
             "running": bool(_workers) and not _stopping,
             "workers": len(_workers),
             "general_workers": settings.general_agent_max_concurrent_runs,
-            "metadata_workers": settings.metadata_agent_max_concurrent_runs,
+            "metadata_workers": 0,
+            "foreground_workers": 1,
+            "background_workers": 1,
+            "queued_foreground": foreground.qsize() if foreground is not None else 0,
             "capacity": general.maxsize if general is not None else 0,
             "metadata_capacity": metadata.maxsize if metadata is not None else 0,
             "accepted": len(_accepted_task_ids),

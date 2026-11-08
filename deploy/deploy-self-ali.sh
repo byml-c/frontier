@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-readonly REMOTE_HOST="SelfALI"
+readonly REMOTE_HOST="Self-ALI"
 readonly REMOTE_PROJECT="/home/byml/agent/frontier"
 readonly SYSTEMD_SERVICE="frontier.service"
 
@@ -121,7 +121,7 @@ health_base_url="$(.venv/bin/python -c \
 echo "健康检查：${health_base_url}/api/health"
 health_ok=false
 health_result=""
-for _attempt in {1..15}; do
+for _attempt in {1..120}; do
   if health_result="$(FRONTIER_API_BASE_URL="${health_base_url}" \
     .venv/bin/frontier health 2>&1)"; then
     health_ok=true
@@ -131,7 +131,7 @@ for _attempt in {1..15}; do
 done
 
 if [[ ${health_ok} != true ]]; then
-  echo "错误：服务已重启，但 15 秒内未通过健康检查。" >&2
+  echo "错误：服务已重启，但 120 秒内未通过健康检查。" >&2
   echo "检查地址：${health_base_url}/api/health" >&2
   if [[ -n "${health_result}" ]]; then
     echo "最后一次检查结果：${health_result}" >&2

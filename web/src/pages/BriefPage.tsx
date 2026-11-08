@@ -18,7 +18,7 @@ export function BriefPage() {
   const { briefId } = useParams();
   const queryClient = useQueryClient();
   const [view, setView] = useState<ViewTab>("all");
-  const [ratingQuery, setRatingQuery] = useState<RatingQuery>({ ratingSource: "interest", ratingLevel: "", sort: "default" });
+  const [ratingQuery, setRatingQuery] = useState<RatingQuery>({ ratingSource: "user", scoreMin: "", scoreMax: "", rated: "", sort: "default" });
   const brief = useQuery({
     queryKey: ["brief", briefId ?? "latest"],
     queryFn: async () => {
@@ -41,36 +41,35 @@ export function BriefPage() {
   const visible = queryBriefItems(ordered.filter((item) => {
     if (view === "top") return item.rank > 0 && item.rank <= 10;
     if (view === "pending") return item.rank > 10;
-    if (view === "rated") return Boolean(item.paper.agent_score_confirmed || item.paper.agent_quality_confirmed || item.paper.agent_interest_confirmed || item.paper.screening_feedback || item.paper.screening_quality_level || item.paper.screening_interest_level);
+    if (view === "rated") return item.paper.user_score != null;
     return true;
   }), ratingQuery);
 
   return <Container maxWidth="lg" sx={{ py: { xs: 4, md: 5 } }}>
     <PageHeader title={data.title} tabs={<BriefTabs value={briefId ? "archive" : "today"} />} />
     <Stack spacing={1} sx={{ mb: 2 }}>
-      <Typography variant="body2" color="text.secondary">共 {data.items.length} 篇论文，详细分析可在论文信息中按需生成。</Typography>
+      <Typography variant="body2" color="text.secondary">共 {data.items.length} 篇论文</Typography>
       <Tabs value={view} onChange={(_, next: ViewTab) => setView(next)} variant="scrollable" scrollButtons="auto" aria-label="日报筛选" sx={{ borderBottom: 1, borderColor: "divider" }}>
         <Tab value="all" label={`全部 ${data.items.length}`} />
         <Tab value="top" label="前 10 篇" />
         <Tab value="pending" label="其余候选" />
-        <Tab value="rated" label={`已评分 ${ordered.filter((item) => item.paper.agent_score_confirmed || item.paper.agent_quality_confirmed || item.paper.agent_interest_confirmed || item.paper.screening_feedback || item.paper.screening_quality_level || item.paper.screening_interest_level).length}`} />
+        <Tab value="rated" label={`已评分 ${ordered.filter((item) => item.paper.user_score != null).length}`} />
       </Tabs>
       <Stack direction={{ xs: "column", sm: "row" }} spacing={1.5} sx={{ pt: 1 }}>
         <RatingQueryControls value={ratingQuery} onChange={setRatingQuery} defaultSortLabel="推荐顺序" />
       </Stack>
-      <Typography variant="caption" color="text.secondary">匹配 {visible.length} / {data.items.length} 篇 · 连续相关度按五档筛选，排序使用原始分数。</Typography>
+      <Typography variant="caption" color="text.secondary">匹配 {visible.length} / {data.items.length} 篇</Typography>
     </Stack>
-    {!visible.length && <Empty title={view === "rated" ? "还没有评分记录" : "暂无论文"} body={view === "rated" ? "点击论文下方的相关度标签，记录你的偏好。" : "切换其他分类继续阅读。"} />}
+    {!visible.length && <Empty title={view === "rated" ? "还没有评分记录" : "暂无论文"} body={view === "rated" ? "在论文下方选择评分。" : "切换其他分类继续阅读。"} />}
     <Stack spacing={1.5}>
       {visible.map((item) => (
         <PaperCard
           key={item.id}
           briefId={data.id}
           briefItemId={item.id}
-          paper={{ ...item.paper, status: item.current_status, interest_level: item.interest_level, quality_level: item.quality_level, is_interested: item.is_interested, is_quality: item.is_quality }}
+          paper={item.paper}
           rank={item.rank}
           featured={item.tier === "featured"}
-          preprocessed={Boolean(item.paper.problem || item.paper.innovation || item.paper.experiment || item.paper.limitations || item.paper.open_questions)}
         />
       ))}
     </Stack>

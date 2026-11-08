@@ -22,44 +22,17 @@ import {
   Portal,
   Stack,
   TextField,
-  ToggleButton,
-  ToggleButtonGroup,
   Tooltip,
   Typography,
 } from "@mui/material";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { FormEvent, useMemo, useState } from "react";
+import { ScoreInput } from "./PaperScores";
 import { api, formatDate, jsonBody } from "../api";
 import type { AnonymousProfile, DailyDiscussionPayload, DailyReview } from "../types";
 import { linkifyDailyMentions, mentionDraft } from "./dailyMentions";
 import { MarkdownMessage } from "./MarkdownMessage";
 import { ErrorState, Loading } from "./States";
-
-const RECOMMENDATIONS = [
-  [1, "Strong Reject"],
-  [2, "Reject"],
-  [3, "Borderline Reject"],
-  [4, "Borderline Accept"],
-  [5, "Accept"],
-  [6, "Strong Accept"],
-] as const;
-const CONFIDENCE = ["Very Low", "Low", "Medium", "High", "Very High"];
-const choiceSx = {
-  py: .75,
-  textTransform: "none",
-  bgcolor: "background.paper",
-  "&&.Mui-selected": {
-    bgcolor: "primary.main",
-    borderColor: "primary.main!important",
-    color: "primary.contrastText",
-    fontWeight: 750,
-    "&:hover": { bgcolor: "primary.dark" },
-  },
-};
-
-function recommendationLabel(score: number) {
-  return RECOMMENDATIONS.find(([value]) => value === score)?.[1] ?? String(score);
-}
 
 export function DailyDiscussion({ paperId }: { paperId: string }) {
   const queryClient = useQueryClient();
@@ -116,19 +89,18 @@ export function DailyDiscussion({ paperId }: { paperId: string }) {
 }
 
 function ReviewComposer({ paperId, review, onCancel, onSaved }: { paperId: string; review?: DailyReview; onCancel: () => void; onSaved: () => void }) {
-  const [score, setScore] = useState<number | null>(review?.score ?? null); const [confidence, setConfidence] = useState<number | null>(review?.confidence ?? null); const [content, setContent] = useState(review?.content ?? "");
-  const save = useMutation({ mutationFn: () => api(`/api/daily/papers/${paperId}/reviews${review ? "/mine" : ""}`, { ...jsonBody({ score, confidence, content }), method: review ? "PUT" : "POST" }), onSuccess: onSaved });
-  function submit(event: FormEvent) { event.preventDefault(); if (score && confidence && content.trim()) save.mutate(); }
-  return <Card variant="outlined"><CardContent component="form" onSubmit={submit}><Typography variant="h3">{review ? "编辑匿名评审" : "匿名评审"}</Typography><Typography variant="body2" color="text.secondary" sx={{ mt: .5 }}>每篇论文保留一份主评审；内容支持 Markdown。</Typography>
-    <Typography variant="subtitle2" sx={{ mt: 2, mb: 1 }}>Score</Typography><ToggleButtonGroup exclusive value={score} onChange={(_, value) => value && setScore(value)} sx={{ display: "grid", gridTemplateColumns: { xs: "repeat(2, 1fr)", sm: "repeat(3, 1fr)" }, gap: .75, "& .MuiToggleButtonGroup-grouped": { border: "1px solid !important", borderColor: "divider!important", borderRadius: "8px!important" } }}>{RECOMMENDATIONS.map(([value, label]) => <ToggleButton value={value} key={value} sx={choiceSx}>{value} · {label}</ToggleButton>)}</ToggleButtonGroup>
-    <Typography variant="subtitle2" sx={{ mt: 2, mb: 1 }}>Confidence</Typography><ToggleButtonGroup exclusive value={confidence} onChange={(_, value) => value && setConfidence(value)} sx={{ display: "grid", gridTemplateColumns: { xs: "repeat(2, 1fr)", sm: "repeat(5, 1fr)" }, gap: .75, "& .MuiToggleButtonGroup-grouped": { border: "1px solid !important", borderColor: "divider!important", borderRadius: "8px!important" } }}>{CONFIDENCE.map((label, index) => <ToggleButton value={index + 1} key={label} sx={choiceSx}>{index + 1} · {label}</ToggleButton>)}</ToggleButtonGroup>
-    <TextField fullWidth multiline minRows={5} value={content} onChange={(event) => setContent(event.target.value)} label="Comment (Markdown)" sx={{ mt: 2 }} />{save.error && <Alert severity="error" sx={{ mt: 1.5 }}>{save.error.message}</Alert>}<Stack direction="row" justifyContent="flex-end" spacing={1} sx={{ mt: 2 }}><Button onClick={onCancel}>取消</Button><Button variant="contained" type="submit" disabled={!score || !confidence || !content.trim() || save.isPending}>{save.isPending ? <CircularProgress size={18} color="inherit" /> : review ? "保存" : "发表"}</Button></Stack>
+  const [score, setScore] = useState<number | null>(review?.score ?? null); const [content, setContent] = useState(review?.content ?? "");
+  const save = useMutation({ mutationFn: () => api(`/api/daily/papers/${paperId}/reviews${review ? "/mine" : ""}`, { ...jsonBody({ score, content }), method: review ? "PUT" : "POST" }), onSuccess: onSaved });
+  function submit(event: FormEvent) { event.preventDefault(); if (score != null && content.trim()) save.mutate(); }
+  return <Card variant="outlined"><CardContent component="form" onSubmit={submit}><Typography variant="h3">{review ? "编辑匿名评审" : "匿名评审"}</Typography>
+    <ScoreInput value={score} onChange={setScore} />
+    <TextField fullWidth multiline minRows={5} value={content} onChange={(event) => setContent(event.target.value)} label="评论" sx={{ mt: 2 }} />{save.error && <Alert severity="error" sx={{ mt: 1.5 }}>{save.error.message}</Alert>}<Stack direction="row" justifyContent="flex-end" spacing={1} sx={{ mt: 2 }}><Button onClick={onCancel}>取消</Button><Button variant="contained" type="submit" disabled={score == null || !content.trim() || save.isPending}>{save.isPending ? <CircularProgress size={18} color="inherit" /> : review ? "保存" : "发表"}</Button></Stack>
   </CardContent></Card>;
 }
 
 function ReviewCard({ review, open, replying, replyDraft, mentionColors, onEdit, onToggle, onReply, onReplyDraft, onReplyClose, onReplySaved }: { review: DailyReview; open: boolean; replying: boolean; replyDraft: string; mentionColors: Record<string, string>; onEdit: () => void; onToggle: () => void; onReply: (author: AnonymousProfile) => void; onReplyDraft: (value: string) => void; onReplyClose: () => void; onReplySaved: () => void }) {
   return <Card variant="outlined"><CardContent sx={{ p: { xs: 1.5, sm: 2.25 } }}><Stack direction="row" alignItems="center" spacing={1}><Profile profile={review.author} mine={review.is_mine} /><Box sx={{ flex: 1 }} /><Tooltip title="回复该作者"><IconButton size="small" onClick={() => onReply(review.author)}><ReplyRounded fontSize="small" /></IconButton></Tooltip></Stack>
-    <Box sx={{ mt: 1.5 }}><Typography variant="body2"><Box component="span" fontWeight={750}>Score:</Box> {review.score} ({recommendationLabel(review.score)}){review.initial_score !== review.score && <Box component="span" color="text.secondary"> [Modified: {review.initial_score} → {review.score}]</Box>}</Typography><Typography variant="body2" sx={{ mt: .35 }}><Box component="span" fontWeight={750}>Confidence:</Box> {review.confidence} ({CONFIDENCE[review.confidence - 1]})</Typography><Stack direction="row" alignItems="center" spacing={.5} sx={{ mt: .5 }}><Typography variant="caption" color="text.secondary">{formatDate(review.updated_at || review.created_at, true)}</Typography>{review.is_mine && <Tooltip title="编辑我的评审"><IconButton size="small" onClick={onEdit}><EditRounded fontSize="small" /></IconButton></Tooltip>}</Stack></Box>
+    <Box sx={{ mt: 1.5 }}><Typography variant="body2">评分：{review.score}</Typography><Stack direction="row" alignItems="center" spacing={.5} sx={{ mt: .5 }}><Typography variant="caption" color="text.secondary">{formatDate(review.updated_at || review.created_at, true)}</Typography>{review.is_mine && <Tooltip title="编辑我的评审"><IconButton size="small" onClick={onEdit}><EditRounded fontSize="small" /></IconButton></Tooltip>}</Stack></Box>
     <Box sx={{ mt: 1.5 }}><MarkdownMessage content={linkifyDailyMentions(review.content, Object.keys(mentionColors))} mentionColors={mentionColors} /></Box>
     <Button size="small" color="inherit" onClick={onToggle} endIcon={<ExpandMoreRounded sx={{ transform: open ? "rotate(180deg)" : "none", transition: "transform .18s" }} />} sx={{ mt: 1, px: 0 }}>{review.replies.length ? `${open ? "收起" : "展开"}讨论（${review.replies.length}）` : "展开回复"}</Button>
     <Collapse in={open}><Stack spacing={1.5} sx={{ mt: 1.5, ml: { xs: 1, sm: 3 }, pl: 1.5, borderLeft: 2, borderColor: "divider" }}>{review.replies.map((reply) => <Box key={reply.id}><Stack direction="row" alignItems="center"><Profile profile={reply.author} mine={reply.is_mine} compact /><Tooltip title={`回复 @${reply.author.name}`}><IconButton size="small" onClick={() => onReply(reply.author)} sx={{ ml: "auto" }}><ReplyRounded fontSize="small" /></IconButton></Tooltip></Stack><Box sx={{ mt: .5 }}><MarkdownMessage content={linkifyDailyMentions(reply.content, Object.keys(mentionColors))} mentionColors={mentionColors} /></Box><Typography variant="caption" color="text.secondary">{formatDate(reply.created_at, true)}</Typography></Box>)}{replying && <ReplyComposer reviewId={review.id} value={replyDraft} onChange={onReplyDraft} onCancel={onReplyClose} onSaved={onReplySaved} />}</Stack></Collapse>
@@ -138,7 +110,7 @@ function ReviewCard({ review, open, replying, replyDraft, mentionColors, onEdit,
 function ReplyComposer({ reviewId, value, onChange, onCancel, onSaved }: { reviewId: string; value: string; onChange: (value: string) => void; onCancel: () => void; onSaved: () => void }) {
   const create = useMutation({ mutationFn: () => api(`/api/daily/reviews/${reviewId}/replies`, jsonBody({ content: value })), onSuccess: onSaved });
   function submit(event: FormEvent) { event.preventDefault(); if (value.trim()) create.mutate(); }
-  return <Box component="form" onSubmit={submit}><TextField autoFocus fullWidth multiline minRows={3} value={value} onChange={(event) => onChange(event.target.value)} placeholder="回复内容，支持 Markdown 和 @匿名名" />{create.error && <Alert severity="error" sx={{ mt: 1 }}>{create.error.message}</Alert>}<Stack direction="row" justifyContent="flex-end" spacing={1} sx={{ mt: 1 }}><Button size="small" onClick={onCancel}>取消</Button><Button size="small" variant="contained" type="submit" endIcon={<SendRounded />} disabled={!value.trim() || create.isPending}>回复</Button></Stack></Box>;
+  return <Box component="form" onSubmit={submit}><TextField autoFocus fullWidth multiline minRows={3} value={value} onChange={(event) => onChange(event.target.value)} placeholder="回复内容" />{create.error && <Alert severity="error" sx={{ mt: 1 }}>{create.error.message}</Alert>}<Stack direction="row" justifyContent="flex-end" spacing={1} sx={{ mt: 1 }}><Button size="small" onClick={onCancel}>取消</Button><Button size="small" variant="contained" type="submit" endIcon={<SendRounded />} disabled={!value.trim() || create.isPending}>回复</Button></Stack></Box>;
 }
 
 function Profile({ profile, mine = false, compact = false }: { profile: AnonymousProfile; mine?: boolean; compact?: boolean }) {

@@ -55,17 +55,22 @@ Browser ──HTTP/NDJSON stream──> FastAPI Server ──SQLite / data files
 - 划词翻译以论文、页码、归一化文本和目标语言生成稳定缓存键，结果保存在 SQLite；选区坐标不参与键生成，缓存命中时不再调用 Agent。
 - 词语上下文从浏览器已经渲染的 PDF 文本层截取并随翻译请求发送；Server 不在首个流事件前下载或抽取整篇 PDF。
 - Web 手动摄入通过显式 `recommend=true` 与 Agent 的批量采集区分；Server 原子地创建当日 `manual` BriefItem 和 `manual_paper_analysis` 任务。`manual` 项不参与日报额度统计，并在简报中动态读取当前论文分析，避免处理完成后仍显示旧占位快照。
-- 已发布日报可生成单人论文播客。Server 从已持久化的论文分析字段确定性地产生逐篇文字稿，保存 `PaperNarration`，再组合为 `PodcastEpisode`；`podcast_episode_render` 直接调用阿里云 Qwen3-TTS，不占用 Codex Agent 执行槽。音频全部成功后才原子发布，TTS 失败不会回滚日报。
+
+- 论文总结只保存 `pre_read_summary`、`post_read_summary` 两个 Markdown 字段；不再保存结构化多字段总结或论文内容快照。日报和阅读器统一读取当前 Paper。
+- 评分只有一个维度，按来源分别保存 `user_score`、`agent_score`、`model_score`，均为 0–1 实数。null 表示未评分，0 是有效评分；模型置信度不是另一评价维度。
+- 启动时执行一次性事务迁移：合并历史总结，删除旧列、旧快照、音频表和文件；无法明确转换的多维人工分数清空。迁移验证外键，失败整体回滚。
 
 ## 实时交互
 
 - 对话、划词翻译和完成精读统一使用 NDJSON 流；翻译通过独立的 OpenAI-compatible Chat Completions 流式客户端请求 `translation.env` 中配置的模型，不启动 Codex 会话。翻译配置在启动时预读，HTTP 连接复用；简单翻译显式关闭模型思考模式；
-- 用户确认精读反馈后，Server 排队执行图谱维护任务；所有客户端走同一准入规则，不依赖 Web 额外触发；
+- 用户确认精读反馈后，Server 原子保存所选图谱连接和进展；所有客户端走同一准入规则，不依赖 Web 额外触发；
 - Server 将 Codex app-server 的最终消息增量转成 `delta`，并将公开推理摘要、commentary 与工具生命周期转成安全的 `activity` 事件；原始隐藏推理、命令参数和工具原始输出不发往浏览器；
 - 完成事件持久化最终正文、引用、任务状态和可恢复的会话标识；
 - Web 逐块更新界面，连接失败时显示明确错误，不用虚假的加载动画代替正文。
 
 ## Agent 任务
+
+前台、后台各有一个独立的根 Agent 槽。每日工作由一个后台 Agent 串行完成，包含一作和主要完成单位的文字整理，禁止开子 Agent 或逐篇排队。前台阅读最多并发一个子 Agent，且不允许嵌套委派；作者和课题组卡片通过 CLI 增删改查。
 
 - `daily_brief`：采集、基于摘要筛选评分和日报发布，发布后结束；详细分析由用户按需手动生成，只记录潜在节点关联，不建立正式图谱连接；
 - `manual_paper_analysis`：只处理用户刚添加的一篇论文，阅读全文、补全可靠 metadata 和推荐分析，不采集其他候选且不占日报额度；
@@ -74,7 +79,6 @@ Browser ──HTTP/NDJSON stream──> FastAPI Server ──SQLite / data files
 - `finish_reading`：汇总阅读材料并生成待确认反馈；
 - `graph_maintenance`：在用户确认精读后关联论文、增量更新节点，也可按用户指令维护节点、边、进展和想法；
 - `global_chat`：处理带当前页面上下文的研究与管理请求。
-- `podcast_episode_render`：生成逐篇中文文字稿，组合单人日报播报并渲染音频；这是 Server 直连 provider 的任务，不启动 Codex。
 
 所有任务都可以从 Server 状态恢复；Agent 记忆是显式检索的增强信息，不是正确运行的前置条件。
 

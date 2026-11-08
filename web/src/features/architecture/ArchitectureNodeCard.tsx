@@ -81,11 +81,11 @@ export function ArchitectureNodeCardEditor({ node, draft, disabled = false, onDr
         <InputBase disabled={disabled} value={draft.keywords} placeholder={node.type === "module" ? "例如 shared weights · fine-tuned" : "例如 resize → normalize"} aria-label={node.type === "module" ? "关键词" : "预处理"} onChange={(event) => onDraft({ ...draft, keywords: event.target.value })} sx={editInputSx} />
       </Box>
       <Box sx={{ p: 1.1, borderRadius: .75, bgcolor: "rgba(15,23,42,.028)" }}>
-        <FieldLabel>简介 · 支持 Markdown 与 $TeX$</FieldLabel>
+        <FieldLabel>简介</FieldLabel>
         <InputBase disabled={disabled} value={draft.description} placeholder="说明这个节点在架构中的作用" aria-label="详细说明" onChange={(event) => onDraft({ ...draft, description: event.target.value })} multiline minRows={4} sx={{ ...editInputSx, alignItems: "flex-start", lineHeight: 1.65 }} />
       </Box>
       <Box sx={{ p: 1.1, borderRadius: .75, bgcolor: "#FFF9E8", border: 1, borderColor: "#E8D7A5" }}>
-        <FieldLabel>批注 · 支持 Markdown 与 $TeX$</FieldLabel>
+        <FieldLabel>批注</FieldLabel>
         <InputBase disabled={disabled} value={draft.annotation} placeholder="补充阅读批注" aria-label="架构批注" onChange={(event) => onDraft({ ...draft, annotation: event.target.value })} multiline minRows={3} sx={{ ...editInputSx, alignItems: "flex-start", lineHeight: 1.65 }} />
       </Box>
     </Stack>

@@ -87,8 +87,7 @@ def run_schema_migrations() -> None:
                     "ALTER TABLE papers ADD COLUMN IF NOT EXISTS screening_feedback JSON"
                 )
             connection.exec_driver_sql(
-                "INSERT INTO schema_migrations(version, applied_at) "
-                "VALUES (1, CURRENT_TIMESTAMP)"
+                "INSERT INTO schema_migrations(version, applied_at) VALUES (1, CURRENT_TIMESTAMP)"
             )
         if 2 not in applied:
             if connection.dialect.name == "sqlite":
@@ -124,8 +123,7 @@ def run_schema_migrations() -> None:
                 "ON tags(research_group_id) WHERE research_group_id IS NOT NULL"
             )
             connection.exec_driver_sql(
-                "INSERT INTO schema_migrations(version, applied_at) "
-                "VALUES (2, CURRENT_TIMESTAMP)"
+                "INSERT INTO schema_migrations(version, applied_at) VALUES (2, CURRENT_TIMESTAMP)"
             )
         if 3 not in applied:
             if connection.dialect.name == "sqlite":
@@ -134,16 +132,13 @@ def run_schema_migrations() -> None:
                     for row in connection.exec_driver_sql("PRAGMA table_info(papers)").fetchall()
                 }
                 if "catalog_summary" not in columns:
-                    connection.exec_driver_sql(
-                        "ALTER TABLE papers ADD COLUMN catalog_summary TEXT"
-                    )
+                    connection.exec_driver_sql("ALTER TABLE papers ADD COLUMN catalog_summary TEXT")
             else:
                 connection.exec_driver_sql(
                     "ALTER TABLE papers ADD COLUMN IF NOT EXISTS catalog_summary TEXT"
                 )
             connection.exec_driver_sql(
-                "INSERT INTO schema_migrations(version, applied_at) "
-                "VALUES (3, CURRENT_TIMESTAMP)"
+                "INSERT INTO schema_migrations(version, applied_at) VALUES (3, CURRENT_TIMESTAMP)"
             )
         if 4 not in applied:
             if connection.dialect.name == "sqlite":
@@ -184,8 +179,7 @@ def run_schema_migrations() -> None:
                 "ON papers(model_review_required)"
             )
             connection.exec_driver_sql(
-                "INSERT INTO schema_migrations(version, applied_at) "
-                "VALUES (4, CURRENT_TIMESTAMP)"
+                "INSERT INTO schema_migrations(version, applied_at) VALUES (4, CURRENT_TIMESTAMP)"
             )
         if 5 not in applied:
             if connection.dialect.name == "sqlite":
@@ -204,20 +198,21 @@ def run_schema_migrations() -> None:
                         )
             else:
                 connection.exec_driver_sql(
-                    "ALTER TABLE papers ADD COLUMN IF NOT EXISTS "
-                    "model_short_name VARCHAR(255)"
+                    "ALTER TABLE papers ADD COLUMN IF NOT EXISTS model_short_name VARCHAR(255)"
                 )
                 connection.exec_driver_sql(
                     "ALTER TABLE papers ADD COLUMN IF NOT EXISTS search_aliases JSON"
                 )
             connection.exec_driver_sql(
-                "CREATE INDEX IF NOT EXISTS ix_papers_model_short_name "
-                "ON papers(model_short_name)"
+                "CREATE INDEX IF NOT EXISTS ix_papers_model_short_name ON papers(model_short_name)"
             )
             connection.exec_driver_sql(
-                "INSERT INTO schema_migrations(version, applied_at) "
-                "VALUES (5, CURRENT_TIMESTAMP)"
+                "INSERT INTO schema_migrations(version, applied_at) VALUES (5, CURRENT_TIMESTAMP)"
             )
+
+    from .services.schema_cleanup import migrate_clean_schema
+
+    migrate_clean_schema(engine, settings.data_dir)
 
 
 def get_session() -> Generator[Session, None, None]:

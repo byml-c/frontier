@@ -24,7 +24,6 @@ from .manual_recommendations import (
     previously_recommended_paper_ids,
 )
 from .outbound_network import external_httpx_kwargs
-from .paper_metadata import queue_metadata_enrichment
 from .research_day import current_research_date
 
 SYNC_CURSOR_ID = "arxiv-last-updated-v1"
@@ -254,9 +253,9 @@ def _batch_candidate_routing(
             select(Paper)
             .where(
                 Paper.id.in_(paper_ids),
-                Paper.model_relevance_score.is_not(None),
+                Paper.model_score.is_not(None),
             )
-            .order_by(Paper.model_relevance_score.desc(), Paper.published_at.desc())
+            .order_by(Paper.model_score.desc(), Paper.published_at.desc())
         ).all()
     )
     eligible_ids: list[str] = []
@@ -270,9 +269,7 @@ def _batch_candidate_routing(
             eligible_ids.append(paper.id)
             review_ids.append(paper.id)
         elif (
-            paper.relevance_score
-            if paper.relevance_score is not None
-            else paper.model_relevance_score
+            paper.agent_score if paper.agent_score is not None else paper.model_score
         ) >= relevance_threshold:
             eligible_ids.append(paper.id)
         else:
@@ -491,9 +488,6 @@ def _sync_arxiv(
             promoted_papers.append(paper)
 
         if promoted_papers:
-            queue_metadata_enrichment(
-                session, [paper.id for paper in promoted_papers], reason="arxiv-sync"
-            )
             session.commit()
 
         routed_ids, routed_review_ids, routed_filtered_ids = _batch_candidate_routing(

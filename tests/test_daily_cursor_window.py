@@ -75,21 +75,14 @@ def test_candidate_pool_is_bound_to_daily_date_and_discovery_batch(client, daily
 
 
 @pytest.mark.parametrize(
-    "feedback",
-    [
-        {"interest_level": "neutral"},
-        {"quality_level": "normal"},
-        {"agent_interest_confirmed": True},
-        {"agent_score_confirmed": True},
-        {"comment": "Already screened"},
-    ],
+    "feedback", [{"user_score": 0}, {"user_score": 0.713}, {"user_note": "Already screened"}]
 )
 def test_rated_candidate_cannot_reenter_pool_or_be_added_automatically(
     client,
     daily_db,
     feedback,
 ):
-    paper = Paper(title="Rated", normalized_title="rated", screening_feedback=feedback)
+    paper = Paper(title="Rated", normalized_title="rated", **feedback)
     daily_db.add(paper)
     daily_db.flush()
     run, task, brief = _draft(daily_db, [paper.id])
@@ -167,7 +160,7 @@ def test_publish_rechecks_feedback_and_prior_recommendations_and_preserves_histo
             ).status_code
             == 200
         )
-    rated.screening_feedback = {"interest_level": "high"}
+    rated.user_score = 0.9
     prior = Brief(brief_date=date(2026, 10, 27), title="Yesterday", status="published")
     daily_db.add(prior)
     daily_db.flush()
@@ -176,7 +169,7 @@ def test_publish_rechecks_feedback_and_prior_recommendations_and_preserves_histo
     response = client.post(f"/api/briefs/{brief.id}/publish")
     assert response.status_code == 200, response.text
     assert [i["paper"]["id"] for i in response.json()["items"]] == [fresh.id]
-    fresh.screening_feedback = {"interest_level": "neutral"}
+    fresh.user_score = 0.5
     daily_db.commit()
     again = client.post(f"/api/briefs/{brief.id}/publish")
     assert [i["paper"]["id"] for i in again.json()["items"]] == [fresh.id]

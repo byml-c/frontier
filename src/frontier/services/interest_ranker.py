@@ -20,16 +20,8 @@ from sqlalchemy.orm import Session
 
 from ..config import settings
 from ..models import InterestModelRun, Paper
-from .interest_evidence import paper_interest_level
 
-INTEREST_TARGETS = {
-    "ignored": 0.0,
-    "low": 0.25,
-    "neutral": 0.5,
-    "high": 0.75,
-    "interested": 1.0,
-}
-MODEL_SCHEMA_VERSION = 2
+MODEL_SCHEMA_VERSION = 3
 MODEL_ARTIFACT_DIR = "models"
 RELEVANCE_THRESHOLD = 0.5
 CONFIDENCE_THRESHOLD = 0.62
@@ -55,17 +47,10 @@ class RankedPaper:
     reasons: list[dict[str, Any]]
 
 
-def _label_for_paper(paper: Paper) -> tuple[str, str] | None:
-    if paper.status == "completed":
-        level = paper_interest_level(paper)
-        return (level, "confirmed") if level in INTEREST_TARGETS else None
-    if paper.status == "ignored":
-        return "ignored", "ignored_status"
-    screening = paper.screening_feedback or {}
-    level = screening.get("interest_level")
-    if level in INTEREST_TARGETS:
-        return str(level), "screening"
-    return None
+def _label_for_paper(paper: Paper) -> tuple[float, str] | None:
+    if paper.user_score is None:
+        return None
+    return paper.user_score, "confirmed" if paper.status == "completed" else "screening"
 
 
 def _document_for_paper(paper: Paper) -> str:
@@ -77,9 +62,7 @@ def _document_for_paper(paper: Paper) -> str:
         else ""
     )
     primary = metadata.get("primary_category")
-    primary_token = (
-        f" primary_{str(primary).replace('.', '_')}" if isinstance(primary, str) else ""
-    )
+    primary_token = f" primary_{str(primary).replace('.', '_')}" if isinstance(primary, str) else ""
     comment = metadata.get("comment")
     journal_ref = metadata.get("journal_ref")
     author_names = " ".join(
@@ -121,7 +104,7 @@ def collect_training_examples(session: Session) -> list[TrainingExample]:
             TrainingExample(
                 paper_id=paper.id,
                 document=document,
-                target=INTEREST_TARGETS[level],
+                target=level,
                 source=source,
                 observed_at=paper.updated_at or paper.created_at,
             )
@@ -202,9 +185,7 @@ def _temporal_mae(
 
 def _reasons(model: BaggingRegressor, feature_names: np.ndarray, *, limit: int = 6) -> list[dict]:
     coefficients = [
-        estimator.coef_
-        for estimator in model.estimators_
-        if hasattr(estimator, "coef_")
+        estimator.coef_ for estimator in model.estimators_ if hasattr(estimator, "coef_")
     ]
     if not coefficients:
         return []
@@ -278,22 +259,15 @@ class InterestRanker:
         stability_component = float(
             np.clip(1.0 - ensemble_std / max(residual_scale, 0.01), 0.0, 1.0)
         )
-        boundary_component = float(
-            np.clip(abs(score - self.relevance_threshold) / 0.25, 0.0, 1.0)
-        )
+        boundary_component = float(np.clip(abs(score - self.relevance_threshold) / 0.25, 0.0, 1.0))
         confidence = float(
             np.clip(
-                0.35 * support_component
-                + 0.25 * stability_component
-                + 0.40 * boundary_component,
+                0.35 * support_component + 0.25 * stability_component + 0.40 * boundary_component,
                 0.0,
                 1.0,
             )
         )
-        review_required = (
-            confidence < self.confidence_threshold
-            or support < 0.08
-        )
+        review_required = confidence < self.confidence_threshold or support < 0.08
         return RankedPaper(
             score=round(score, 4),
             confidence=round(confidence, 4),
@@ -332,7 +306,10 @@ def load_ranker(model_run: InterestModelRun | None = None) -> InterestRanker | N
     path = Path(model_run.artifact_path)
     if not path.exists():
         return None
-    return InterestRanker(joblib.load(path))
+    artifact = joblib.load(path)
+    if artifact.get("schema_version") != MODEL_SCHEMA_VERSION:
+        return None
+    return InterestRanker(artifact)
 
 
 def train_daily_ranker(
@@ -344,9 +321,7 @@ def train_daily_ranker(
     trained_at = now or datetime.now(UTC)
     examples = collect_training_examples(session)
     label_digest = _digest_examples(examples)
-    version_seed = (
-        f"{MODEL_SCHEMA_VERSION}:{label_digest}:{trained_at.date().isoformat()}"
-    )
+    version_seed = f"{MODEL_SCHEMA_VERSION}:{label_digest}:{trained_at.date().isoformat()}"
     version = "interest-v1-" + hashlib.sha256(version_seed.encode()).hexdigest()[:16]
     artifact_path = _artifact_path(version)
     existing = session.scalar(
@@ -417,10 +392,6 @@ def train_daily_ranker(
         "sample_count": len(examples),
         "validation_mae": validation_mae,
         "residual_scale": residual_scale,
-        "label_counts": {
-            level: sum(example.target == target for example in examples)
-            for level, target in INTEREST_TARGETS.items()
-        },
         "label_sources": {
             source: sum(example.source == source for example in examples)
             for source in sorted({example.source for example in examples})
@@ -462,22 +433,16 @@ def score_paper(ranker: InterestRanker, paper: Paper) -> RankedPaper:
     ranked = ranker.score_document(_document_for_paper(paper))
     metadata = dict(paper.metadata_json or {})
     metadata["interest_model"] = {
-        "version": ranker.version,
-        "score": ranked.score,
-        "confidence": ranked.confidence,
-        "review_required": ranked.review_required,
         "support": ranked.support,
         "ensemble_std": ranked.ensemble_std,
         "reasons": ranked.reasons,
         "scored_at": datetime.now(UTC).isoformat(),
     }
-    paper.model_relevance_score = ranked.score
-    paper.model_relevance_confidence = ranked.confidence
+    paper.model_score = ranked.score
+    paper.model_confidence = ranked.confidence
     paper.model_version = ranker.version
     paper.model_review_required = ranked.review_required
     paper.metadata_json = metadata
-    if not ranked.review_required and paper.relevance_score is None:
-        paper.relevance_score = ranked.score
     return ranked
 
 

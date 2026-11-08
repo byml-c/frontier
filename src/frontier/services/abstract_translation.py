@@ -7,7 +7,7 @@ from typing import Any
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from ..models import Brief, BriefItem, Paper, TaskRun, TranslationCache
+from ..models import BriefItem, Paper, TaskRun, TranslationCache
 
 TARGET_LANGUAGE = "简体中文"
 PAPER_ABSTRACT_TRANSLATION_KIND = "paper_abstract_translation"
@@ -113,12 +113,5 @@ def queue_brief_abstract_translations(
     )
     session.add(task)
     session.flush()
-    brief = session.get(Brief, brief_id)
-    if brief:
-        brief.snapshot_json = {
-            **(brief.snapshot_json or {}),
-            "abstract_translation_status": "queued",
-            "abstract_translation_task_id": task.id,
-        }
     session.commit()
     return task

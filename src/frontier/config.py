@@ -3,7 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Literal
 
-from pydantic import Field
+from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -38,11 +38,10 @@ class Settings(BaseSettings):
     codex_max_concurrent_subagents: int = Field(default=1, ge=0)
     codex_subagent_max_depth: int = Field(default=1, ge=0)
     codex_subagent_job_timeout_seconds: int = Field(default=1800, ge=1)
-    # Total root-Agent concurrency budget. Child-process cgroups provide the hard
-    # resource limit; the metadata lane is carved out of this total.
-    agent_max_concurrent_runs: int = Field(default=6, ge=1)
-    # Metadata enrichment has its own dispatcher lane and root-Agent budget so it
-    # can run alongside daily scoring without consuming the whole pool.
+    # One foreground + one background root-Agent slot.
+    # Legacy higher environment values are normalized below.
+    agent_max_concurrent_runs: int = Field(default=2, ge=1)
+    # Compatibility setting only: the independent metadata lane is retired.
     metadata_agent_max_concurrent_runs: int = Field(default=1, ge=1)
     agent_task_timeout_seconds: int = Field(default=10_800, ge=1)
     agent_interactive_timeout_seconds: int = Field(default=3600, ge=1)
@@ -78,20 +77,6 @@ class Settings(BaseSettings):
     storage_migration_mode: Literal["auto", "dry-run", "off"] = "auto"
     translation_env_file: Path = PROJECT_ROOT / "translation.env"
     translation_timeout_seconds: int = Field(default=120, ge=1)
-    aliyun_tts_api_key: str | None = None
-    aliyun_tts_endpoint: str = (
-        "https://dashscope.aliyuncs.com/api/v1/services/aigc/"
-        "multimodal-generation/generation"
-    )
-    aliyun_tts_model: str = "qwen3-tts-instruct-flash"
-    aliyun_tts_voice: str = "Cherry"
-    aliyun_tts_instructions: str = "请用自然、清晰、克制的中文播客旁白语气朗读。"
-    aliyun_tts_timeout_seconds: float = Field(default=120, gt=0)
-    aliyun_tts_max_retries: int = Field(default=2, ge=0, le=8)
-    # Qwen3-TTS accepts at most 600 characters per non-streaming request. Keep
-    # one character of headroom so later payload decoration cannot cross it.
-    aliyun_tts_chunk_max_chars: int = Field(default=500, ge=50, le=599)
-    aliyun_tts_audio_max_bytes: int = Field(default=32 * 1024**2, ge=1)
     enable_scheduler: bool = True
     enable_codex_runs: bool = True
     access_password: str = "byml-frontier"
@@ -100,6 +85,21 @@ class Settings(BaseSettings):
     # Docling loads large layout models and is unsuitable for the default
     # low-memory deployment. arXiv HTML remains available independently.
     enable_docling: bool = False
+
+    @field_validator("agent_max_concurrent_runs", mode="before")
+    @classmethod
+    def bound_root_agents(cls, value: object) -> int:
+        return 2
+
+    @field_validator("codex_app_server_max_workers", mode="before")
+    @classmethod
+    def serialize_foreground_agents(cls, value: object) -> int:
+        return 1
+
+    @field_validator("codex_max_concurrent_subagents", mode="before")
+    @classmethod
+    def limit_reading_subagents(cls, value: object) -> int:
+        return min(1, max(0, int(value)))
 
     @property
     def resolved_database_url(self) -> str:
@@ -121,8 +121,8 @@ class Settings(BaseSettings):
 
     @property
     def general_agent_max_concurrent_runs(self) -> int:
-        """General/scoring lane budget, keeping metadata as a bounded slice."""
-        return max(1, self.agent_max_concurrent_runs - self.metadata_agent_max_concurrent_runs)
+        """Background Agents execute serially, independently of the one foreground slot."""
+        return 1
 
     @property
     def pdf_dir(self) -> Path:
@@ -156,10 +156,6 @@ class Settings(BaseSettings):
     def export_dir(self) -> Path:
         return self.data_dir / "exports"
 
-    @property
-    def audio_dir(self) -> Path:
-        return self.data_dir / "audio"
-
     def ensure_directories(self) -> None:
         for path in (
             self.data_dir,
@@ -171,7 +167,6 @@ class Settings(BaseSettings):
             self.document_dir,
             self.architecture_dir,
             self.export_dir,
-            self.audio_dir,
         ):
             path.mkdir(parents=True, exist_ok=True)
 

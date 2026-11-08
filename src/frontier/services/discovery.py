@@ -111,10 +111,10 @@ def discover_arxiv_page(
     if not valid_string_list(categories, categories=True):
         raise ValueError("Invalid discovery_arxiv_categories setting")
     days = int(get_setting(session, "candidate_lookback_days", 3))
-    scan_limit = int(get_setting(session, "discovery_scan_limit", 300))
-    prefilter_limit = int(get_setting(session, "discovery_prefilter_limit", 120))
+    scan_limit = 300
+    prefilter_limit = 120
     if offset < 0 or offset >= scan_limit or not 1 <= page_size <= 100:
-        raise ValueError("offset must be below discovery_scan_limit; page_size must be 1–100")
+        raise ValueError("offset must be below 300; page_size must be 1–100")
 
     def fetch_window(window_days: int) -> tuple[list, int | None, str]:
         since = through_date - timedelta(days=window_days - 1)
@@ -200,7 +200,6 @@ def discover_arxiv_page(
     result = {
         "query": query,
         "domains": get_setting(session, "discovery_domains", BROAD_DISCOVERY_DOMAINS),
-        "candidate_target": get_setting(session, "abstract_limit", 100),
         "scan_limit": scan_limit,
         "prefilter_limit": prefilter_limit,
         "requested_lookback_days": days,

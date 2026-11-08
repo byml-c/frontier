@@ -145,7 +145,7 @@ def get_node(node_id: str, session: Annotated[Session, Depends(get_session)]) ->
                     "first_author": paper.first_author,
                     "published_at": paper.published_at.isoformat() if paper.published_at else None,
                     "status": paper.status,
-                    "is_quality": paper.is_quality,
+                    "user_score": paper.user_score,
                     "reason": reason,
                     "is_key": is_key,
                 }
@@ -346,9 +346,7 @@ def get_subgraph(
 ) -> dict:
     all_edges = session.scalars(select(ResearchEdge)).all()
     active_ids = set(
-        session.scalars(
-            select(ResearchNode.id).where(ResearchNode.is_active.is_(True))
-        ).all()
+        session.scalars(select(ResearchNode.id).where(ResearchNode.is_active.is_(True))).all()
     )
     if focus_id:
         _node_or_404(session, focus_id)

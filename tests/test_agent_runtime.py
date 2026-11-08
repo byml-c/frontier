@@ -29,12 +29,15 @@ def test_codex_subagent_limits_are_invocation_overrides(monkeypatch) -> None:
 
     assert args == [
         "-c",
+        "agents.enabled=true",
+        "-c",
         "agents.max_concurrent_threads_per_session=1",
         "-c",
         "agents.max_depth=1",
         "-c",
         "agents.job_max_runtime_seconds=900",
     ]
+    assert "agents.enabled=false" in agent_runtime.codex_subagent_limit_args(allow_subagents=False)
 
 
 def test_zero_subagent_limit_disables_delegation(monkeypatch) -> None:
@@ -124,9 +127,7 @@ def test_delegated_layout_writes_aggregate_and_per_run_budgets(
         agent_runtime.settings.agent_memory_max_bytes
     )
     assert (scope.path / "cpu.max").read_text(encoding="utf-8") == "100000 100000"
-    assert "rbps=20971520 wbps=10485760" in (scope.path / "io.max").read_text(
-        encoding="utf-8"
-    )
+    assert "rbps=20971520 wbps=10485760" in (scope.path / "io.max").read_text(encoding="utf-8")
     assert (scope.path / "memory.oom.group").read_text(encoding="utf-8") == "1"
     wrapped = scope.wrap_command(["codex", "exec", "prompt"])
     assert wrapped[-4:] == ["--", "codex", "exec", "prompt"]
@@ -196,6 +197,7 @@ def test_root_agent_slot_wait_can_be_cancelled(monkeypatch) -> None:
     errors: list[BaseException] = []
 
     with agent_runtime.root_agent_slot():
+
         def waiter() -> None:
             try:
                 with agent_runtime.root_agent_slot(cancelled=cancelled.is_set):
@@ -323,8 +325,7 @@ def test_expired_queued_task_fails_before_agent_start(monkeypatch) -> None:
 def test_direct_task_root_wait_and_process_share_persisted_budget(monkeypatch) -> None:
     create_tables()
     monkeypatch.setattr(agent_runner.settings, "agent_task_timeout_seconds", 60)
-    monkeypatch.setattr(agent_runtime, "_ROOT_AGENT_SLOTS", threading.BoundedSemaphore(1))
-    monkeypatch.setattr(agent_runner, "evict_idle_codex_app_servers", lambda: 0)
+    monkeypatch.setattr(agent_runtime, "_BACKGROUND_AGENT_SLOTS", threading.BoundedSemaphore(1))
     observed: dict[str, float] = {}
 
     def fake_run(_task_id: str, *, timeout_seconds: float | None = None) -> None:
@@ -373,7 +374,9 @@ def test_batch_agent_timeout_is_persisted_as_failure(monkeypatch, tmp_path: Path
     process = FakeProcess()
     monkeypatch.setattr(agent_runner.settings, "data_dir", tmp_path)
     monkeypatch.setattr(agent_runner.settings, "agent_task_timeout_seconds", 30)
-    monkeypatch.setattr(agent_runner, "create_agent_scope", lambda _run_id: agent_runtime.AgentCgroupScope(None))
+    monkeypatch.setattr(
+        agent_runner, "create_agent_scope", lambda _run_id: agent_runtime.AgentCgroupScope(None)
+    )
     monkeypatch.setattr(agent_runner.subprocess, "Popen", lambda *_args, **_kwargs: process)
     monkeypatch.setattr(agent_runner.threading, "Timer", ImmediateTimer)
     monkeypatch.setattr(agent_runner, "register_codex_run", lambda *_args: None)
@@ -404,3 +407,66 @@ def test_batch_agent_timeout_is_persisted_as_failure(monkeypatch, tmp_path: Path
         assert task.result_json["termination_reason"] == "timeout"
         assert task.result_json["resource_snapshot"] == {}
     assert process._frontier_agent_cgroup_scope.path is None
+
+
+def test_daily_exec_forbids_children_while_reading_exec_allows_one():
+    daily = agent_runner._codex_exec_command("prompt", "/tmp/out", task_kind="daily_brief")
+    reading = agent_runner._codex_exec_command("prompt", "/tmp/out", task_kind="paper_chat")
+    assert "agents.enabled=false" in daily
+    assert "agents.max_depth=0" in daily
+    assert "agents.max_concurrent_threads_per_session=1" in reading
+    assert "agents.max_depth=1" in reading
+
+
+def test_legacy_config_cannot_restore_parallel_root_agents():
+    from frontier.config import Settings
+
+    value = Settings(
+        _env_file=None,
+        agent_max_concurrent_runs=6,
+        codex_app_server_max_workers=4,
+        codex_max_concurrent_subagents=8,
+    )
+    assert value.agent_max_concurrent_runs == 2
+    assert value.general_agent_max_concurrent_runs == 1
+    assert value.codex_app_server_max_workers == 1
+    assert value.codex_max_concurrent_subagents == 1
+
+
+def test_daily_prompt_owns_inline_author_institution_curation():
+    task = TaskRun(id="daily-test", kind="daily_brief", payload_json={"date": "2026-11-08"})
+    prompt = agent_runner.build_prompt(task)
+    assert "Never spawn subagents" in prompt
+    assert "verify first_author and primary_affiliation" in prompt
+    assert "paper first-page" in prompt
+    assert "Never spawn subagents" in prompt
+
+
+def test_foreground_and_background_slots_are_independent_and_serial():
+    from concurrent.futures import ThreadPoolExecutor
+
+    foreground_started = threading.Event()
+    background_started = threading.Event()
+    second_foreground = threading.Event()
+    second_background = threading.Event()
+    release = threading.Event()
+
+    def occupy(kind, started):
+        with agent_runtime.root_agent_slot(task_kind=kind):
+            started.set()
+            assert release.wait(5)
+
+    with ThreadPoolExecutor(4) as executor:
+        first = executor.submit(occupy, "paper_chat", foreground_started)
+        daily = executor.submit(occupy, "daily_brief", background_started)
+        try:
+            assert foreground_started.wait(5)
+            assert background_started.wait(5)
+            queued_reading = executor.submit(occupy, "paper_chat", second_foreground)
+            queued_daily = executor.submit(occupy, "daily_brief", second_background)
+            assert not second_foreground.wait(0.1)
+            assert not second_background.wait(0.1)
+        finally:
+            release.set()
+        for future in (first, daily, queued_reading, queued_daily):
+            future.result(5)

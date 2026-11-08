@@ -50,7 +50,7 @@ def test_paper_search_includes_model_names_aliases_and_screening_notes(
         json={
             "model_short_name": "CW-WAM",
             "search_aliases": ["contact wrench WAM", "接触力世界动作模型"],
-            "screening_feedback": "我的简记：力控操作主线",
+            "user_note": "我的简记：力控操作主线",
         },
     )
     assert updated.status_code == 200, updated.text
@@ -295,52 +295,6 @@ def test_arxiv_abs_metadata_parses_all_authors_without_atom_api() -> None:
     assert payload.published_at.isoformat() == "2026-08-10"
 
 
-def test_health_and_defaults(client: TestClient) -> None:
-    assert client.get("/api/health").json()["status"] == "ok"
-    settings = {item["key"]: item["value_json"] for item in client.get("/api/settings").json()}
-    assert settings["abstract_limit"] == 100
-    assert settings["fulltext_limit"] == 10
-    assert settings["brief_limit"] == 50
-    assert settings["featured_limit"] == 10
-    assert settings["daily_time"] == "09:05"
-    assert (
-        client.put(
-            "/api/settings",
-            json={"brief_limit": 10, "featured_limit": 4},
-        ).status_code
-        == 200
-    )
-    assert (
-        client.put(
-            "/api/settings",
-            json={"brief_limit": 51, "featured_limit": 4},
-        ).status_code
-        == 422
-    )
-    assert (
-        client.put(
-            "/api/settings",
-            json={"brief_limit": 3, "featured_limit": 3},
-        ).status_code
-        == 422
-    )
-    assert (
-        client.put(
-            "/api/settings",
-            json={"brief_limit": 50, "featured_limit": 10},
-        ).status_code
-        == 200
-    )
-    assert client.put("/api/settings/daily_time", json={"value": "09:30"}).status_code == 200
-    assert client.put("/api/settings/daily_time", json={"value": "9:30"}).status_code == 422
-    settings_after = {
-        item["key"]: item["value_json"] for item in client.get("/api/settings").json()
-    }
-    assert settings_after["daily_time"] == "09:30"
-    assert settings_after["daily_hour"] == 9
-    assert settings_after["daily_minute"] == 30
-
-
 def test_paper_dedup_annotations_and_feedback(client: TestClient) -> None:
     paper = create_paper(client)
     duplicate = create_paper(client)
@@ -390,9 +344,8 @@ def test_paper_dedup_annotations_and_feedback(client: TestClient) -> None:
     finish = client.post(
         f"/api/papers/{paper['id']}/finish",
         json={
-            "summary": "A useful tactile VLA paper [[page:2]].",
-            "suggested_interested": True,
-            "suggested_quality": True,
+            "post_read_summary": "A useful tactile VLA paper [[page:2]].",
+            "suggested_score": 0.8,
             "suggested_tags": ["VLA"],
         },
     )
@@ -400,8 +353,7 @@ def test_paper_dedup_annotations_and_feedback(client: TestClient) -> None:
     confirmed = client.post(
         f"/api/papers/{paper['id']}/confirm-feedback",
         json={
-            "interested": True,
-            "quality": True,
+            "user_score": 0.8,
             "tag_ids": [tag["id"]],
             "new_tags": ["触觉"],
         },
@@ -433,8 +385,7 @@ def test_paper_dedup_annotations_and_feedback(client: TestClient) -> None:
     assert cancelled.status_code == 200
     assert cancelled.json()["status"] == "candidate"
     assert cancelled.json()["reading_completed_at"] is None
-    assert cancelled.json()["is_interested"] is False
-    assert cancelled.json()["is_quality"] is False
+    assert cancelled.json()["user_score"] is None
     assert cancelled.json()["pending_feedback"] == {}
     assert cancelled.json()["nodes"] == []
     assert {item["name"] for item in cancelled.json()["tags"]} == {"VLA", "触觉"}
@@ -442,334 +393,6 @@ def test_paper_dedup_annotations_and_feedback(client: TestClient) -> None:
         item["id"] == paper["id"]
         for item in client.get("/api/papers", params={"library": True}).json()["items"]
     )
-
-
-def test_finish_reading_stores_and_serializes_structured_summary(
-    client: TestClient,
-) -> None:
-    paper = create_paper(client, "Structured completion summary")
-    brief = client.post(
-        "/api/briefs",
-        json={"brief_date": "2026-08-01", "title": "Structured summary brief"},
-    ).json()
-    assert (
-        client.post(
-            f"/api/briefs/{brief['id']}/items",
-            json={"paper_id": paper["id"], "rank": 1, "tier": "featured"},
-        ).status_code
-        == 200
-    )
-    assert client.post(f"/api/briefs/{brief['id']}/publish").status_code == 200
-    structured = {
-        "problem": "研究如何提升操作泛化能力 [[page:1]]。",
-        "innovation": "提出统一策略并给出消融证据 [[page:4]]。",
-        "experiment": "在三个基准上进行了实验 [[page:7]]。",
-        "limitations": "真实场景覆盖仍然有限 [[page:12]]。",
-        "open_questions": "跨平台迁移仍待验证 [[page:12]]。",
-        "user_attitude": "用户对跨平台迁移最感兴趣。",
-    }
-
-    response = client.post(
-        f"/api/papers/{paper['id']}/finish",
-        json={
-            "completion_summary_structured": structured,
-            "suggested_interested": True,
-            "suggested_tags": ["VLA"],
-        },
-    )
-
-    assert response.status_code == 200, response.text
-    body = response.json()
-    assert body["completion_summary_structured"] == structured
-    assert body["metadata_json"]["completion_summary_structured"] == structured
-    assert "### 解决的问题" in body["completion_summary"]
-    assert "### 用户态度" in body["completion_summary"]
-    assert "completion_summary_structured" not in body["pending_feedback"]
-    assert body["pending_feedback"]["suggested_interested"] is True
-    brief_paper = client.get(f"/api/briefs/{brief['id']}").json()["items"][0]["paper"]
-    assert brief_paper["completion_summary_structured"] == {
-        key: value for key, value in structured.items() if key != "user_attitude"
-    }
-    assert "用户对跨平台迁移" not in brief_paper["completion_summary"]
-    metadata_update = client.patch(
-        f"/api/papers/{paper['id']}", json={"metadata_json": {"custom": "value"}}
-    )
-    assert metadata_update.status_code == 200, metadata_update.text
-    assert metadata_update.json()["completion_summary_structured"] == structured
-
-
-def test_metadata_update_saves_edited_structured_summary_and_preserves_metadata(
-    client: TestClient,
-) -> None:
-    paper = create_paper(client, "Edit completion summary from metadata")
-    seeded = client.patch(
-        f"/api/papers/{paper['id']}/metadata",
-        json={"metadata_json": {"custom_metadata": {"must": "remain"}}},
-    )
-    assert seeded.status_code == 200, seeded.text
-    edited = {
-        "problem": "  手动修改后的解决问题。  ",
-        "innovation": "手动修改后的创新内容。",
-        "experiment": "手动修改后的实验。",
-        "limitations": "手动修改后的局限。",
-        "open_questions": "手动修改后的未解决问题。",
-        "user_attitude": "手动修改后的用户态度。",
-    }
-
-    response = client.patch(
-        f"/api/papers/{paper['id']}/metadata",
-        json={"completion_summary_structured": edited},
-    )
-
-    assert response.status_code == 200, response.text
-    body = response.json()
-    expected = {**edited, "problem": edited["problem"].strip()}
-    assert body["completion_summary_structured"] == expected
-    assert body["metadata_json"]["completion_summary_structured"] == expected
-    assert body["metadata_json"]["custom_metadata"] == {"must": "remain"}
-    assert "手动修改后的解决问题" in body["completion_summary"]
-    assert "手动修改后的用户态度" in body["completion_summary"]
-    assert body["is_interested"] is False
-    assert body["is_quality"] is False
-
-
-def test_confirm_feedback_saves_user_edited_structured_summary(
-    client: TestClient,
-) -> None:
-    paper = create_paper(client, "Edit completion summary while confirming")
-    assert client.post(f"/api/papers/{paper['id']}/finish", json={}).status_code == 200
-    edited = {
-        "problem": "确认时修改的解决问题。",
-        "innovation": "确认时修改的创新内容。",
-        "experiment": "确认时修改的实验。",
-        "limitations": "确认时修改的局限。",
-        "open_questions": "确认时修改的未解决问题。",
-        "user_attitude": "确认时修改的用户态度。",
-    }
-
-    response = client.post(
-        f"/api/papers/{paper['id']}/confirm-feedback",
-        json={
-            "interested": True,
-            "quality": False,
-            "completion_summary_structured": edited,
-        },
-    )
-
-    assert response.status_code == 200, response.text
-    body = response.json()
-    assert body["status"] == "completed"
-    assert body["is_interested"] is True
-    assert body["is_quality"] is False
-    assert body["completion_summary_structured"] == edited
-    assert body["metadata_json"]["completion_summary_structured"] == edited
-    assert "确认时修改的解决问题" in body["completion_summary"]
-    assert "确认时修改的用户态度" in body["completion_summary"]
-
-
-def test_quality_level_is_five_state_and_can_be_revised_with_interest(
-    client: TestClient,
-) -> None:
-    paper = create_paper(client, "Three-state user evaluation")
-    assert client.post(f"/api/papers/{paper['id']}/finish", json={}).status_code == 200
-
-    confirmed = client.post(
-        f"/api/papers/{paper['id']}/confirm-feedback",
-        json={"interest_level": "neutral", "quality_level": "poor"},
-    )
-    assert confirmed.status_code == 200, confirmed.text
-    assert confirmed.json()["interest_level"] == "neutral"
-    assert confirmed.json()["quality_level"] == "poor"
-    assert confirmed.json()["is_quality"] is False
-
-    revised = client.patch(
-        f"/api/papers/{paper['id']}/metadata",
-        json={"interest_level": "interested", "quality_level": "excellent"},
-    )
-    assert revised.status_code == 200, revised.text
-    body = revised.json()
-    assert body["interest_level"] == "interested"
-    assert body["quality_level"] == "excellent"
-    assert body["is_interested"] is True
-    assert body["is_quality"] is True
-    provenance = body["metadata_json"]["feedback_provenance"]
-    assert provenance["revision"] == 2
-    assert provenance["quality_level"] == "excellent"
-    assert provenance["evidence_key"] == f"paper:{paper['id']}:feedback:2"
-
-
-def test_screening_supports_five_levels_and_agent_score_confirmation(
-    client: TestClient,
-) -> None:
-    paper = create_paper(client, "Five-level screening evaluation")
-
-    confirmed = client.patch(
-        f"/api/papers/{paper['id']}/metadata",
-        json={
-            "interest_level": "high",
-            "quality_level": "good",
-            "agent_score_confirmed": True,
-        },
-    )
-    assert confirmed.status_code == 200, confirmed.text
-    body = confirmed.json()
-    assert body["screening_interest_level"] == "high"
-    assert body["screening_quality_level"] == "good"
-    assert body["agent_score_confirmed"] is True
-
-    revoked = client.patch(
-        f"/api/papers/{paper['id']}/metadata",
-        json={"agent_score_confirmed": False},
-    )
-    assert revoked.status_code == 200, revoked.text
-    assert revoked.json()["agent_score_confirmed"] is False
-
-
-def test_structured_completion_summary_requires_every_non_blank_section(
-    client: TestClient,
-) -> None:
-    paper = create_paper(client, "Incomplete structured completion summary")
-
-    missing = client.post(
-        f"/api/papers/{paper['id']}/finish",
-        json={
-            "completion_summary_structured": {
-                "problem": "解决的问题。",
-                "innovation": "创新内容。",
-                "experiment": "实验。",
-                "limitations": "局限。",
-                "open_questions": "未解决问题。",
-            }
-        },
-    )
-    blank = client.post(
-        f"/api/papers/{paper['id']}/finish",
-        json={
-            "completion_summary_structured": {
-                "problem": "解决的问题。",
-                "innovation": "创新内容。",
-                "experiment": "实验。",
-                "limitations": "局限。",
-                "open_questions": "未解决问题。",
-                "user_attitude": "   ",
-            }
-        },
-    )
-
-    assert missing.status_code == 422
-    assert blank.status_code == 422
-
-    metadata_missing = client.patch(
-        f"/api/papers/{paper['id']}/metadata",
-        json={
-            "completion_summary_structured": {
-                "problem": "解决的问题。",
-                "innovation": "创新内容。",
-                "experiment": "实验。",
-                "limitations": "局限。",
-                "open_questions": "未解决问题。",
-            }
-        },
-    )
-    confirm_blank = client.post(
-        f"/api/papers/{paper['id']}/confirm-feedback",
-        json={
-            "interested": False,
-            "quality": False,
-            "completion_summary_structured": {
-                "problem": "解决的问题。",
-                "innovation": "创新内容。",
-                "experiment": "实验。",
-                "limitations": "局限。",
-                "open_questions": "未解决问题。",
-                "user_attitude": "   ",
-            },
-        },
-    )
-    assert metadata_missing.status_code == 422
-    assert confirm_blank.status_code == 422
-
-
-def test_legacy_completion_summary_is_migrated_to_editable_structure(
-    client: TestClient,
-) -> None:
-    paper = create_paper(client, "Legacy completion summary")
-    summary = "这是旧版精读总结 [[page:2]]。"
-
-    response = client.post(
-        f"/api/papers/{paper['id']}/finish",
-        json={"summary": summary},
-    )
-
-    assert response.status_code == 200, response.text
-    assert response.json()["completion_summary"] == summary
-    structured = response.json()["completion_summary_structured"]
-    assert structured["innovation"] == summary
-    assert structured["problem"] == "历史记录未单独记录解决的问题。"
-    assert structured["experiment"] == "历史记录未单独记录实验结果。"
-    assert structured["limitations"] == "历史记录未单独记录局限。"
-    assert structured["open_questions"] == "历史记录未单独记录未解决问题。"
-    assert structured["user_attitude"] == "历史记录中没有可确认的用户态度。"
-    assert "overview" not in structured
-
-
-def test_legacy_markdown_sections_are_migrated_without_losing_content(
-    client: TestClient,
-) -> None:
-    paper = create_paper(client, "Structured legacy completion summary")
-    legacy = """### 研究问题
-
-旧问题。
-
-### 核心贡献
-
-旧贡献。
-
-### 实验结果
-
-旧实验。
-
-### 局限与遗留问题
-
-旧局限。
-
-### 用户态度
-
-旧态度。"""
-
-    response = client.post(
-        f"/api/papers/{paper['id']}/finish",
-        json={"summary": legacy},
-    )
-
-    assert response.status_code == 200, response.text
-    assert response.json()["completion_summary_structured"] == {
-        "problem": "旧问题。",
-        "innovation": "旧贡献。",
-        "experiment": "旧实验。",
-        "limitations": "旧局限。",
-        "open_questions": "历史记录未单独记录未解决问题。",
-        "user_attitude": "旧态度。",
-    }
-
-
-def test_agent_analysis_is_not_exposed_as_a_private_reading_summary(
-    client: TestClient,
-) -> None:
-    paper = create_paper(client, "Analysis is not a completion summary")
-
-    response = client.patch(
-        f"/api/papers/{paper['id']}/metadata",
-        json={
-            "problem": "Agent 提取的研究问题",
-            "innovation": "Agent 提取的创新",
-            "experiment": "Agent 提取的实验",
-            "limitations": "Agent 提取的局限",
-        },
-    )
-
-    assert response.status_code == 200, response.text
-    assert response.json()["completion_summary_structured"] is None
 
 
 def test_papers_are_grouped_by_reading_status(client: TestClient) -> None:
@@ -780,12 +403,14 @@ def test_papers_are_grouped_by_reading_status(client: TestClient) -> None:
     ignored = create_paper(client, "Status order ignored")
 
     assert client.post(f"/api/papers/{reading['id']}/start-reading").status_code == 200
+    assert client.post(f"/api/papers/{pending['id']}/start-reading").status_code == 200
     assert client.post(f"/api/papers/{pending['id']}/finish", json={}).status_code == 200
+    assert client.post(f"/api/papers/{completed['id']}/start-reading").status_code == 200
     assert client.post(f"/api/papers/{completed['id']}/finish", json={}).status_code == 200
     assert (
         client.post(
             f"/api/papers/{completed['id']}/confirm-feedback",
-            json={"interested": False, "quality": False},
+            json={"user_score": 0},
         ).status_code
         == 200
     )
@@ -841,220 +466,6 @@ def test_subgraph_uses_node_budget_and_exposes_boundary_nodes(client: TestClient
     boundary = next(node for node in payload["boundary_nodes"] if node["id"] == nodes[3]["id"])
     assert boundary["connects_to"] == [nodes[2]["id"]]
     assert payload["has_more"] is True
-
-
-def test_graph_and_brief_snapshot(client: TestClient) -> None:
-    paper = create_paper(client, "A New Robot World Model")
-    parent = client.post(
-        "/api/graph/nodes",
-        json={"name": "VLA Test", "core_question": "How should robots act?"},
-    ).json()
-    child = client.post(
-        "/api/graph/nodes",
-        json={"name": "Tactile VLA Test", "core_question": "How should touch improve action?"},
-    ).json()
-    assert (
-        client.post(
-            "/api/graph/edges", json={"source_id": parent["id"], "target_id": child["id"]}
-        ).status_code
-        == 200
-    )
-    assert (
-        client.post(
-            "/api/graph/paper-links",
-            json={
-                "paper_id": paper["id"],
-                "node_id": child["id"],
-                "reason": "Addresses the core question.",
-                "is_key": True,
-            },
-        ).status_code
-        == 409
-    )
-    assert (
-        client.post(
-            f"/api/graph/nodes/{child['id']}/progress",
-            json={
-                "title": "New evidence",
-                "content": "Touch improved success.",
-                "paper_id": paper["id"],
-            },
-        ).status_code
-        == 409
-    )
-    assert client.get(f"/api/graph/nodes/{child['id']}").json()["paper_count"] == 0
-
-    finish = client.post(
-        f"/api/papers/{paper['id']}/finish",
-        json={"summary": "Reading complete."},
-    )
-    assert finish.status_code == 200
-    confirmed = client.post(
-        f"/api/papers/{paper['id']}/confirm-feedback",
-        json={"interested": False, "quality": False},
-    )
-    assert confirmed.status_code == 200
-    assert confirmed.json()["status"] == "completed"
-    assert (
-        client.post(
-            "/api/graph/paper-links",
-            json={
-                "paper_id": paper["id"],
-                "node_id": child["id"],
-                "reason": "Addresses the core question.",
-                "is_key": True,
-            },
-        ).status_code
-        == 200
-    )
-    assert (
-        client.post(
-            f"/api/graph/nodes/{child['id']}/progress",
-            json={
-                "title": "New evidence",
-                "content": "Touch improved success.",
-                "paper_id": paper["id"],
-            },
-        ).status_code
-        == 200
-    )
-    assert (
-        client.post(
-            f"/api/graph/nodes/{child['id']}/ideas",
-            json={"content": "Test asynchronous fusion.", "status": "to_explore"},
-        ).status_code
-        == 200
-    )
-    detail = client.get(f"/api/graph/nodes/{child['id']}").json()
-    assert detail["parents"][0]["id"] == parent["id"]
-    assert detail["papers"][0]["id"] == paper["id"]
-    assert detail["ideas"][0]["status"] == "to_explore"
-
-    brief_paper = create_paper(client, "Unread paper for brief snapshot")
-    brief = client.post(
-        "/api/briefs",
-        json={"brief_date": "2026-07-29", "title": "Test brief"},
-    ).json()
-    assert (
-        client.post(
-            f"/api/briefs/{brief['id']}/items",
-            json={"paper_id": brief_paper["id"], "rank": 1, "tier": "featured"},
-        ).status_code
-        == 200
-    )
-    published = client.post(f"/api/briefs/{brief['id']}/publish")
-    assert published.status_code == 200
-    assert published.json()["items"][0]["paper"]["title"] == brief_paper["title"]
-    assert (
-        client.post(
-            f"/api/papers/{brief_paper['id']}/finish",
-            json={"summary": "Reading complete after publication."},
-        ).status_code
-        == 200
-    )
-    assert (
-        client.post(
-            f"/api/papers/{brief_paper['id']}/confirm-feedback",
-            json={"interested": False, "quality": False},
-        ).status_code
-        == 200
-    )
-    historical = client.get(f"/api/briefs/{brief['id']}").json()
-    historical_paper = historical["items"][0]["paper"]
-    assert (
-        historical_paper["completion_summary_structured"]["innovation"]
-        == "Reading complete after publication."
-    )
-    assert "Reading complete after publication." in historical_paper["completion_summary"]
-    assert "用户态度" not in historical_paper["completion_summary"]
-    assert (
-        client.post(
-            f"/api/briefs/{brief['id']}/items",
-            json={"paper_id": brief_paper["id"], "rank": 2, "tier": "related"},
-        ).status_code
-        == 409
-    )
-
-
-def test_daily_brief_excludes_prior_reading_but_stays_stable_after_publish(
-    client: TestClient,
-) -> None:
-    candidate = create_paper(client, "Unread daily candidate")
-    other_candidate = create_paper(client, "Second unread daily candidate")
-    reading = create_paper(client, "Already being read")
-    completed = create_paper(client, "Already completed")
-    assert client.post(f"/api/papers/{reading['id']}/start-reading").status_code == 200
-    assert client.post(f"/api/papers/{completed['id']}/finish", json={}).status_code == 200
-    assert (
-        client.post(
-            f"/api/papers/{completed['id']}/confirm-feedback",
-            json={"interested": False, "quality": False},
-        ).status_code
-        == 200
-    )
-
-    # Daily briefs follow Frontier's configured research-day rollover, which can
-    # still be the previous calendar date before the configured scheduler boundary.
-    from frontier.database import SessionLocal
-    from frontier.services.research_day import current_research_date
-
-    with SessionLocal() as session:
-        today = current_research_date(session).isoformat()
-    brief = client.post(
-        "/api/briefs",
-        json={"brief_date": today, "title": "Unread-only daily brief"},
-    ).json()
-    for rank, paper in enumerate((candidate, other_candidate), start=1):
-        assert (
-            client.post(
-                f"/api/briefs/{brief['id']}/items",
-                json={"paper_id": paper["id"], "rank": rank, "tier": "featured"},
-            ).status_code
-            == 200
-        )
-    for paper in (reading, completed):
-        rejected = client.post(
-            f"/api/briefs/{brief['id']}/items",
-            json={"paper_id": paper["id"], "rank": 3, "tier": "related"},
-        )
-        assert rejected.status_code == 409
-        assert "Only unread candidate papers" in rejected.json()["detail"]
-
-    published = client.post(f"/api/briefs/{brief['id']}/publish")
-    assert published.status_code == 200, published.text
-    assert {item["paper"]["id"] for item in published.json()["items"]} == {
-        candidate["id"],
-        other_candidate["id"],
-    }
-
-    assert client.post(f"/api/papers/{candidate['id']}/start-reading").status_code == 200
-    current = client.get(f"/api/briefs/{brief['id']}").json()
-    assert [item["paper"]["id"] for item in current["items"]] == [
-        candidate["id"],
-        other_candidate["id"],
-    ]
-    assert current["items"][0]["current_status"] == "reading"
-
-    assert client.post(f"/api/papers/{candidate['id']}/cancel-reading").status_code == 200
-    restored = client.get(f"/api/briefs/{brief['id']}").json()
-    assert {item["paper"]["id"] for item in restored["items"]} == {
-        candidate["id"],
-        other_candidate["id"],
-    }
-
-    ignored = client.post(
-        f"/api/papers/{candidate['id']}/ignore",
-        json={"reason": "Not relevant after review"},
-    )
-    assert ignored.status_code == 200, ignored.text
-    retained = client.get(f"/api/briefs/{brief['id']}").json()
-    assert [item["paper"]["id"] for item in retained["items"]] == [
-        candidate["id"],
-        other_candidate["id"],
-    ]
-    assert retained["items"][0]["current_status"] == "ignored"
-    listed = client.get("/api/briefs").json()
-    assert next(item for item in listed if item["id"] == brief["id"])["item_count"] == 2
 
 
 def test_brief_publish_drops_papers_that_started_reading_after_ranking(
@@ -1395,9 +806,7 @@ def test_manual_ingest_stages_daily_recommendation_and_metadata_edit(
             "first_author": "First Author",
             "corresponding_author": "Second Author",
             "primary_affiliation": "Tactile Robotics Lab",
-            "summary": "A manually reviewed summary.",
-            "agent_comment": "Promising cross-sensor transfer.",
-            "recommendation_reason": "Relevant to tactile policy generalization.",
+            "post_read_summary": "A manually reviewed summary.",
             "tag_ids": [],
             "new_tags": ["触觉"],
         },
@@ -1412,7 +821,7 @@ def test_manual_ingest_stages_daily_recommendation_and_metadata_edit(
         item for item in refreshed["items"] if item["paper"]["id"] == result["paper"]["id"]
     )
     assert manual["paper"]["title"] == "Edited Tactile Foundation Policy"
-    assert manual["paper"]["summary"] == "A manually reviewed summary."
+    assert manual["paper"]["post_read_summary"] == "A manually reviewed summary."
 
 
 def test_manual_ingest_can_defer_agent_analysis(client: TestClient, monkeypatch) -> None:
@@ -1797,29 +1206,6 @@ def test_metadata_generation_can_be_requested_without_adding_a_brief_item(
     assert paper["id"] not in after_ids
 
 
-def test_agent_score_confirmations_are_independent(client: TestClient) -> None:
-    paper = create_paper(client, "Independent Agent score confirmations")
-    quality = client.patch(
-        f"/api/papers/{paper['id']}/metadata",
-        json={"agent_quality_confirmed": True},
-    )
-    assert quality.status_code == 200, quality.text
-    body = quality.json()
-    assert body["agent_quality_confirmed"] is True
-    assert body["agent_interest_confirmed"] is False
-    assert body["agent_score_confirmed"] is False
-
-    interest = client.patch(
-        f"/api/papers/{paper['id']}/metadata",
-        json={"agent_interest_confirmed": True},
-    )
-    assert interest.status_code == 200, interest.text
-    body = interest.json()
-    assert body["agent_quality_confirmed"] is True
-    assert body["agent_interest_confirmed"] is True
-    assert body["agent_score_confirmed"] is True
-
-
 def test_metadata_generation_queues_single_paper_abstract_translation(
     client: TestClient, monkeypatch
 ) -> None:
@@ -1844,11 +1230,12 @@ def test_confirm_feedback_preserves_metadata_tags_when_tag_ids_are_omitted(
         json={"tag_ids": [tag["id"]]},
     )
     assert [item["name"] for item in saved.json()["tags"]] == ["保留标签"]
+    assert client.post(f"/api/papers/{paper['id']}/start-reading").status_code == 200
     assert client.post(f"/api/papers/{paper['id']}/finish", json={}).status_code == 200
 
     confirmed = client.post(
         f"/api/papers/{paper['id']}/confirm-feedback",
-        json={"interested": False, "quality": False},
+        json={"user_score": 0},
     )
     assert confirmed.status_code == 200
     assert [item["name"] for item in confirmed.json()["tags"]] == ["保留标签"]
