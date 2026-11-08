@@ -146,6 +146,10 @@ tailscale serve status
 补充 2C2G 资源管理所需的新配置，再同步前端依赖、构建 Web、重启并检查
 `frontier.service`：
 
+成功构建后，部署脚本将源码版本写入 `web/dist/.frontier-build-revision`。后续发布若 `web/`
+没有变化且构建入口仍存在，则复用现有产物，跳过前端安装和构建，避免后端更新时对服务器
+产生不必要的磁盘负载。标记缺失、无效或前端有改动时仍需构建；失败构建不会更新标记。
+
 ```bash
 ./deploy/deploy-self-ali.sh
 ```

@@ -91,17 +91,21 @@ if [[ "${cgroup_mode}" == "required" ]]; then
   fi
 fi
 
-if ! command -v pnpm >/dev/null 2>&1; then
-  echo "错误：服务器未安装 pnpm。" >&2
-  exit 1
+echo "[3/5] 检查前端构建版本"
+web_build_action="$(bash "${project_dir}/deploy/web-build-required.sh" "${project_dir}")"
+if [[ "${web_build_action}" == build ]]; then
+  if ! command -v pnpm >/dev/null 2>&1; then
+    echo "错误：服务器未安装 pnpm。" >&2
+    exit 1
+  fi
+  cd "${project_dir}/web"
+  pnpm install --frozen-lockfile
+  echo "[4/5] 构建 Web"
+  pnpm build
+  git rev-parse HEAD > dist/.frontier-build-revision
+else
+  echo "[4/5] 前端源码未变化，复用已验证的构建产物。"
 fi
-
-echo "[3/5] 同步前端依赖"
-cd "${project_dir}/web"
-pnpm install --frozen-lockfile
-
-echo "[4/5] 构建 Web"
-pnpm build
 
 echo "[5/5] 重启 ${service_name}"
 if [[ ${EUID} -eq 0 ]]; then
