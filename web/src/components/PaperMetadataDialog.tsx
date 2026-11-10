@@ -3,7 +3,7 @@ import AutoAwesomeRounded from "@mui/icons-material/AutoAwesomeRounded";
 import { Alert, Box, Button, Chip, Link, Stack, Tab, Tabs, TextField, Tooltip, Typography } from "@mui/material";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useEffect, useRef, useState, type ReactNode } from "react";
-import { api, statusLabel } from "../api";
+import { api, paperStatusLabel } from "../api";
 import type { Paper, Tag } from "../types";
 import { Modal } from "./Modal";
 import { PaperAuthors } from "./PaperAuthors";
@@ -114,7 +114,7 @@ export function PaperMetadataDialog({ paperId, open, onClose }: { paperId: strin
       {paper.isLoading ? <Loading /> : paper.error ? <ErrorState error={paper.error} /> : <Stack spacing={2.5}>
         {tab === "key" && <>
           <Stack direction="row" alignItems="center" flexWrap="wrap" gap={1.5}>
-            {paper.data && <Chip size="small" variant="outlined" label={statusLabel(paper.data.status)} />}
+            {paper.data && <Chip size="small" variant="outlined" label={paperStatusLabel(paper.data.status)} />}
             {arxivUrl && <Link href={arxivUrl} target="_blank" rel="noopener noreferrer" underline="hover"
               sx={{ display: "inline-flex", alignItems: "center", gap: .35, fontSize: ".8125rem" }}>
               arXiv {paper.data?.arxiv_id}<ArrowOutwardRounded sx={{ fontSize: 14 }} />

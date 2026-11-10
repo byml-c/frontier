@@ -22,7 +22,7 @@ import {
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";
 import { useNavigate } from "react-router-dom";
-import { api, formatDate, jsonBody, statusLabel } from "../api";
+import { api, formatDate, jsonBody, paperStatusLabel } from "../api";
 import type { Paper } from "../types";
 import { PaperChoiceToggle, PaperScores } from "./PaperScores";
 import { MarkdownMessage } from "./MarkdownMessage";
@@ -92,7 +92,7 @@ export function PaperCard({
             {paper.model_short_name && <Chip size="small" color="secondary" variant="outlined" label={paper.model_short_name} />}
             <Typography variant="caption" color="text.secondary">{paper.source.toUpperCase()} · {formatDate(paper.published_at)}</Typography>
           </Stack>
-          <Chip size="small" variant="outlined" label={statusLabel(paper.status)} />
+          <Chip size="small" variant="outlined" label={paperStatusLabel(paper.status)} />
         </Stack>
         {paper.analysis_status && ["queued", "processing"].includes(paper.analysis_status) && (
           <Alert severity="info" icon={<CircularProgress size={18} />} sx={{ mb: 1.25, py: .25 }}>正在读取全文并整理信息。</Alert>

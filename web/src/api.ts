@@ -110,17 +110,22 @@ export function formatDate(value?: string | null, withTime = false): string {
   }).format(new Date(normalized));
 }
 
-export function statusLabel(status: string): string {
+export function paperStatusLabel(status: string): string {
   return {
     candidate: "待阅读",
     ignored: "已忽略",
     reading: "读过",
     feedback_pending: "待确认",
-    completed: "已精读",
+    completed: "已读完",
+  }[status] ?? status;
+}
+
+export function taskStatusLabel(status: string): string {
+  return {
     queued: "排队中",
     running: "运行中",
+    completed: "已完成",
     failed: "失败",
     cancelled: "已中断",
-    published: "已发布",
   }[status] ?? status;
 }

@@ -1,3 +1,5 @@
+import MenuBookRounded from "@mui/icons-material/MenuBookRounded";
+import { paperReadingHref } from "../components/paperReadingLink";
 import { userScoreLabel } from "../components/score";
 import AddRounded from "@mui/icons-material/AddRounded";
 import CloudUploadRounded from "@mui/icons-material/CloudUploadRounded";
@@ -35,9 +37,9 @@ import {
   Typography,
 } from "@mui/material";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { FormEvent, KeyboardEvent, MouseEvent, useEffect, useRef, useState } from "react";
-import { Link as RouterLink, useNavigate, useSearchParams } from "react-router-dom";
-import { api, formatDate, statusLabel } from "../api";
+import { FormEvent, useEffect, useRef, useState } from "react";
+import { Link as RouterLink, useSearchParams } from "react-router-dom";
+import { api, formatDate, paperStatusLabel } from "../api";
 import { Modal } from "../components/Modal";
 import { MobileConfirmAction } from "../components/MobileConfirmAction";
 import { PageHeader } from "../components/PageHeader";
@@ -63,7 +65,6 @@ const statusColors: Record<string, "default" | "primary" | "warning" | "success"
 };
 
 export function LibraryPage() {
-  const navigate = useNavigate();
   const [searchParams, setSearchParams] = useSearchParams();
   const queryClient = useQueryClient();
   const tab: LibraryTab = searchParams.get("view") === "collection" ? "collection" : "papers";
@@ -157,7 +158,7 @@ export function LibraryPage() {
                   <MenuItem value="candidate" key="candidate">待阅读</MenuItem>,
                   <MenuItem value="reading" key="reading">读过</MenuItem>,
                   <MenuItem value="feedback_pending" key="feedback_pending">待确认</MenuItem>,
-                  <MenuItem value="completed" key="completed">已精读</MenuItem>,
+                  <MenuItem value="completed" key="completed">已读完</MenuItem>,
                   <MenuItem value="ignored" key="ignored">已忽略</MenuItem>,
                 ] : [
                 ]}
@@ -202,7 +203,6 @@ export function LibraryPage() {
               key={paper.id}
               paper={paper}
               accumulated={tab === "collection"}
-              onOpen={() => navigate(`/paper/${paper.id}`)}
               onTagClick={(name) => updateFilters({ tag_q: name })}
               query={queryFilters}
               onMetadata={() => setMetadataId(paper.id)}
@@ -234,7 +234,7 @@ export function LibraryPage() {
         }}
       />
       {metadataId && <PaperMetadataDialog paperId={metadataId} open onClose={() => setMetadataId(null)} />}
-      <Modal open={Boolean(cancelPaper)} onClose={() => setCancelPaper(null)} title="取消精读状态">
+      <Modal open={Boolean(cancelPaper)} onClose={() => setCancelPaper(null)} title="取消阅读状态">
         <Stack spacing={2}>
           <Typography>论文将回到“待阅读”，并退出积累库。已有元数据、标签、笔记和对话会保留；已建立的研究节点关联会移除。</Typography>
           {cancelReading.error && <Alert severity="error">{cancelReading.error.message}</Alert>}
@@ -257,7 +257,6 @@ export function LibraryPage() {
 function PaperCard({
   paper,
   accumulated,
-  onOpen,
   onTagClick,
   onMetadata,
   onCancelReading,
@@ -269,7 +268,6 @@ function PaperCard({
 }: {
   paper: Paper;
   accumulated: boolean;
-  onOpen: () => void;
   onTagClick: (tagId: string) => void;
   onMetadata: () => void;
   onCancelReading: () => void;
@@ -284,20 +282,14 @@ function PaperCard({
   const snippets = libraryMatchSnippets(paper, query);
   const score = paperRating(paper, query.ratingSource);
   const scoreLabel = query.ratingSource === "user" ? userScoreLabel(score) : score == null ? "未评分" : String(score);
-  function openFromCard(event: MouseEvent<HTMLElement> | KeyboardEvent<HTMLElement>) {
-    const target = event.target as Element;
-    if (target.closest("button, a, input, textarea, select, [role=button]")) return;
-    if ("key" in event && !["Enter", " "].includes(event.key)) return;
-    if ("key" in event) event.preventDefault();
-    onOpen();
-  }
+  const readingHref = paperReadingHref(paper.id);
   return (
-    <Card role="link" tabIndex={0} aria-label={`阅读 ${paper.title}`} onClick={openFromCard} onKeyDown={openFromCard} sx={{ cursor: "pointer", "&:focus-visible": { outline: "2px solid", outlineColor: "primary.main", outlineOffset: 2 } }}>
+    <Card>
       <CardContent sx={{ pb: 1.25 }}>
         <Stack direction="row" alignItems="center" columnGap={1} rowGap={0.75} flexWrap="wrap">
           <Chip
             size="small"
-            label={statusLabel(paper.status)}
+            label={paperStatusLabel(paper.status)}
             color={statusColors[paper.status] ?? "default"}
             sx={{ fontWeight: 700 }}
           />
@@ -322,9 +314,10 @@ function PaperCard({
             </Box>
           ))}
           <Box sx={{ flex: 1 }} />
+          <MuiLink href={readingHref} target="_blank" rel="noopener noreferrer" underline="hover" sx={{ display: "inline-flex", alignItems: "center", gap: .5, fontSize: "0.8125rem", fontWeight: 600, whiteSpace: "nowrap" }}><MenuBookRounded sx={{ fontSize: 18 }} />阅读</MuiLink>
           <Tooltip title={isDaily ? "已是今日推荐" : "设为今日推荐"}><span><IconButton size="small" color={isDaily ? "warning" : "primary"} aria-label={isDaily ? "已是今日推荐" : "设为今日推荐"} disabled={isDaily || settingDaily || !dailyReady} onClick={onSetDaily} sx={{ display: { xs: "inline-flex", sm: "none" } }}><StarRounded fontSize="small" /></IconButton></span></Tooltip>
           <Button size="small" color={isDaily ? "warning" : "primary"} startIcon={<StarRounded />} disabled={isDaily || settingDaily || !dailyReady} onClick={onSetDaily} sx={{ display: { xs: "none", sm: "inline-flex" } }}>{isDaily ? "今日推荐" : "设为今日推荐"}</Button>
-          {(["reading", "feedback_pending", "completed"] as string[]).includes(paper.status) && <Tooltip title="取消精读状态"><IconButton size="small" color="warning" aria-label="取消精读状态" onClick={onCancelReading}><UndoRounded fontSize="small" /></IconButton></Tooltip>}
+          {(["reading", "feedback_pending", "completed"] as string[]).includes(paper.status) && <Tooltip title="取消阅读状态"><IconButton size="small" color="warning" aria-label="取消阅读状态" onClick={onCancelReading}><UndoRounded fontSize="small" /></IconButton></Tooltip>}
           <Tooltip title="查看和编辑论文信息"><IconButton size="small" color="primary" aria-label="论文信息" onClick={onMetadata}><EditNoteRounded fontSize="small" /></IconButton></Tooltip>
         </Stack>
         {accumulated && (
@@ -362,7 +355,7 @@ function PaperCard({
       <CardContent
         sx={{ pt: 1.25, borderRadius: 1 }}
       >
-        <Typography variant="h3"><PaperTitle title={paper.title} highlightTerms={titleTerms} /></Typography>
+        <Typography variant="h3"><MuiLink href={readingHref} target="_blank" rel="noopener noreferrer" color="inherit" underline="hover"><PaperTitle title={paper.title} highlightTerms={titleTerms} /></MuiLink></Typography>
         <Typography variant="body2" color="text.secondary" sx={{ mt: 0.5 }}>
           <HighlightText text={paper.first_author || "作者信息待确认"} terms={queryTerms(query.q)} />
           {paper.primary_affiliation ? <> · <HighlightText text={paper.primary_affiliation} terms={unitTerms} /></> : ""} · {paper.source}

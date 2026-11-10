@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
 import { paperReadingHref, readingSourceBriefItem } from "../src/components/paperReadingLink.ts";
-import { statusLabel } from "../src/api.ts";
+import { paperStatusLabel } from "../src/api.ts";
 
 test("reading destination preserves brief provenance for a copied or middle-clicked link", () => {
   const href = paperReadingHref("paper-1", "brief-item-2");
@@ -17,5 +17,5 @@ test("reading entry is a native new-tab link without a click-time mutation", () 
   const source = readFileSync(new URL("../src/components/PaperCard.tsx", import.meta.url), "utf8");
   assert.match(source, /<Link href=\{paperReadingHref\(paper.id, briefItemId\)\} target="_blank" rel="noopener noreferrer"/);
   assert.doesNotMatch(source, /startReading\.mutate|开始精读|继续精读/);
-  assert.equal(statusLabel("reading"), "读过");
+  assert.equal(paperStatusLabel("reading"), "读过");
 });
