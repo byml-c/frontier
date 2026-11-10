@@ -553,6 +553,12 @@ def brief_create(data: str = typer.Option(...)) -> None:
     emit(client.request("POST", "/api/briefs", json=parse_json(data)))
 
 
+@brief_app.command("update")
+def brief_update(brief_id: str, data: str = typer.Option(...)) -> None:
+    """Edit a brief's title or introduction without changing its papers."""
+    emit(client.request("PATCH", f"/api/briefs/{brief_id}", json=parse_json(data)))
+
+
 @brief_app.command("add-paper")
 def brief_add_paper(brief_id: str, paper_id: str, rank: int, tier: str = "related") -> None:
     emit(

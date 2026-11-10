@@ -213,3 +213,6 @@ uv run frontier paper assign-group PAPER_ID GROUP_ID
 Author cards remain paper-scoped and retain stable IDs. Deleting a group detaches its author,
 paper, and group-tag associations without deleting papers or authors. Automatic per-paper metadata
 Agents are retired; daily first-author/institution curation belongs to the single daily Agent.
+
+Use `frontier brief update BRIEF_ID --data '{"title":"研究简报","introduction":"覆盖说明"}'`
+to correct draft or published brief text; this never changes membership or ranking.

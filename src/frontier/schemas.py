@@ -268,6 +268,13 @@ class BriefCreate(BaseModel):
     interest_context_digest: str | None = None
 
 
+class BriefUpdate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    title: str | None = Field(default=None, min_length=1, max_length=500)
+    introduction: str | None = Field(default=None, max_length=20_000)
+
+
 class BriefItemCreate(BaseModel):
     paper_id: str
     rank: int = Field(ge=1)

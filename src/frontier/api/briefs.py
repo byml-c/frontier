@@ -9,7 +9,7 @@ from sqlalchemy.orm import Session
 
 from ..database import get_session
 from ..models import Brief, BriefItem, Paper, TaskRun
-from ..schemas import BriefCreate, BriefItemCreate
+from ..schemas import BriefCreate, BriefItemCreate, BriefUpdate
 from ..services.abstract_translation import queue_brief_abstract_translations
 from ..services.common import (
     BRIEF_LIMIT_DEFAULT,
@@ -123,6 +123,15 @@ def create_brief(payload: BriefCreate, session: Annotated[Session, Depends(get_s
                     ),
                 )
             changed = False
+            for field in ("title", "introduction"):
+                if field not in payload.model_fields_set:
+                    continue
+                value = getattr(payload, field)
+                if field == "title" and not value:
+                    continue
+                if getattr(existing, field) != value:
+                    setattr(existing, field, value)
+                    changed = True
             if payload.task_id and existing.task_id != payload.task_id:
                 existing.task_id = payload.task_id
                 changed = True
@@ -198,6 +207,7 @@ def _queue_daily_brief_regeneration(
             session.delete(item)
 
     brief.status = "draft"
+    brief.title = f"{brief.brief_date.isoformat()} 研究简报"
     brief.published_at = None
     brief.introduction = None
     brief.interest_context_digest = None
@@ -208,6 +218,31 @@ def _queue_daily_brief_regeneration(
     session.commit()
     background_tasks.add_task(submit_task, claim.task.id)
     return {"id": claim.task.id, "status": claim.task.status, "brief_id": brief.id}
+
+
+@router.patch("/{brief_id}")
+def update_brief(
+    brief_id: str,
+    payload: BriefUpdate,
+    session: Annotated[Session, Depends(get_session)],
+) -> dict:
+    brief = _brief_or_404(session, brief_id)
+    changes = payload.model_dump(exclude_unset=True)
+    if "title" in changes and (not changes["title"] or not changes["title"].strip()):
+        raise HTTPException(status_code=422, detail="Brief title must not be empty")
+    for field, value in changes.items():
+        setattr(brief, field, value)
+    if changes:
+        log_operation(
+            session,
+            actor="user",
+            action="brief.updated",
+            entity_type="brief",
+            entity_id=brief.id,
+            detail={"fields": sorted(changes)},
+        )
+        session.commit()
+    return _serialize_brief(session, brief)
 
 
 @router.post("/{brief_id}/recover-failed")
