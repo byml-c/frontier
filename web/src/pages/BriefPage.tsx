@@ -27,6 +27,7 @@ export function BriefPage() {
       catch (error) { if (error instanceof ApiError && error.status === 404) return null; throw error; }
     },
     retry: false,
+    refetchOnWindowFocus: "always",
     refetchInterval: (query) => query.state.data?.items.some((item) => item.paper.abstract_translation_status === "queued") ? 3000 : false,
   });
   const run = useMutation({

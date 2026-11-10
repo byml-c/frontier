@@ -114,7 +114,7 @@ export function statusLabel(status: string): string {
   return {
     candidate: "待阅读",
     ignored: "已忽略",
-    reading: "精读中",
+    reading: "读过",
     feedback_pending: "待确认",
     completed: "已精读",
     queued: "排队中",

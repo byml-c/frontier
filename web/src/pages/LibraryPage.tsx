@@ -87,6 +87,7 @@ export function LibraryPage() {
 
   const papers = useQuery({
     queryKey: ["papers", tab, queryFilters, page],
+    refetchOnWindowFocus: "always",
     enabled: !dateError && !(queryFilters.published_from && queryFilters.published_to && queryFilters.published_from > queryFilters.published_to),
     queryFn: () => api<{ items: Paper[]; total: number }>(
       `/api/papers?${libraryQueryParams(queryFilters, tab === "collection", page)}`,
@@ -154,7 +155,7 @@ export function LibraryPage() {
                 <MenuItem value="all">全部</MenuItem>
                 {tab === "papers" ? [
                   <MenuItem value="candidate" key="candidate">待阅读</MenuItem>,
-                  <MenuItem value="reading" key="reading">精读中</MenuItem>,
+                  <MenuItem value="reading" key="reading">读过</MenuItem>,
                   <MenuItem value="feedback_pending" key="feedback_pending">待确认</MenuItem>,
                   <MenuItem value="completed" key="completed">已精读</MenuItem>,
                   <MenuItem value="ignored" key="ignored">已忽略</MenuItem>,

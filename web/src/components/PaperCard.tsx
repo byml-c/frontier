@@ -30,6 +30,7 @@ import { PaperMetadataDialog } from "./PaperMetadataDialog";
 import { PaperQuickNotesFields } from "./PaperQuickNotesFields";
 import { PaperTitle } from "./PaperTitle";
 import { PaperAuthorSummary } from "./PaperAuthorSummary";
+import { paperReadingHref } from "./paperReadingLink";
 
 const ABSTRACT_LANGUAGES = [
   { value: "zh", label: "中文" },
@@ -69,10 +70,6 @@ export function PaperCard({
       queryClient.invalidateQueries({ queryKey: ["paper", paper.id] });
       setCommentAnchor(null);
     },
-  });
-  const startReading = useMutation({
-    mutationFn: () => api(`/api/papers/${paper.id}/start-reading`, jsonBody({ source_brief_item_id: briefItemId })),
-    onSuccess: () => navigate(`/paper/${paper.id}`),
   });
   const retryTranslation = useMutation({
     mutationFn: () => api(`/api/briefs/${briefId}/abstract-translations/${paper.id}/retry`, { method: "POST" }),
@@ -120,7 +117,7 @@ export function PaperCard({
             <Button size="small" onClick={() => retryTranslation.mutate()} disabled={retryTranslation.isPending}>{paper.abstract_translation_status === "failed" ? "重试" : "翻译"}</Button>
           )}
         </Stack>
-        {(saveScreening.error || retryTranslation.error || startReading.error) && <Alert severity="error" sx={{ mt: 1 }}>{(saveScreening.error || retryTranslation.error || startReading.error)?.message}</Alert>}
+        {(saveScreening.error || retryTranslation.error) && <Alert severity="error" sx={{ mt: 1 }}>{(saveScreening.error || retryTranslation.error)?.message}</Alert>}
         <Typography component="div" variant="body2" color="text.secondary" sx={{ mt: 1 }}><MarkdownMessage content={abstract} /></Typography>
         {(paper.model_short_name || !!paper.search_aliases?.length || paper.user_note) && (
           <Stack direction="row" flexWrap="wrap" alignItems="center" gap={.75} sx={{ mt: 1 }}>
@@ -151,9 +148,9 @@ export function PaperCard({
       </CardContent>
       <Divider sx={{ mt: 1.5 }} />
       <CardActions sx={{ pt: 1.5, gap: .5 }}>
-        <Button size="small" variant="contained" color={paper.status === "feedback_pending" ? "warning" : "primary"} startIcon={<MenuBookRounded />} disabled={startReading.isPending} onClick={() => startReading.mutate()}>
-          {paper.status === "feedback_pending" ? "确认精读结论" : paper.status === "reading" ? "继续精读" : paper.status === "completed" ? "继续阅读" : "开始精读"}
-        </Button>
+        <Link href={paperReadingHref(paper.id, briefItemId)} target="_blank" rel="noopener noreferrer" underline="hover" sx={{ display: "inline-flex", alignItems: "center", gap: .75, px: 1, py: .5, fontSize: "0.8125rem", fontWeight: 600, whiteSpace: "nowrap" }}>
+          <MenuBookRounded sx={{ fontSize: 18 }} />阅读
+        </Link>
         <Button size="small" color="inherit" onClick={() => setMetadataOpen(true)} sx={{ whiteSpace: "nowrap" }}>论文信息</Button>
         <Box sx={{ flex: 1 }} />
         {paper.source_url && <Button size="small" component={Link} href={paper.source_url} target="_blank" rel="noreferrer" endIcon={<ArrowOutwardRounded />} sx={{ whiteSpace: "nowrap" }}>查看原文</Button>}

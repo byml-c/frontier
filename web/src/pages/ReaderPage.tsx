@@ -1,3 +1,4 @@
+import { readingSourceBriefItem } from "../components/paperReadingLink";
 import { useCodexSelection } from "../components/useCodexSelection";
 import ArrowBackRounded from "@mui/icons-material/ArrowBackRounded";
 import CheckRounded from "@mui/icons-material/CheckRounded";
@@ -69,6 +70,7 @@ const selectionKey = (item: SelectionState) => `${item.page}:${item.text}:${item
 export function ReaderPage() {
   const { paperId = "" } = useParams(); const navigate = useNavigate(); const location = useLocation(); const queryClient = useQueryClient(); const theme = useTheme(); const mobile = useMediaQuery(theme.breakpoints.down("md"));
   const architectureMode = location.pathname.endsWith("/architecture");
+  const sourceBriefItemId = readingSourceBriefItem(location.search);
   const scrollRef = useRef<HTMLDivElement>(null); const architectureRef = useRef<ArchitectureWorkspaceHandle>(null); const saveTimer = useRef<number | undefined>(undefined); const mobileSelectionTimer = useRef<number | undefined>(undefined); const mobileSelectionStart = useRef<{ x: number; y: number } | null>(null);
   const [pageCount, setPageCount] = useState(0); const [currentPage, setCurrentPage] = useState(1); const [width, setWidth] = useState(760); const [zoom, setZoom] = useState(1); const [searchMatchIndex, setSearchMatchIndex] = useState(0);
   const [readerMode, setReaderMode] = useState<"text" | "pdf">("pdf"); const [mobileView, setMobileView] = useState("reader"); const [readerToolsOpen, setReaderToolsOpen] = useState(false); const [sideTab, setSideTab] = useState("assistant"); const [sideWidth, setSideWidth] = useState(() => Number(localStorage.getItem("frontier-reader-side-width")) || 460);
@@ -111,7 +113,7 @@ export function ReaderPage() {
   });
   const deleteAnnotation = useMutation({ mutationFn: (id: string) => api(`/api/papers/${paperId}/annotations/${id}`, { method: "DELETE" }), onSuccess: () => { setEditingNote(null); setSelection(null); window.getSelection()?.removeAllRanges(); queryClient.invalidateQueries({ queryKey: ["annotations", paperId] }); } });
   const saveProgress = useMutation({ mutationFn: (payload: { page_number: number; zoom: number }) => api(`/api/papers/${paperId}/progress`, { method: "PUT", body: JSON.stringify({ ...payload, scroll_offset: 0 }) }) });
-  useEffect(() => { api(`/api/papers/${paperId}/start-reading`, { method: "POST" }).catch(() => undefined); }, [paperId]);
+  useEffect(() => { api(`/api/papers/${paperId}/start-reading`, jsonBody({ source_brief_item_id: sourceBriefItemId })).then(() => queryClient.invalidateQueries({ queryKey: ["paper", paperId] })).catch(() => undefined); }, [paperId, sourceBriefItemId, queryClient]);
   useEffect(() => { setChatArchitectureCards([]); setArchitectureContext(null); }, [paperId]);
   useEffect(() => { if (progress.data) { const savedPage = progress.data.page_number; setCurrentPage(savedPage); setZoom(progress.data.zoom); if (pageCount > 0) window.setTimeout(() => scrollRef.current?.querySelector(`[data-page-number="${savedPage}"]`)?.scrollIntoView({ behavior: "auto", block: "start" }), 50); } }, [progress.data, pageCount]);
   useEffect(() => { const element = scrollRef.current; if (!element) return; const observer = new ResizeObserver(([entry]) => setWidth(Math.max(280, Math.min(920, entry.contentRect.width - 32)))); observer.observe(element); return () => observer.disconnect(); }, [architectureMode, paper.data?.id, mobileView, readerMode]);
