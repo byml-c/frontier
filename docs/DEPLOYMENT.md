@@ -30,6 +30,33 @@ FRONTIER_OUTBOUND_PROXY=http://127.0.0.1:7890
 Frontier 本机 API 会通过 `NO_PROXY` 保持直连。修改后需要重启 `frontier.service`。
 不要把 Codex API key 写进项目 `.env`；继续使用该用户已有的 Codex 配置。划词翻译的独立模型只写入 `translation.env`：
 
+对话模型后端在仓库根目录的 `codex-backends.json` 中配置。本机和服务器可使用相同结构：
+
+```json
+{
+  "default_backend": "codex",
+  "backends": [
+    { "name": "codex", "codex_home": "~/.codex" },
+    { "name": "codex_deepseek", "codex_home": "~/.codex-deepseek" }
+  ]
+}
+```
+
+`~` 指运行 Frontier 服务的 Unix 用户主目录；相对路径以 JSON 文件目录为基准。
+`name` 是前端分组名称，每个 `codex_home` 使用各自已有的配置和凭据。
+模型列表从该目录的 `models_cache.json` 或配置指定的 `model_catalog_json` 读取，
+思考强度也按各模型实际支持的选项显示。新后端没有目录缓存时只提供配置中的当前模型；
+可先用相应 `CODEX_HOME` 启动一次 Codex 生成目录。不要在 JSON 中填密钥。
+可通过 `FRONTIER_CODEX_BACKENDS_FILE` 指定另一份文件，后端条目也支持可选的 `command`
+和 `profile`。配置与目录在读取模型列表和启动对话时重新读取，前端列表最多缓存一分钟。
+
+研究助手和论文问答共用模型选择入口，每次发送会保存所选后端、模型、思考强度。
+同一后端内切换模型可继续原线程；切换后端会从可见聊天记录恢复新线程，
+因为不同 `CODEX_HOME` 的私有线程不互通。后台每日任务继续使用服务原有 Codex 设置。
+切换后端时先退出旧的空闲 App Server，再启动所选后端，仍受前台 Agent 上限约束。
+服务启动会预热一个默认后端进程，不调用模型；浏览器关闭或刷新不会取消已入队的对话，
+重新进入可查看保存的进度，显式停止按钮才取消任务。
+
 `FRONTIER_CODEX_PROFILE` 只用于显式选择 `$CODEX_HOME/<name>.config.toml`。
 
 默认配置已经可用时应保持未设置；它不是 provider 名称，也不会自动创建

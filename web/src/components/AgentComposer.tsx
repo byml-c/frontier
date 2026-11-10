@@ -3,6 +3,8 @@ import StopRounded from "@mui/icons-material/StopRounded";
 import { Box, CircularProgress, IconButton, InputBase, Tooltip } from "@mui/material";
 import { forwardRef, memo, useCallback, useImperativeHandle, useRef, useState, type KeyboardEventHandler } from "react";
 import type { AgentRuntimeState, Conversation } from "../types";
+import { AgentModelControls } from "./AgentModelControls";
+import type { CodexSelectionControl } from "./useCodexSelection";
 import { AgentRuntimeStatus } from "./AgentRuntimeStatus";
 
 type Props = {
@@ -15,6 +17,7 @@ type Props = {
   onStop: () => void;
   conversation?: Conversation;
   liveState?: AgentRuntimeState;
+  codex?: CodexSelectionControl;
 };
 
 export type AgentComposerHandle = {
@@ -27,7 +30,7 @@ export type AgentComposerHandle = {
  * Shared two-level composer. Draft state deliberately lives here so typing does
  * not re-render the conversation history (especially Markdown and KaTeX).
  */
-const AgentComposerImpl = forwardRef<AgentComposerHandle, Props>(function AgentComposer({ onKeyDown, placeholder, active, cancelling, stopDisabled, sendDisabled = false, onStop, conversation, liveState }, ref) {
+const AgentComposerImpl = forwardRef<AgentComposerHandle, Props>(function AgentComposer({ onKeyDown, placeholder, active, cancelling, stopDisabled, sendDisabled = false, onStop, conversation, liveState, codex }, ref) {
   const [value, setValue] = useState("");
   const valueRef = useRef("");
   const updateValue = useCallback((nextValue: string) => {
@@ -76,7 +79,7 @@ const AgentComposerImpl = forwardRef<AgentComposerHandle, Props>(function AgentC
         }}
       />
       <Box sx={{ height: 30, display: "flex", alignItems: "center", justifyContent: "space-between", gap: 1 }}>
-        <AgentRuntimeStatus conversation={conversation} liveState={liveState} />
+        <AgentRuntimeStatus conversation={conversation} liveState={liveState}>{codex && <AgentModelControls control={codex} disabled={active} />}</AgentRuntimeStatus>
         {active ? (
           <Tooltip title="停止 Agent">
             <span>
@@ -111,7 +114,7 @@ const AgentComposerImpl = forwardRef<AgentComposerHandle, Props>(function AgentC
                 type="submit"
                 color="primary"
                 aria-label="发送"
-                disabled={sendDisabled || !value.trim()}
+                disabled={sendDisabled || !value.trim() || Boolean(codex && !codex.selection)}
                 sx={{
                   width: 30,
                   height: 30,

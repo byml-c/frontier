@@ -28,6 +28,11 @@ def arxiv_clock(monkeypatch):
     monkeypatch.setattr(ingest, "sleep", wait)
     monkeypatch.setattr(ingest, "_arxiv_last_query_at", 0.0)
     monkeypatch.setattr(ingest, "_arxiv_cooldown_until", 0.0)
+
+    def no_rss(**kwargs):
+        raise ValueError("RSS unavailable in API transport tests")
+
+    monkeypatch.setattr(arxiv_sync, "fetch_rss_records", no_rss)
     return clock, waits
 
 
@@ -125,7 +130,7 @@ def test_cursor_sync_fetches_all_pages_and_commits_after_success(monkeypatch) ->
         assert result["counts"]["domain_rejected"] == 1
         assert result["counts"]["promoted_this_run"] == 1
         assert result["counts"]["candidate_pool"] >= 1
-        assert session.scalar(select(func.count(Paper.id))) == 25
+        assert session.scalar(select(func.count(Paper.id))) == 26
         assert session.scalar(select(func.count(DiscoveryItem.id))) == 2
         assert session.scalar(select(func.count(DiscoveryRun.id))) == 1
         cursor = session.get(DiscoveryCursor, arxiv_sync.SYNC_CURSOR_ID)
@@ -317,7 +322,7 @@ def test_brief_date_fixes_cutoff_and_limits_candidates_to_its_source_batch(monke
             through_date=date(2026, 10, 27),
             now=datetime(2026, 10, 28, 12, tzinfo=UTC),
         )
-        assert calls[0]["start"] == datetime(2026, 10, 24, 1, 5, tzinfo=UTC)
+        assert calls[0]["start"] == datetime(2026, 10, 26, 1, 5, tzinfo=UTC)
         assert result["window"]["start"] == "2026-10-26T01:05:00+00:00"
         assert calls[0]["end"] == datetime(2026, 10, 27, 1, 5, tzinfo=UTC)
         assert result["brief_date"] == "2026-10-27"
@@ -536,7 +541,7 @@ def test_atom_empty_complete_window_does_not_call_oai(monkeypatch):
         categories=["cs.RO"],
     )
     assert items == []
-    assert stats["fallback_used"] is False
+    assert stats["fallback_used"] is True
     assert stats["source"] == "atom"
 
 
@@ -602,8 +607,10 @@ def test_both_sources_failing_preserves_database_cursor_and_records_both_errors(
         assert session.scalar(select(func.count(Paper.id))) == 0
 
 
-def test_index_delay_overlap_finds_late_papers_without_recommending_existing_ones(monkeypatch):
-    calls = _mock_batch(monkeypatch, [_robot("2610.97003", "2026-10-25T12:00:00Z")])
+def test_rss_finds_late_papers_without_recommending_existing_ones(monkeypatch):
+    late = _robot("2610.97003", "2026-10-25T12:00:00Z")
+    late.metadata_json["arxiv_announced_at"] = "2026-10-27T00:00:00Z"
+    calls = _mock_batch(monkeypatch, [late])
     with _session() as session:
         session.add(
             DiscoveryCursor(
@@ -618,7 +625,7 @@ def test_index_delay_overlap_finds_late_papers_without_recommending_existing_one
             now=datetime(2026, 10, 27, 2, tzinfo=UTC),
         )
         assert len(first["paper_ids"]) == 1
-        assert calls[0]["start"] == datetime(2026, 10, 24, 1, 5, tzinfo=UTC)
+        assert calls[0]["start"] == datetime(2026, 10, 26, 1, 5, tzinfo=UTC)
         second = arxiv_sync.sync_arxiv(
             session,
             through_date=date(2026, 10, 28),
@@ -678,3 +685,242 @@ def test_oai_does_not_mistake_invalid_or_empty_pages_for_success(monkeypatch, bo
             end=datetime(2026, 10, 27, tzinfo=UTC),
             categories=["cs.RO"],
         )
+
+
+def test_committed_cursor_uses_article_date_and_empty_run_does_not_advance_it(monkeypatch):
+    payload = _robot("2611.08576", "2026-11-05T18:44:00Z")
+    _mock_batch(monkeypatch, [payload])
+    with _session() as session:
+        first = arxiv_sync.sync_arxiv(
+            session, through_date=date(2026, 11, 6), now=datetime(2026, 11, 6, 12, tzinfo=UTC)
+        )
+        assert first["cursor"]["committed_through"] == "2026-11-05T18:44:00+00:00"
+        assert first["cursor"]["basis"] == arxiv_sync.CURSOR_BASIS
+        _mock_batch(monkeypatch, [])
+        empty = arxiv_sync.sync_arxiv(
+            session, through_date=date(2026, 11, 7), now=datetime(2026, 11, 7, 12, tzinfo=UTC)
+        )
+        assert empty["cursor"]["committed_through"] == first["cursor"]["committed_through"]
+
+
+def test_legacy_runtime_cursor_is_rebuilt_from_stored_article_dates(monkeypatch):
+    _mock_batch(monkeypatch, [])
+    with _session() as session:
+        session.add(
+            DiscoveryCursor(
+                id="arxiv-last-updated-v1", committed_through=datetime(2026, 11, 9, 2, tzinfo=UTC)
+            )
+        )
+        run = DiscoveryRun(
+            status="completed",
+            window_start=datetime(2026, 11, 5, tzinfo=UTC),
+            window_end=datetime(2026, 11, 9, tzinfo=UTC),
+            query="old clock",
+        )
+        session.add(run)
+        session.flush()
+        session.add(
+            DiscoveryItem(
+                run_id=run.id,
+                title="Stored article",
+                arxiv_id="2611.08576",
+                status="fetched",
+                updated_at=datetime(2026, 11, 5, 18, 44, tzinfo=UTC),
+            )
+        )
+        session.commit()
+        result = arxiv_sync.sync_arxiv(
+            session, through_date=date(2026, 11, 10), now=datetime(2026, 11, 10, 12, tzinfo=UTC)
+        )
+        assert result["cursor"]["previous"] == "2026-11-05T18:44:00+00:00"
+        assert result["cursor"]["committed_through"] == result["cursor"]["previous"]
+        assert session.get(DiscoveryCursor, "arxiv-last-updated-v1") is None
+
+
+def test_rss_late_article_older_than_cursor_is_saved_even_after_known_id(monkeypatch):
+    known = _robot("2611.10000", "2026-11-06T01:00:00Z")
+    late = _robot("2611.08576", "2026-11-05T18:44:00Z")
+    for item in (known, late):
+        item.arxiv_version = 1
+        item.metadata_json["arxiv_announced_at"] = "2026-11-09T05:00:00Z"
+    _mock_batch(monkeypatch, [known, late])
+    with _session() as session:
+        session.add(
+            DiscoveryCursor(
+                id=arxiv_sync.SYNC_CURSOR_ID, committed_through=datetime(2026, 11, 7, tzinfo=UTC)
+            )
+        )
+        session.add(
+            Paper(
+                title=known.title,
+                normalized_title=known.title.lower(),
+                arxiv_id=known.arxiv_id,
+                arxiv_version=1,
+            )
+        )
+        session.commit()
+        result = arxiv_sync.sync_arxiv(
+            session, through_date=date(2026, 11, 10), now=datetime(2026, 11, 10, 12, tzinfo=UTC)
+        )
+        assert len(result["paper_ids"]) == 1
+        assert session.get(Paper, result["paper_ids"][0]).arxiv_id == late.arxiv_id
+        assert result["cursor"]["committed_through"] == "2026-11-07T00:00:00+00:00"
+
+
+def test_old_id_new_version_updates_library_without_overwriting_feedback(monkeypatch):
+    update = _robot("2501.12345", "2026-11-09T12:00:00Z")
+    update.arxiv_version = 2
+    update.abstract = "Revised abstract"
+    _mock_batch(monkeypatch, [update])
+    with _session() as session:
+        existing = Paper(
+            title="Original title",
+            normalized_title="original title",
+            arxiv_id="2501.12345",
+            arxiv_version=1,
+            user_score=0.75,
+            user_note="My note",
+            pre_read_summary="Intro",
+            post_read_summary="Read summary",
+            primary_affiliation="Verified institution",
+            pdf_path="/cached/original-v1.pdf",
+        )
+        session.add(existing)
+        session.commit()
+        result = arxiv_sync.sync_arxiv(
+            session, through_date=date(2026, 11, 10), now=datetime(2026, 11, 10, 12, tzinfo=UTC)
+        )
+        assert existing.arxiv_version == 2
+        assert existing.abstract == "Revised abstract"
+        assert existing.user_score == 0.75 and existing.user_note == "My note"
+        assert existing.pre_read_summary == "Intro" and existing.post_read_summary == "Read summary"
+        assert existing.primary_affiliation == "Verified institution"
+        assert existing.pdf_path is None
+        assert result["counts"]["updated_existing"] == 1
+        assert result["paper_ids"] == []
+
+
+def test_failed_ingestion_rolls_back_papers_and_cursor_as_one_transaction(monkeypatch):
+    _mock_batch(
+        monkeypatch,
+        [
+            _robot("2611.10001", "2026-11-09T12:00:00Z"),
+            _robot("2611.10002", "2026-11-09T13:00:00Z"),
+        ],
+    )
+    original = arxiv_sync.create_or_update_paper
+    calls = []
+
+    def interrupted(*args, **kwargs):
+        calls.append(1)
+        if len(calls) == 2:
+            raise RuntimeError("second insert failed")
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(arxiv_sync, "create_or_update_paper", interrupted)
+    with _session() as session:
+        with pytest.raises(RuntimeError, match="second insert failed"):
+            arxiv_sync.sync_arxiv(
+                session, through_date=date(2026, 11, 10), now=datetime(2026, 11, 10, 12, tzinfo=UTC)
+            )
+        assert session.scalar(select(func.count(Paper.id))) == 0
+        assert session.scalar(select(func.count(DiscoveryItem.id))) == 0
+        assert session.get(DiscoveryCursor, arxiv_sync.SYNC_CURSOR_ID).committed_through is None
+
+
+def test_atom_does_not_stop_before_all_equal_timestamp_records_are_read(monkeypatch):
+    responses = iter(
+        [
+            {
+                "items": [_robot("2611.10001", "2026-11-09T00:00:00Z")],
+                "start": 0,
+                "total_results": 3,
+            },
+            {
+                "items": [_robot("2611.10002", "2026-11-09T00:00:00Z")],
+                "start": 1,
+                "total_results": 3,
+            },
+            {
+                "items": [_robot("2611.10003", "2026-11-08T23:00:00Z")],
+                "start": 2,
+                "total_results": 3,
+            },
+        ]
+    )
+    monkeypatch.setattr(arxiv_sync, "search_arxiv_page", lambda *a, **k: next(responses))
+    items, stats = arxiv_sync._fetch_atom_records(
+        start=datetime(2026, 11, 9, tzinfo=UTC),
+        end=datetime(2026, 11, 10, tzinfo=UTC),
+        categories=["cs.RO"],
+    )
+    assert [item.arxiv_id for item in items] == ["2611.10001", "2611.10002"]
+    assert stats["pages"] == 3
+
+
+def test_rss_metadata_failure_ingests_without_falsely_advancing_cursor(monkeypatch):
+    fetch = arxiv_sync._fetch_arxiv_records
+    _mock_batch(monkeypatch, [])
+    monkeypatch.setattr(arxiv_sync, "_fetch_arxiv_records", fetch)
+    late = _robot("2611.08576", "not available")
+    late.arxiv_version = 1
+    late.metadata_json.update(
+        {
+            "arxiv_announced_at": "2026-11-09T05:00:00Z",
+            "arxiv_timestamp_pending": True,
+        }
+    )
+    monkeypatch.setattr(
+        arxiv_sync,
+        "fetch_rss_records",
+        lambda **k: (
+            [late],
+            {
+                "source": "rss",
+                "complete": True,
+                "metadata_error": "API down",
+                "cursor_can_advance": False,
+            },
+        ),
+    )
+
+    def no_api(**kwargs):
+        pytest.fail("Do not retry API scanning after RSS enrichment has established an outage")
+
+    monkeypatch.setattr(arxiv_sync, "_fetch_atom_records", no_api)
+    with _session() as session:
+        result = arxiv_sync.sync_arxiv(
+            session, through_date=date(2026, 11, 10), now=datetime(2026, 11, 10, 12, tzinfo=UTC)
+        )
+        assert len(result["paper_ids"]) == 1
+        assert result["cursor"]["committed_through"] is None
+        assert result["coverage_complete"] is False
+        assert session.scalar(select(func.count(Paper.id))) == 1
+
+
+def test_rss_new_version_never_reuses_previous_versions_timestamp(monkeypatch):
+    update = _robot("2501.12345", "")
+    update.arxiv_version = 2
+    update.metadata_json.update(
+        {
+            "arxiv_announced_at": "2026-11-09T05:00:00Z",
+            "arxiv_timestamp_pending": True,
+        }
+    )
+    _mock_batch(monkeypatch, [update])
+    with _session() as session:
+        paper = Paper(
+            title="Existing",
+            normalized_title="existing",
+            arxiv_id="2501.12345",
+            arxiv_version=1,
+            metadata_json={"arxiv_updated_at": "2025-01-01T00:00:00Z"},
+        )
+        session.add(paper)
+        session.commit()
+        arxiv_sync.sync_arxiv(
+            session, through_date=date(2026, 11, 10), now=datetime(2026, 11, 10, 12, tzinfo=UTC)
+        )
+        assert paper.arxiv_version == 2
+        assert paper.metadata_json["arxiv_updated_at"] is None
+        assert paper.metadata_json["arxiv_timestamp_pending"] is True

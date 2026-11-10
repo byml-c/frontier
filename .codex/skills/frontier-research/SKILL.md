@@ -55,13 +55,21 @@ analysis. Preserve existing `post_read_summary`, explicit user scores, notes and
    are the evidence for personalization. Refresh a stale derived profile with evidence-key citations
    through `interest profile-update`, then reload context once.
 2. Run `source arxiv-sync --date YYYY-MM-DD` once for the task date. It fixes the cutoff at that
-   date's configured daily time and uses the database's durable time cursor. The Server tries Atom
-   first (newest article updates, 100 records per page), then falls back to OAI-PMH on failure.
-   It also rechecks at least three recent days for indexing delays, deduplicates against the library,
-   trains from explicit user scores, stages the batch and applies the domain gate. Atom covers article
-   submissions/versions, not every administrative metadata edit; the result records the source and
-   coverage kind. There is no daily numeric scan cap and no per-paper Agent/API call is needed.
-   Retry incomplete coverage unchanged. Recover interrupted runs from saved same-date candidate
+   date's configured daily time. The durable source cursor is the latest stored article submission/
+   version timestamp, never the run time or largest article ID. RSS is the primary discovery source:
+   consume its entire announcement batch and compare article ID plus version, including late articles
+   older than the time cursor. Batch id_list calls enrich metadata; Atom updated-date pagination
+   supplements RSS until it passes the source cursor, including all equal-timestamp records.
+   All fetched papers enter the library; the domain gate and model only control daily candidates.
+   The cursor commits with ingestion. On a metadata/API outage, valid RSS papers are still saved,
+   unknown dates stay unknown, coverage_complete is false and the source cursor does not advance.
+   Use that exact coverage flag when saving the pool; a nonempty available pool may be published
+   with an explicit incomplete-coverage note. Never publish an empty brief as proof of no new papers
+   when coverage is incomplete. There is no daily numeric scan cap or per-paper Agent call.
+   Retry failed discovery unchanged; do not repeatedly rerun a usable RSS batch just to mask an API
+   outage. RSS does not provide a historical archive; missed announcement batches require explicit
+   historical recovery, not a larger ID or fabricated source timestamp.
+   Recover interrupted runs from saved same-date candidate
    pools when the task prompt specifies recovery source IDs; recheck current eligibility.
 3. Use only this discovery batch. Independently review `agent_review_paper_ids` using title,
    abstract and authors; preserve confident model routing. Save a continuous `agent_score` and clear

@@ -101,20 +101,24 @@ uv run frontier source arxiv-search 'ti:"exact paper title" AND au:"author surna
 ```
 
 `source arxiv-sync` is the daily cursor workflow. It trains the current metadata relevance model,
-prefers Atom article-update pages and falls back to OAI-PMH metadata harvesting on failure,
-stages and domain-filters the batch, and returns
+reads the entire current RSS announcement batch, batch-enriches exact ID/version metadata,
+supplements it with Atom article-update pages, and returns
 confident relevant IDs plus the low-confidence IDs that need Agent review. It advances the cursor
-only after the requested source window is completely covered. Atom walks newest updates until
-it reaches the lower time boundary or exhausts the results; OAI follows every resumption token.
-Both share serial rate limiting (at least three seconds) and a ten-minute network budget. Atom
-gets at most three minutes, with two 15-second attempts per page before falling back. OAI gets
-two attempts per page with a 90-second timeout, within the remaining budget.
+only after complete ingestion and coverage. It records the maximum actual article-version time,
+not the scheduled cutoff. RSS checks every ID/version, including late old IDs; Atom walks newest
+updates until strictly below the source cursor, including timestamp ties. Sources share serial rate
+limiting (at least three seconds) and a ten-minute budget. OAI is a last resort when RSS and Atom fail.
 The requested date fixes the cutoff at its configured daily update time (normally 09:05 Beijing).
-The logical next window starts at the previous committed cutoff. The actual fetch revisits at least
-the last three days to recover delayed indexing; existing papers are excluded. The result's `source`
-reports the actual fetch window, source, coverage kind and any Atom fallback error. Atom's article
-update timestamps do not cover every OAI administrative metadata change.
-Same-date retries reuse that batch and
+The next API window starts at the previous committed article timestamp. RSS announcements are not
+filtered out for being older than that boundary. New IDs are inserted and newer versions of existing
+IDs update their source metadata while preserving feedback; existing articles are not recommended
+again. RSS pubDate is an announcement date and is never copied into article timestamp fields.
+All fetched papers enter the library before domain screening of daily candidates. If enrichment
+fails, valid RSS metadata still persists, unknown dates remain unknown and the cursor stays put;
+return coverage_complete=false, preserve its notes, and never call an incomplete empty batch a day
+with no new articles. Pending timestamps are retried on later syncs. RSS's limited history means
+expired announcement batches require historical recovery; neither max-ID nor time alone proves
+complete announcement coverage. Same-date complete retries reuse their batch and
 do not advance the cutoff. Save its `run_id` as `discovery_run_id` in the candidate-pool payload.
 The pool excludes previously published recommendations and explicit user screening feedback.
 

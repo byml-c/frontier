@@ -61,12 +61,20 @@ def _remote_paper(session: Session) -> Paper:
     return paper
 
 
-def test_pdf_download_streams_to_an_atomic_file(monkeypatch, tmp_path: Path, session: Session) -> None:
+@pytest.mark.parametrize("version", [None, 2])
+def test_pdf_download_streams_to_an_atomic_file(
+    monkeypatch, tmp_path: Path, session: Session, version: int | None
+) -> None:
     paper = _remote_paper(session)
     monkeypatch.setattr(ingest.settings, "data_dir", tmp_path)
     monkeypatch.setattr(ingest, "_safe_remote_url", lambda url: url)
     monkeypatch.setattr(ingest, "external_httpx_kwargs", lambda _url: {})
     ingest.settings.ensure_directories()
+    old_path = ingest.settings.pdf_dir / f"{paper.id}.pdf"
+    if version:
+        paper.arxiv_id = "2501.12345"
+        paper.arxiv_version = version
+        old_path.write_bytes(b"%PDF-old version")
     client = httpx.Client(
         transport=httpx.MockTransport(
             lambda request: httpx.Response(
@@ -82,6 +90,9 @@ def test_pdf_download_streams_to_an_atomic_file(monkeypatch, tmp_path: Path, ses
 
     assert path.read_bytes() == b"%PDF-1.7\nsmall document"
     assert not path.with_suffix(".pdf.download").exists()
+    if version:
+        assert path.name == f"{paper.id}-v{version}.pdf"
+        assert old_path.read_bytes() == b"%PDF-old version"
     client.close()
 
 

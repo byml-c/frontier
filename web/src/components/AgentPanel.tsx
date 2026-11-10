@@ -1,3 +1,4 @@
+import { useCodexSelection } from "./useCodexSelection";
 import CloseRounded from "@mui/icons-material/CloseRounded";
 import PsychologyRounded from "@mui/icons-material/PsychologyRounded";
 import ReplayRounded from "@mui/icons-material/ReplayRounded";
@@ -56,6 +57,7 @@ export function AgentPanel({ open, onClose, width, onWidthChange }: Props) {
     enabled: open,
     refetchInterval: (query) => hasActiveConversationTurn(query.state.data) ? 1200 : false,
   });
+  const codex = useCodexSelection(conversation.data);
   const persistedTask = activeConversationTask(conversation.data);
   const activeTaskId = liveTaskId ?? persistedTask?.id ?? null;
   const active = sending || Boolean(persistedTask);
@@ -78,7 +80,7 @@ export function AgentPanel({ open, onClose, width, onWidthChange }: Props) {
     cancellingRef.current = false;
     composerRef.current?.clear(); setLiveUser(content); setStreaming(""); setActivities([]); setError(""); setLiveTaskId(null); setLiveAgentState({}); setSending(true);
     try {
-      await streamApi(`/api/conversations/${conversation.data.id}/messages/stream`, { content, context_json: { path: location.pathname } }, (streamEvent) => {
+      await streamApi(`/api/conversations/${conversation.data.id}/messages/stream`, { content, codex: codex.selection, context_json: { path: location.pathname } }, (streamEvent) => {
         setLiveAgentState((value) => updateAgentStateFromStream(value, streamEvent));
         if (streamEvent.type === "meta" && typeof streamEvent.task_id === "string") setLiveTaskId(streamEvent.task_id);
         if (streamEvent.type === "delta") setStreaming((value) => value + String(streamEvent.delta ?? ""));
@@ -121,7 +123,7 @@ export function AgentPanel({ open, onClose, width, onWidthChange }: Props) {
     cancellingRef.current = false;
     setStreaming(""); setActivities([]); setError(""); setLiveTaskId(null); setLiveAgentState({}); setSending(true);
     try {
-      await streamApi(`/api/conversations/${conversation.data.id}/messages/stream`, { content: "继续未完成的回答", retry_assistant_id: assistantId }, (streamEvent) => {
+      await streamApi(`/api/conversations/${conversation.data.id}/messages/stream`, { content: "继续未完成的回答", retry_assistant_id: assistantId, codex: codex.selection }, (streamEvent) => {
         setLiveAgentState((value) => updateAgentStateFromStream(value, streamEvent));
         if (streamEvent.type === "meta" && typeof streamEvent.task_id === "string") setLiveTaskId(streamEvent.task_id);
         if (streamEvent.type === "delta") setStreaming((value) => value + String(streamEvent.delta ?? ""));
@@ -165,7 +167,7 @@ export function AgentPanel({ open, onClose, width, onWidthChange }: Props) {
         {error && <Alert severity="error">{error}</Alert>}
       </ConversationScroller>
       <Box component="form" onSubmit={submit} sx={{ p: 2, borderTop: 1, borderColor: "divider" }}>
-        <AgentComposer ref={composerRef} onKeyDown={active ? undefined : submitChatOnEnter} placeholder={active ? "可以先输入修正后的消息，停止后重新发送" : "输入研究问题或整理指令"} active={active} cancelling={cancelling} stopDisabled={!activeTaskId || cancelling} onStop={stopAgent} conversation={conversation.data} liveState={liveAgentState} />
+        <AgentComposer ref={composerRef} onKeyDown={active ? undefined : submitChatOnEnter} placeholder={active ? "可以先输入修正后的消息，停止后重新发送" : "输入研究问题或整理指令"} active={active} cancelling={cancelling} stopDisabled={!activeTaskId || cancelling} onStop={stopAgent} conversation={conversation.data} liveState={liveAgentState} codex={codex} />
       </Box>
     </Stack>
   </Drawer>;

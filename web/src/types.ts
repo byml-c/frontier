@@ -237,17 +237,41 @@ export type Message = {
   created_at: string;
 };
 
+export type CodexSelection = {
+  backend: string;
+  model: string;
+  reasoning_effort?: string | null;
+};
+
+export type CodexModelCatalog = {
+  default_backend: string;
+  backends: Array<{
+    name: string;
+    available: boolean;
+    default_model?: string;
+    error?: string;
+    models: Array<{
+      id: string;
+      name: string;
+      reasoning_efforts: string[];
+      default_reasoning_effort: string | null;
+    }>;
+  }>;
+};
+
 export type Conversation = {
   id: string;
   kind: "global" | "paper";
   reference_id?: string | null;
   title?: string | null;
   status: string;
+  codex_selection?: CodexSelection | null;
   active_task?: { id: string; status: "queued" | "running" } | null;
   messages: Message[];
 };
 
 export type AgentRuntime = {
+  backend?: string;
   model?: string;
   reasoning_effort?: string;
   model_provider?: string;

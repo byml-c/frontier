@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
 import shlex
@@ -8,6 +9,7 @@ import signal
 import subprocess
 import threading
 import time
+from collections import deque
 from collections.abc import Iterator
 from typing import Any
 
@@ -21,7 +23,10 @@ from .services.agent_runtime import (
     create_agent_scope,
     root_agent_slot,
 )
+from .services.codex_backends import CodexBackend, resolve_selection
 from .services.outbound_network import agent_environment
+
+_logger = logging.getLogger(__name__)
 
 
 class CodexStreamError(RuntimeError):
@@ -123,10 +128,11 @@ def is_unusable_codex_thread_error(error: BaseException | str) -> bool:
     )
 
 
-def _app_server_command() -> list[str]:
-    command = [settings.codex_command, "--strict-config"]
-    if settings.codex_profile:
-        command.extend(["--profile", settings.codex_profile])
+def _app_server_command(backend: CodexBackend | None = None) -> list[str]:
+    command = [backend.command if backend else settings.codex_command, "--strict-config"]
+    profile = backend.profile if backend else settings.codex_profile
+    if profile:
+        command.extend(["--profile", profile])
     command.extend(codex_subagent_limit_args())
     command.append("app-server")
     if settings.codex_sandbox == "workspace-write" and settings.codex_network_access:
@@ -135,8 +141,11 @@ def _app_server_command() -> list[str]:
     return command
 
 
-def _environment() -> dict[str, str]:
-    return agent_environment()
+def _environment(backend: CodexBackend | None = None) -> dict[str, str]:
+    environment = agent_environment()
+    if backend is not None:
+        environment["CODEX_HOME"] = str(backend.home)
+    return environment
 
 
 def _stop_process(
@@ -169,20 +178,18 @@ def _stop_process(
         close_process_scope(process, termination_reason=reason)
 
 
-def _stop_process_for_reason(
-    process: subprocess.Popen[str], termination_reason: str
-) -> None:
+def _stop_process_for_reason(process: subprocess.Popen[str], termination_reason: str) -> None:
     process._frontier_termination_reason = termination_reason
     _stop_process(process)
 
 
-def _start_process() -> subprocess.Popen[str]:
+def _start_process(backend: CodexBackend | None = None) -> subprocess.Popen[str]:
     scope = create_agent_scope("appserver")
     try:
         process = subprocess.Popen(
-            scope.wrap_command(_app_server_command()),
+            scope.wrap_command(_app_server_command(backend)),
             cwd=PROJECT_ROOT,
-            env=_environment(),
+            env=_environment(backend),
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL,
@@ -249,6 +256,8 @@ class _CodexAppServerWorker:
         self._write_lock = threading.Lock()
         self._request_lock = threading.Lock()
         self._next_request_id = 2
+        self.backend_key: tuple | None = None
+        self.pending_messages: deque[dict[str, Any]] = deque()
 
     @property
     def alive(self) -> bool:
@@ -287,9 +296,7 @@ class CodexAppServerPool:
     """Fixed-size pool of persistent app-server workers with thread affinity."""
 
     def __init__(self, max_workers: int | None = None) -> None:
-        configured = (
-            settings.codex_app_server_max_workers if max_workers is None else max_workers
-        )
+        configured = settings.codex_app_server_max_workers if max_workers is None else max_workers
         self.max_workers = max(1, configured)
         self._condition = threading.Condition()
         self._workers: list[_CodexAppServerWorker] = []
@@ -303,8 +310,11 @@ class CodexAppServerPool:
         with self._condition:
             self._closed = False
 
-    def warm(self) -> None:
-        worker = self.acquire()
+    def warm(self, backend: CodexBackend | None = None) -> None:
+        with self._condition:
+            if self._workers or self._starting_workers or self._closed:
+                return
+        worker = self.acquire(backend=backend)
         self.release(worker)
 
     def acquire(
@@ -313,9 +323,12 @@ class CodexAppServerPool:
         *,
         deadline: float | None = None,
         cancelled: threading.Event | None = None,
+        backend: CodexBackend | None = None,
     ) -> _CodexAppServerWorker:
+        backend_key = backend.fingerprint if backend else None
         while True:
             should_start = False
+            retired_worker = None
             with self._condition:
                 self._raise_if_wait_stopped(deadline, cancelled)
                 if self._closed:
@@ -327,10 +340,21 @@ class CodexAppServerPool:
                     continue
 
                 affinity_worker = self._thread_workers.get(thread_id) if thread_id else None
-                if affinity_worker is not None and not affinity_worker.busy:
+                if (
+                    affinity_worker is not None
+                    and not affinity_worker.busy
+                    and affinity_worker.backend_key == backend_key
+                ):
                     return self._claim_worker_locked(affinity_worker, thread_id)
 
-                idle_worker = next((worker for worker in self._workers if not worker.busy), None)
+                idle_worker = next(
+                    (
+                        worker
+                        for worker in self._workers
+                        if not worker.busy and worker.backend_key == backend_key
+                    ),
+                    None,
+                )
                 if idle_worker is not None:
                     return self._claim_worker_locked(idle_worker, thread_id)
 
@@ -338,12 +362,26 @@ class CodexAppServerPool:
                     self._starting_workers += 1
                     should_start = True
                 else:
-                    self._wait_locked(deadline, cancelled)
+                    retired_worker = next(
+                        (worker for worker in self._workers if not worker.busy), None
+                    )
+                    if retired_worker is not None:
+                        self._remove_worker_locked(retired_worker, close_scope=False)
+                        # Reserve its slot until the old backend has actually exited.
+                        self._starting_workers += 1
+                        should_start = True
+                    else:
+                        self._wait_locked(deadline, cancelled)
 
             if not should_start:
                 continue
             try:
-                worker = _CodexAppServerWorker(_start_process())
+                if retired_worker is not None:
+                    _stop_process_for_reason(retired_worker.process, "backend_switch")
+                worker = _CodexAppServerWorker(
+                    _start_process(backend) if backend else _start_process()
+                )
+                worker.backend_key = backend_key
             except BaseException:
                 with self._condition:
                     self._starting_workers -= 1
@@ -450,16 +488,10 @@ class CodexAppServerPool:
                 worker.forget_thread(thread_id)
             self._condition.notify_all()
 
-    def bind_thread(
-        self, worker: _CodexAppServerWorker, thread_id: str, lease_id: int
-    ) -> None:
+    def bind_thread(self, worker: _CodexAppServerWorker, thread_id: str, lease_id: int) -> None:
         """Bind a newly started/resumed thread before its first event is exposed."""
         with self._condition:
-            if (
-                worker not in self._workers
-                or self._closed
-                or worker.active_lease_id != lease_id
-            ):
+            if worker not in self._workers or self._closed or worker.active_lease_id != lease_id:
                 return
             self._active_threads[thread_id] = (worker, lease_id)
             if thread_id not in self._forgotten_threads:
@@ -506,9 +538,7 @@ class CodexAppServerPool:
         if worker in self._workers:
             self._workers.remove(worker)
         stale_threads = [
-            thread_id
-            for thread_id, assigned in self._thread_workers.items()
-            if assigned is worker
+            thread_id for thread_id, assigned in self._thread_workers.items() if assigned is worker
         ]
         for thread_id in stale_threads:
             self._thread_workers.pop(thread_id, None)
@@ -697,8 +727,20 @@ _APP_SERVER_POOL = CodexAppServerPool()
 
 
 def start_codex_app_server_pool() -> None:
-    """Start the pool lifecycle; its first worker is created on demand."""
+    """Warm one default backend without blocking Web startup or invoking a model."""
     _APP_SERVER_POOL.start()
+
+    def warm_default() -> None:
+        try:
+            with root_agent_slot(
+                deadline=time.monotonic() + settings.agent_app_server_start_timeout_seconds
+            ):
+                backend, _selection = resolve_selection()
+                _APP_SERVER_POOL.warm(backend)
+        except (CodexStreamError, AgentSlotCancelled, AgentSlotTimeout, OSError, ValueError):
+            _logger.warning("Codex warmup unavailable; the next conversation will retry startup")
+
+    threading.Thread(target=warm_default, name="frontier-codex-warmup", daemon=True).start()
 
 
 def stop_codex_app_server_pool() -> None:
@@ -742,9 +784,7 @@ def encode_stream_event(event_type: str, **payload: Any) -> str:
     return json.dumps({"type": event_type, **payload}, ensure_ascii=False) + "\n"
 
 
-def _write_process_message(
-    process: subprocess.Popen[str], message: dict[str, Any]
-) -> None:
+def _write_process_message(process: subprocess.Popen[str], message: dict[str, Any]) -> None:
     if process.stdin is None:
         raise CodexStreamError("Codex app-server stdin is unavailable")
     process.stdin.write(json.dumps(message, ensure_ascii=False) + "\n")
@@ -764,6 +804,8 @@ def _write_message(
 def _read_message(
     connection: subprocess.Popen[str] | _CodexAppServerWorker,
 ) -> dict[str, Any]:
+    if isinstance(connection, _CodexAppServerWorker) and connection.pending_messages:
+        return connection.pending_messages.popleft()
     process = connection.process if isinstance(connection, _CodexAppServerWorker) else connection
     if process.stdout is None:
         raise CodexStreamError("Codex app-server stdout is unavailable")
@@ -782,15 +824,28 @@ def _await_response(
     connection: subprocess.Popen[str] | _CodexAppServerWorker,
     request_id: int,
 ) -> dict[str, Any]:
-    while True:
-        message = _read_message(connection)
-        if message.get("id") != request_id:
-            continue
-        if "error" in message:
-            error = message["error"]
-            detail = error.get("message") if isinstance(error, dict) else str(error)
-            raise CodexStreamError(detail or "Codex app-server request failed")
-        return message.get("result", {})
+    deferred: list[dict[str, Any]] = []
+    try:
+        while True:
+            message = _read_message(connection)
+            if message.get("id") != request_id:
+                if isinstance(connection, _CodexAppServerWorker):
+                    deferred.append(message)
+                    if len(deferred) > 4096:
+                        raise CodexStreamError(
+                            "Codex protocol event buffer exceeded its safe limit"
+                        )
+                continue
+            if "error" in message:
+                error = message["error"]
+                detail = error.get("message") if isinstance(error, dict) else str(error)
+                raise CodexStreamError(detail or "Codex app-server request failed")
+            return message.get("result", {})
+    finally:
+        if isinstance(connection, _CodexAppServerWorker):
+            # A turn can emit tokens/completion before its RPC acknowledgement.
+            # Replay these notifications in order instead of silently dropping them.
+            connection.pending_messages.extendleft(reversed(deferred))
 
 
 def _thread_id(result: dict[str, Any]) -> str:
@@ -1147,6 +1202,8 @@ def _stream_turn(
     *,
     recovery_prompt: str | None = None,
     reasoning_effort: str | None = None,
+    model: str | None = None,
+    backend_name: str | None = None,
     ephemeral: bool = False,
     run_handle: _PooledTurnHandle | None = None,
 ) -> Iterator[dict[str, Any]]:
@@ -1171,6 +1228,7 @@ def _stream_turn(
                     "cwd": str(PROJECT_ROOT),
                     "approvalPolicy": "never",
                     "sandbox": settings.codex_sandbox,
+                    **({"model": model} if model else {}),
                 },
             },
         )
@@ -1193,6 +1251,7 @@ def _stream_turn(
                         "approvalPolicy": "never",
                         "sandbox": settings.codex_sandbox,
                         "ephemeral": ephemeral,
+                        **({"model": model} if model else {}),
                     },
                 },
             )
@@ -1208,6 +1267,7 @@ def _stream_turn(
                     "approvalPolicy": "never",
                     "sandbox": settings.codex_sandbox,
                     "ephemeral": ephemeral,
+                    **({"model": model} if model else {}),
                 },
             },
         )
@@ -1218,6 +1278,13 @@ def _stream_turn(
         run_handle.raise_if_cancelled()
     yield {"type": "thread", "thread_id": thread_id}
     runtime_event = _runtime_event(result)
+    if model or reasoning_effort or backend_name:
+        runtime_event = {
+            **(runtime_event or {"type": "runtime"}),
+            **({"model": model} if model else {}),
+            **({"reasoning_effort": reasoning_effort} if reasoning_effort else {}),
+            **({"backend": backend_name} if backend_name else {}),
+        }
     if runtime_event:
         yield runtime_event
     if recovered:
@@ -1243,6 +1310,8 @@ def _stream_turn(
     }
     if reasoning_effort:
         turn_params["effort"] = reasoning_effort
+    if model:
+        turn_params["model"] = model
     turn_request_id = next_request_id(3 if thread_request_id == 2 else thread_request_id + 1)
     if run_handle:
         run_handle.mark_turn_requested()
@@ -1266,6 +1335,10 @@ def _stream_turn(
         message = _read_message(process)
         method = message.get("method")
         params = message.get("params", {})
+        if isinstance(params, dict) and params.get("threadId") not in {None, thread_id}:
+            continue
+        if isinstance(params, dict) and turn_id and params.get("turnId") not in {None, turn_id}:
+            continue
         if method == "thread/tokenUsage/updated":
             usage_event = _usage_event(params)
             if usage_event:
@@ -1334,6 +1407,11 @@ def _stream_turn(
                     }
                 else:
                     completed_text = item.get("text", "")
+                    if completed_text.startswith(streamed):
+                        suffix = completed_text[len(streamed) :]
+                        if suffix:
+                            streamed += suffix
+                            yield {"type": "delta", "delta": suffix}
             elif item.get("type") == "reasoning":
                 item_id = str(item.get("id") or "reasoning")
                 summaries = item.get("summary") or []
@@ -1355,6 +1433,8 @@ def _stream_turn(
                     yield ui_event
         elif method == "turn/completed":
             turn = params.get("turn", {})
+            if isinstance(turn, dict) and turn_id and turn.get("id") not in {None, turn_id}:
+                continue
             status = turn.get("status") if isinstance(turn, dict) else None
             if run_handle:
                 run_handle.mark_terminal()
@@ -1364,8 +1444,17 @@ def _stream_turn(
                 error = turn.get("error", {}) if isinstance(turn, dict) else {}
                 detail = error.get("message") if isinstance(error, dict) else str(error)
                 raise CodexStreamError(detail or "Codex turn failed")
-            if completed_text and not streamed:
-                yield {"type": "delta", "delta": completed_text}
+            if isinstance(turn, dict):
+                finals = [
+                    item.get("text", "")
+                    for item in turn.get("items", [])
+                    if isinstance(item, dict)
+                    and item.get("type") == "agentMessage"
+                    and item.get("phase") != "commentary"
+                ]
+                completed_text = "\n".join(finals) or completed_text
+            if completed_text.startswith(streamed) and len(completed_text) > len(streamed):
+                yield {"type": "delta", "delta": completed_text[len(streamed) :]}
             return
 
 
@@ -1378,11 +1467,15 @@ def stream_codex_prompt(
     ephemeral: bool = False,
     run_id: str | None = None,
     timeout_seconds: float | None = None,
+    selection: dict | None = None,
 ) -> Iterator[dict[str, Any]]:
+    backend = None
+    selected: dict = {}
+    if selection is not None:
+        backend, selected = resolve_selection(selection)
+        reasoning_effort = selected.get("reasoning_effort")
     wall_timeout = (
-        settings.agent_interactive_timeout_seconds
-        if timeout_seconds is None
-        else timeout_seconds
+        settings.agent_interactive_timeout_seconds if timeout_seconds is None else timeout_seconds
     )
     deadline = time.monotonic() + wall_timeout
     run_control = _RunWaitHandle()
@@ -1398,6 +1491,7 @@ def stream_codex_prompt(
                     session_id,
                     deadline=deadline,
                     cancelled=run_control.cancelled,
+                    **({"backend": backend} if backend is not None else {}),
                 )
                 run_handle = _PooledTurnHandle(worker, _APP_SERVER_POOL)
                 timed_out = threading.Event()
@@ -1427,6 +1521,11 @@ def stream_codex_prompt(
                             session_id,
                             recovery_prompt=recovery_prompt,
                             reasoning_effort=reasoning_effort,
+                            **(
+                                {"model": selected["model"], "backend_name": selected["backend"]}
+                                if selected
+                                else {}
+                            ),
                             ephemeral=ephemeral,
                             run_handle=run_handle,
                         )
@@ -1456,8 +1555,7 @@ def stream_codex_prompt(
             raise CodexRunCancelled("Agent 工作流已由用户中断") from exc
         except AgentSlotTimeout as exc:
             raise CodexStreamError(
-                "Agent turn exceeded the configured wall-clock timeout "
-                f"of {wall_timeout} seconds"
+                f"Agent turn exceeded the configured wall-clock timeout of {wall_timeout} seconds"
             ) from exc
     finally:
         if run_id:

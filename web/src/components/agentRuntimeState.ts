@@ -40,6 +40,7 @@ function hasValues(value: object | undefined): boolean {
 export function normalizeAgentRuntime(value: unknown): AgentRuntime | undefined {
   const record = asRecord(value);
   const runtime: AgentRuntime = {
+    ...(firstString(record, ["backend"]) ? { backend: firstString(record, ["backend"]) } : {}),
     model: firstString(record, ["model", "model_name"]),
     reasoning_effort: firstString(record, ["reasoning_effort", "model_reasoning_effort", "effort"]),
     model_provider: firstString(record, ["model_provider", "provider"]),
@@ -122,7 +123,7 @@ export function updateAgentStateFromStream(previous: AgentRuntimeState, event: u
 }
 
 export function reasoningEffortLabel(value?: string): string {
-  return ({ minimal: "最简", low: "低", medium: "中", high: "高", xhigh: "极高" } as Record<string, string>)[value ?? ""] ?? value ?? "未报告";
+  return ({ none: "关闭", max: "最高", ultra: "超高", minimal: "最简", low: "低", medium: "中", high: "高", xhigh: "极高" } as Record<string, string>)[value ?? ""] ?? value ?? "未报告";
 }
 
 export function modelDisplayName(value?: string): string {

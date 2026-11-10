@@ -108,7 +108,7 @@ def find_existing_paper(
 
 
 def create_or_update_paper(
-    session: Session, payload: PaperCreate, *, actor: str
+    session: Session, payload: PaperCreate, *, actor: str, commit: bool = True
 ) -> tuple[Paper, bool]:
     arxiv_id = payload.arxiv_id
     arxiv_version = payload.arxiv_version
@@ -162,7 +162,8 @@ def create_or_update_paper(
             entity_type="paper",
             entity_id=existing.id,
         )
-        session.commit()
+        if commit:
+            session.commit()
         return existing, False
 
     paper = Paper(
@@ -182,7 +183,8 @@ def create_or_update_paper(
         entity_type="paper",
         entity_id=paper.id,
     )
-    session.commit()
+    if commit:
+        session.commit()
     return paper, True
 
 
@@ -315,6 +317,10 @@ def search_arxiv_page(
         max_attempts=max_attempts,
         retry_backoff=retry_backoff,
     )
+    return _parse_arxiv_page(response, start=start)
+
+
+def _parse_arxiv_page(response: httpx.Response, *, start: int) -> dict:
     feed = feedparser.parse(response.text)
     if feed.get("bozo") or feed.get("version") != "atom10":
         raise ValueError("arXiv returned a malformed Atom feed")
@@ -335,9 +341,7 @@ def search_arxiv_page(
         published = datetime.fromisoformat(entry.published).date()
         primary_category = entry.get("arxiv_primary_category")
         primary_term = (
-            primary_category.get("term")
-            if isinstance(primary_category, dict)
-            else primary_category
+            primary_category.get("term") if isinstance(primary_category, dict) else primary_category
         )
         results.append(
             PaperCreate(
@@ -375,6 +379,29 @@ def search_arxiv_page(
     if total is not None and start < total and not results:
         raise ValueError("arXiv returned an empty page before the end; retry this offset")
     return {"items": results, "total_results": total, "start": start}
+
+
+def fetch_arxiv_ids(identifiers: list[str]) -> list[PaperCreate]:
+    """Fetch one exact batch, including requested versions, without changing the library."""
+    if not identifiers or len(identifiers) > 100:
+        raise ValueError("id_list requires between 1 and 100 article identifiers")
+    requested = {parse_arxiv_id(identifier) for identifier in identifiers}
+    if None in requested or len(requested) != len(identifiers):
+        raise ValueError("id_list contains invalid or repeated identifiers")
+    response = _arxiv_get(
+        {"id_list": ",".join(identifiers), "start": 0, "max_results": len(identifiers)},
+        request_timeout=15.0,
+        max_attempts=1,
+        retry_backoff=3.0,
+    )
+    page = _parse_arxiv_page(response, start=0)
+    items = page["items"]
+    found = {(item.arxiv_id, item.arxiv_version) for item in items}
+    if page["total_results"] != len(identifiers) or len(items) != len(identifiers):
+        raise ValueError("arXiv id_list omitted requested articles")
+    if found != requested:
+        raise ValueError("arXiv id_list returned a different article or version")
+    return items
 
 
 def _citation_author_name(value: str) -> str:
@@ -544,7 +571,8 @@ def download_paper_pdf(session: Session, paper: Paper) -> Path:
             raise ValueError("Paper has no PDF URL")
         deadline = monotonic() + _PDF_DOWNLOAD_TOTAL_TIMEOUT_SECONDS
         safe_url = _safe_remote_url(paper.pdf_url)
-        target = settings.pdf_dir / f"{paper.id}.pdf"
+        version_suffix = f"-v{paper.arxiv_version}" if paper.arxiv_id and paper.arxiv_version else ""
+        target = settings.pdf_dir / f"{paper.id}{version_suffix}.pdf"
         temporary = target.with_suffix(".pdf.download")
         temporary.unlink(missing_ok=True)
         try:

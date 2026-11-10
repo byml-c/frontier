@@ -46,6 +46,7 @@ from .services.agent_runtime import (
 )
 from .services.architecture_progress import persist_architecture_progress
 from .services.architecture_scene import release_agent_lock_for_task
+from .services.codex_backends import conversation_selection
 from .services.common import log_operation
 from .services.interest_evidence import FEEDBACK_PROVENANCE_KEY
 from .services.manual_recommendations import set_manual_analysis_state
@@ -235,7 +236,10 @@ def build_prompt(task: TaskRun) -> str:
             "or rediscover with arxiv-sync. Preserve their discovery_run_id when available."
             if recovery_sources
             else f"Run `frontier source arxiv-sync --date {run_date}` once; retry incomplete coverage unchanged. "
-            "Use only this discovery_run_id and its returned candidate IDs."
+            "Use only this discovery_run_id and its returned candidate IDs. "
+            "If valid RSS candidates were saved during an API outage, preserve coverage_complete=false "
+            "and publish the nonempty available pool with an explicit coverage note; do not rerun "
+            "a usable RSS batch repeatedly or describe incomplete coverage as no new papers."
         )
         return (
             workflow_common
@@ -789,9 +793,12 @@ def _run_app_server_task(task_id: str) -> None:
             session.get(Conversation, conversation_id) if isinstance(conversation_id, str) else None
         )
         session_id = conversation.codex_session_id if conversation else None
+        codex_selection = task.payload_json.get("codex") or (
+            conversation_selection(session, conversation.id) if conversation else None
+        )
         recovery_prompt = (
             build_conversation_recovery_prompt(session, conversation.id, prompt)
-            if conversation and session_id
+            if conversation
             else None
         )
         session.commit()
@@ -802,11 +809,12 @@ def _run_app_server_task(task_id: str) -> None:
         log_path.parent.mkdir(parents=True, exist_ok=True)
         with log_path.open("w", encoding="utf-8") as log_file:
             for event in stream_codex_prompt(
-                prompt,
+                recovery_prompt if session_id is None and recovery_prompt else prompt,
                 session_id=session_id,
                 recovery_prompt=recovery_prompt,
                 run_id=task_id,
                 timeout_seconds=remaining_seconds,
+                **({"selection": codex_selection} if codex_selection else {}),
             ):
                 log_file.write(json.dumps(event, ensure_ascii=False) + "\n")
                 log_file.flush()

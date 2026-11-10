@@ -1,6 +1,6 @@
 import { Box, CircularProgress, Stack, Tooltip, Typography } from "@mui/material";
 import { useQuery } from "@tanstack/react-query";
-import { memo } from "react";
+import { memo, type ReactNode } from "react";
 import { api } from "../api";
 import type { AgentRuntimeState, Conversation, LatestServiceChecks } from "../types";
 import {
@@ -12,7 +12,7 @@ import {
   reasoningEffortLabel,
 } from "./agentRuntimeState";
 
-export const AgentRuntimeStatus = memo(function AgentRuntimeStatus({ conversation, liveState }: { conversation?: Conversation; liveState?: AgentRuntimeState }) {
+export const AgentRuntimeStatus = memo(function AgentRuntimeStatus({ conversation, liveState, children }: { conversation?: Conversation; liveState?: AgentRuntimeState; children?: ReactNode }) {
   const checks = useQuery({
     queryKey: ["service-checks"],
     queryFn: () => api<LatestServiceChecks>("/api/service-checks"),
@@ -30,7 +30,7 @@ export const AgentRuntimeStatus = memo(function AgentRuntimeStatus({ conversatio
   return (
     <Stack direction="row" alignItems="center" sx={{ minWidth: 0, height: 30 }}>
       {usage && <ContextUsageRing {...usage} />}
-      <Tooltip title={`模型：${model} · 思考程度：${effort}`}>
+      {children ?? <Tooltip title={`模型：${model} · 思考程度：${effort}`}>
         <Typography
           variant="caption"
           color="text.secondary"
@@ -38,7 +38,7 @@ export const AgentRuntimeStatus = memo(function AgentRuntimeStatus({ conversatio
         >
           {model} · {effort}
         </Typography>
-      </Tooltip>
+      </Tooltip>}
     </Stack>
   );
 });

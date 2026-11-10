@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 import queue
 import threading
+from collections.abc import Callable
 
 from ..config import settings
 from .agent_runtime import is_foreground_task
@@ -14,6 +15,7 @@ _state_lock = threading.Lock()
 _lane_queues: dict[str, queue.Queue[str]] = {}
 _workers: list[threading.Thread] = []
 _accepted_task_ids: set[str] = set()
+_task_runners: dict[str, Callable[[], None]] = {}
 _stopping = False
 
 
@@ -34,7 +36,12 @@ def _run_worker(work_queue: queue.Queue[str], lane: str) -> None:
                 continue
             try:
                 try:
-                    run_task(task_id)
+                    with _state_lock:
+                        runner = _task_runners.pop(task_id, None)
+                    if runner is not None:
+                        runner()
+                    else:
+                        run_task(task_id)
                 except Exception:
                     logger.exception(
                         "Dispatched %s task %s crashed outside its runner", lane, task_id
@@ -84,6 +91,7 @@ def submit_task(
     *,
     fail_on_full: bool = True,
     lane: str = "general",
+    runner: Callable[[], None] | None = None,
 ) -> bool:
     """Route to independent foreground/background queues; metadata is legacy background."""
     if lane == "general":
@@ -111,6 +119,8 @@ def submit_task(
                 logger.error("%s task dispatch queue is full; rejected %s", lane, task_id)
             else:
                 _accepted_task_ids.add(task_id)
+                if runner is not None:
+                    _task_runners[task_id] = runner
                 accepted = True
     if not accepted and fail_on_full:
         _fail_undispatched_task(task_id, error="Agent 任务队列已满，任务未启动")
@@ -178,6 +188,7 @@ def stop_task_dispatcher(*, wait: bool = False) -> None:
                     break
                 pending.append(task_id)
                 _accepted_task_ids.discard(task_id)
+                _task_runners.pop(task_id, None)
                 work_queue.task_done()
     for task_id in pending:
         _fail_undispatched_task(
@@ -192,6 +203,7 @@ def stop_task_dispatcher(*, wait: bool = False) -> None:
             _workers.clear()
             _lane_queues.clear()
             _accepted_task_ids.clear()
+            _task_runners.clear()
 
 
 def task_dispatcher_snapshot() -> dict[str, int | bool]:

@@ -1,0 +1,13 @@
+{
+  "default_backend": "codex",
+  "backends": [
+    {
+      "name": "codex",
+      "codex_home": "~/.codex"
+    },
+    {
+      "name": "codex_deepseek",
+      "codex_home": "~/.codex-deepseek"
+    }
+  ]
+}

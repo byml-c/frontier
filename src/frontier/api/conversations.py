@@ -19,7 +19,13 @@ from ..interactive_stream import encode_stream_event, stream_codex_prompt
 from ..models import Conversation, Message, Paper, TaskRun, utcnow
 from ..schemas import ConversationCreate, MessageCreate
 from ..services.architecture_scene import release_agent_lock_for_task
+from ..services.codex_backends import (
+    backend_catalog,
+    conversation_selection,
+    prepare_conversation_selection,
+)
 from ..services.common import model_dict
+from ..services.conversation_stream import ConversationStream
 from ..services.paper_agent_context import paper_agent_context_sync_required
 from ..services.paper_conversations import get_or_create_paper_conversation
 from ..services.task_control import (
@@ -31,6 +37,23 @@ from ..services.task_control import (
 from ..services.task_dispatcher import submit_task
 
 router = APIRouter(prefix="/api/conversations", tags=["conversations"])
+
+
+@router.get("/models")
+def conversation_models() -> dict:
+    try:
+        return backend_catalog()
+    except ValueError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+
+def _select_codex(session: Session, conversation: Conversation, payload: MessageCreate) -> dict:
+    try:
+        return prepare_conversation_selection(
+            session, conversation, payload.codex.model_dump() if payload.codex else None
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
 
 
 def _conversation_or_404(session: Session, conversation_id: str) -> Conversation:
@@ -48,6 +71,7 @@ def _serialize(session: Session, conversation: Conversation) -> dict:
         .order_by(Message.created_at)
     ).all()
     payload["messages"] = [model_dict(message) for message in messages]
+    payload["codex_selection"] = conversation_selection(session, conversation.id)
     active_task = active_task_for_conversation(session, conversation.id)
     payload["active_task"] = (
         {"id": active_task.id, "status": active_task.status} if active_task else None
@@ -271,6 +295,7 @@ def send_message(
         conversation = _conversation_or_404(session, conversation_id)
         if active_task_for_conversation(session, conversation.id):
             raise HTTPException(status_code=409, detail="该对话的 Agent 正在处理另一项任务")
+        codex = _select_codex(session, conversation, payload)
         context = dict(payload.context_json)
         if payload.selected_text:
             context["selected_text"] = payload.selected_text
@@ -285,6 +310,7 @@ def send_message(
         session.add(message)
         task_kind = "paper_chat" if conversation.kind == "paper" else "global_chat"
         task_payload = {
+            "codex": codex,
             "conversation_id": conversation.id,
             "message": payload.content,
             "context": context,
@@ -344,18 +370,14 @@ def stream_message(
             raise HTTPException(status_code=409, detail="这条回答当前不能继续")
         previous_task_id = previous_context.get("task_id")
         previous_task = (
-            session.get(TaskRun, previous_task_id)
-            if isinstance(previous_task_id, str)
-            else None
+            session.get(TaskRun, previous_task_id) if isinstance(previous_task_id, str) else None
         )
         initial_content = assistant.content.rstrip()
         previous_activities = previous_context.get("activities")
         activity_summary = "\n".join(
             f"- [{item.get('status', 'unknown')}] {item.get('label', '')}"
             + (f": {item.get('detail')}" if item.get("detail") else "")
-            for item in (
-                previous_activities if isinstance(previous_activities, list) else []
-            )
+            for item in (previous_activities if isinstance(previous_activities, list) else [])
             if isinstance(item, dict) and item.get("label")
         )[-6_000:]
         continuation_request = (
@@ -367,7 +389,9 @@ def stream_message(
             "Persisted activity log (it may be incomplete):\n"
             f"{activity_summary or '（没有已保存的工具活动）'}"
         )
-        context = dict((previous_task.payload_json or {}).get("context", {})) if previous_task else {}
+        context = (
+            dict((previous_task.payload_json or {}).get("context", {})) if previous_task else {}
+        )
         task_payload = {
             "conversation_id": conversation.id,
             "message": continuation_request,
@@ -412,6 +436,7 @@ def stream_message(
         }
     if not settings.enable_codex_runs:
         raise HTTPException(status_code=503, detail="Agent 运行已在服务器设置中停用")
+    codex = _select_codex(session, conversation, payload)
     if message:
         session.add(message)
         session.flush()
@@ -422,6 +447,7 @@ def stream_message(
             task_payload["paper_context_sync_required"] = paper_agent_context_sync_required(
                 session, paper, conversation
             )
+    task_payload["codex"] = codex
     task = TaskRun(kind=task_kind, payload_json=task_payload)
     session.add(task)
     session.flush()
@@ -518,10 +544,6 @@ def stream_message(
             return encode_stream_event("activity", **event)
 
         try:
-            meta = {"task_id": task.id, "retry_assistant_id": payload.retry_assistant_id}
-            if message:
-                meta["message"] = model_dict(message)
-            yield encode_stream_event("meta", **meta)
             yield activity_event(
                 activity_id="agent-startup",
                 kind="status",
@@ -543,6 +565,7 @@ def stream_message(
                 session_id=session_id,
                 recovery_prompt=recovery_prompt,
                 run_id=task.id,
+                selection=codex,
             ):
                 if event["type"] == "thread":
                     thread_id = event["thread_id"]
@@ -564,7 +587,7 @@ def stream_message(
                     runtime = {
                         key: value
                         for key, value in event.items()
-                        if key in {"model", "model_provider", "reasoning_effort"}
+                        if key in {"model", "model_provider", "reasoning_effort", "backend"}
                         and isinstance(value, str)
                     }
                     persist_snapshot(force=True)
@@ -720,7 +743,7 @@ def stream_message(
                 yield encode_stream_event("error", message=str(exc))
         finally:
             if not terminal:
-                interruption = "浏览器连接已中断；已保留此前生成的内容和调用记录。"
+                interruption = "Agent 执行已中断；已保留此前生成的内容和调用记录。"
                 interrupted_activities = _failed_activities(activity_log, interruption)
                 with SessionLocal() as runner_session:
                     running = runner_session.get(TaskRun, task.id)
@@ -759,8 +782,47 @@ def stream_message(
                     release_agent_lock_for_task(runner_session, task.id)
                     runner_session.commit()
 
+    def subscribe():
+        channel = ConversationStream()
+        meta = {"task_id": task.id, "retry_assistant_id": payload.retry_assistant_id}
+        if message:
+            meta["message"] = model_dict(message)
+
+        def run_turn() -> None:
+            try:
+                for event in generate():
+                    channel.publish(event)
+            finally:
+                channel.finish()
+
+        accepted = submit_task(task.id, lane="foreground", runner=run_turn)
+        if not accepted:
+            _persist_stream_snapshot(
+                task.id,
+                assistant_id,
+                content=initial_content,
+                activities=[],
+                stream_status="failed",
+                error="Agent 任务队列已满，任务未启动",
+            )
+        try:
+            yield encode_stream_event("meta", **meta)
+            if not accepted:
+                yield encode_stream_event("error", message="Agent 任务队列已满，任务未启动")
+                return
+            yield encode_stream_event(
+                "activity",
+                activity_id="agent-startup",
+                kind="status",
+                label="等待 Agent",
+                status="running",
+            )
+            yield from channel.events()
+        finally:
+            channel.detach()
+
     return StreamingResponse(
-        generate(),
+        subscribe(),
         media_type="application/x-ndjson",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )

@@ -56,6 +56,8 @@ def compact_search_key(value: str) -> str:
 def parse_arxiv_id(value: str) -> tuple[str, int | None] | None:
     match = re.search(r"(?:arxiv\.org/(?:abs|pdf)/)?(\d{4}\.\d{4,5})(?:v(\d+))?", value)
     if not match:
+        match = re.search(r"([A-Za-z][A-Za-z.\-]+/\d{7})(?:v(\d+))?", value)
+    if not match:
         return None
     return match.group(1), int(match.group(2)) if match.group(2) else None
 

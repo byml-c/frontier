@@ -9,18 +9,20 @@ from zoneinfo import ZoneInfo
 
 import httpx
 from lxml import etree
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from ..config import settings
 from ..models import DiscoveryCursor, DiscoveryItem, DiscoveryRun, Paper
 from ..schemas import PaperCreate
-from .common import get_daily_time, get_setting, log_operation
+from .arxiv_rss import fetch_rss_records
+from .common import get_daily_time, get_setting, log_operation, normalize_title
 from .discovery import _identity_keys
 from .ingest import (
     _arxiv_get,
     arxiv_request_budget,
     create_or_update_paper,
+    find_existing_paper,
     search_arxiv_page,
 )
 from .interest_ranker import score_paper, train_daily_ranker
@@ -30,11 +32,11 @@ from .manual_recommendations import (
 )
 from .research_day import current_research_date
 
-SYNC_CURSOR_ID = "arxiv-last-updated-v1"
+SYNC_CURSOR_ID = "arxiv-paper-version-time-v2"
+CURSOR_BASIS = "paper-version-time"
 OAI_ENDPOINT = "https://oaipmh.arxiv.org/oai"
 DEFAULT_SYNC_CATEGORIES = ["cs.RO", "cs.CV", "cs.AI", "cs.LG", "cs.CL", "cs.MA"]
 DEFAULT_BOOTSTRAP_DAYS = 3
-INDEX_LOOKBACK_DAYS = 3
 ATOM_PAGE_SIZE = 100
 ATOM_BUDGET_SECONDS = 180.0
 _SYNC_LOCK = threading.Lock()
@@ -300,7 +302,7 @@ def _fetch_atom_records(
                 raise ValueError("Atom records are not sorted by updated date")
             seen_ids.add(payload.arxiv_id)
             previous_stamp = stamp
-            if stamp <= start:
+            if stamp < start:
                 reached_start = True
             elif stamp <= end:
                 payload.metadata_json = {**payload.metadata_json, "metadata_source": "atom"}
@@ -324,17 +326,53 @@ def _fetch_arxiv_records(
     start: datetime,
     end: datetime,
     categories: list[str],
+    pending: list[PaperCreate] | None = None,
 ) -> tuple[list[PaperCreate], dict[str, Any]]:
-    """Prefer bounded Atom requests, falling back to a fresh complete OAI harvest."""
+    """RSS discovers announcements; API scanning catches up to the source-time cursor."""
     with arxiv_request_budget():
+        rss_items: list[PaperCreate] = []
+        rss_stats: dict[str, Any] = {}
+        rss_error = None
         try:
-            # Reserve most of the shared ten-minute deadline for the slower fallback.
+            with arxiv_request_budget(seconds=180):
+                rss_items, rss_stats = fetch_rss_records(
+                    end=end, categories=categories, pending=pending
+                )
+        except (httpx.HTTPError, ValueError, etree.XMLSyntaxError) as exc:
+            rss_error = str(exc)
+            _logger.warning("RSS discovery unavailable: %s", exc)
+        if rss_stats.get("metadata_error"):
+            return rss_items, {
+                **rss_stats,
+                "coverage_complete": False,
+                "cursor_can_advance": False,
+                "fallback_used": False,
+                "atom_error": "Metadata API unavailable; historical catch-up deferred",
+            }
+        try:
             with arxiv_request_budget(seconds=ATOM_BUDGET_SECONDS):
                 items, stats = _fetch_atom_records(start=start, end=end, categories=categories)
             if not stats.get("complete"):
                 raise ValueError("Atom did not cover the cursor window")
-            return items, {**stats, "fallback_used": False}
+            return [*rss_items, *items], {
+                **stats,
+                "source": "rss+atom" if rss_stats else "atom",
+                "rss": rss_stats,
+                "rss_error": rss_error,
+                "fallback_used": not bool(rss_stats),
+                "coverage_complete": bool(rss_stats) and rss_stats.get("cursor_can_advance", False),
+                "cursor_can_advance": bool(rss_stats)
+                and rss_stats.get("cursor_can_advance", False),
+            }
         except (httpx.HTTPError, ValueError, TypeError, KeyError, AttributeError) as atom_error:
+            if rss_stats:
+                return rss_items, {
+                    **rss_stats,
+                    "atom_error": str(atom_error),
+                    "fallback_used": False,
+                    "coverage_complete": False,
+                    "cursor_can_advance": False,
+                }
             _logger.warning("Atom discovery failed; falling back to OAI-PMH: %s", atom_error)
             try:
                 items, stats = _fetch_oai_records(start=start, end=end, categories=categories)
@@ -342,25 +380,34 @@ def _fetch_arxiv_records(
                     raise ValueError("OAI-PMH did not complete pagination")
             except Exception as oai_error:
                 raise RuntimeError(
-                    f"arXiv discovery failed: Atom: {atom_error}; OAI-PMH: {oai_error}"
+                    f"arXiv discovery failed: RSS: {rss_error}; Atom: {atom_error}; OAI-PMH: {oai_error}"
                 ) from oai_error
-            return items, {**stats, "fallback_used": True, "atom_error": str(atom_error)}
+            return items, {
+                **stats,
+                "fallback_used": True,
+                "rss_error": rss_error,
+                "atom_error": str(atom_error),
+                "coverage_complete": False,
+                "cursor_can_advance": False,
+            }
 
 
 def _cursor(session: Session) -> DiscoveryCursor:
     cursor = session.get(DiscoveryCursor, SYNC_CURSOR_ID)
     if cursor is None:
-        cursor = DiscoveryCursor(id=SYNC_CURSOR_ID)
+        # Rebuild from actual stored article dates, never the old run-time cutoff.
+        latest = session.scalar(
+            select(func.max(func.coalesce(DiscoveryItem.updated_at, DiscoveryItem.published_at)))
+            .join(DiscoveryRun, DiscoveryRun.id == DiscoveryItem.run_id)
+            .where(DiscoveryRun.status == "completed", DiscoveryItem.status != "outside_window")
+        )
+        cursor = DiscoveryCursor(id=SYNC_CURSOR_ID, committed_through=latest)
         session.add(cursor)
+        legacy = session.get(DiscoveryCursor, "arxiv-last-updated-v1")
+        if legacy is not None:
+            session.delete(legacy)
         session.flush()
     return cursor
-
-
-def _library_keys(session: Session) -> set[str]:
-    keys: set[str] = set()
-    for arxiv_id, doi, title in session.execute(select(Paper.arxiv_id, Paper.doi, Paper.title)):
-        keys.update(_identity_keys(arxiv_id, doi, title))
-    return keys
 
 
 def _batch_candidate_routing(
@@ -399,19 +446,18 @@ def _batch_candidate_routing(
 
 
 def _in_source_window(payload: PaperCreate, start: datetime, end: datetime) -> bool:
-    """OAI date-only stamps overlap whole UTC days; exact stamps use (start, end]."""
+    """Late RSS announcements bypass the API's optimization boundary."""
     metadata = payload.metadata_json
-    stamp = (
-        metadata.get("arxiv_datestamp")
-        or metadata.get("arxiv_updated_at")
-        or metadata.get("arxiv_published_at")
-    )
+    announced = _parse_source_time(metadata.get("arxiv_announced_at"))
+    stamp = metadata.get("arxiv_updated_at") or metadata.get("arxiv_published_at")
     parsed = _parse_source_time(stamp)
+    if announced is not None:
+        return announced <= end and (parsed is None or parsed <= end)
     if parsed is None:
         return False
     if len(str(stamp)) == 10:
         return parsed <= end and parsed + timedelta(days=1) > start
-    return start < parsed <= end
+    return start <= parsed <= end
 
 
 def sync_arxiv(
@@ -450,47 +496,40 @@ def _sync_arxiv(
         start = (cutoff - timedelta(days=max(1, bootstrap_days))).replace(second=0, microsecond=0)
     else:
         start = previous_committed
-    if previous_committed is not None and previous_committed >= cutoff:
-        completed = session.scalar(
-            select(DiscoveryRun)
-            .where(DiscoveryRun.status == "completed", DiscoveryRun.window_end == cutoff)
-            .order_by(DiscoveryRun.finished_at.desc())
-            .limit(1)
+    if previous_committed is not None and previous_committed > cutoff:
+        start = cutoff - timedelta(days=max(1, bootstrap_days))
+    completed = session.scalar(
+        select(DiscoveryRun)
+        .where(
+            DiscoveryRun.status == "completed",
+            DiscoveryRun.window_end == cutoff,
+            DiscoveryRun.result_json["cursor"]["basis"].as_string() == CURSOR_BASIS,
+            DiscoveryRun.result_json["coverage_complete"].as_boolean() == True,
         )
-        if completed and (completed.result_json or {}).get("brief_date") == brief_date.isoformat():
-            result = dict(completed.result_json)
-            relevant, review, filtered = _batch_candidate_routing(
-                session,
-                paper_ids=result.get("batch_paper_ids", []),
-                relevance_threshold=result["model"]["relevance_threshold"],
-            )
-            return {
-                **result,
-                "status": "up_to_date",
-                "reused_run": True,
-                "paper_ids": relevant,
-                "agent_review_paper_ids": review,
-                "model_filtered_paper_ids": filtered,
-                "counts": {
-                    **result["counts"],
-                    "candidate_pool": len(relevant),
-                    "confident_relevant": len(relevant) - len(review),
-                    "agent_review": len(review),
-                    "model_filtered": len(filtered),
-                },
-            }
+        .order_by(DiscoveryRun.finished_at.desc())
+        .limit(1)
+    )
+    if completed and (completed.result_json or {}).get("brief_date") == brief_date.isoformat():
+        result = dict(completed.result_json)
+        relevant, review, filtered = _batch_candidate_routing(
+            session,
+            paper_ids=result.get("batch_paper_ids", []),
+            relevance_threshold=result["model"]["relevance_threshold"],
+        )
         return {
+            **result,
             "status": "up_to_date",
-            "brief_date": brief_date.isoformat(),
-            "window": {"start": cutoff.isoformat(), "end": cutoff.isoformat()},
-            "cursor": {
-                "previous": previous_committed.isoformat(),
-                "committed_through": previous_committed.isoformat(),
+            "reused_run": True,
+            "paper_ids": relevant,
+            "agent_review_paper_ids": review,
+            "model_filtered_paper_ids": filtered,
+            "counts": {
+                **result["counts"],
+                "candidate_pool": len(relevant),
+                "confident_relevant": len(relevant) - len(review),
+                "agent_review": len(review),
+                "model_filtered": len(filtered),
             },
-            "coverage_complete": True,
-            "fetched": 0,
-            "paper_ids": [],
-            "agent_review_paper_ids": [],
         }
     # Recover only staging from interrupted attempts at this exact daily interval.
     retry_ids = list(
@@ -501,6 +540,7 @@ def _sync_arxiv(
                 DiscoveryRun.window_start == start,
                 DiscoveryRun.window_end == cutoff,
                 DiscoveryItem.paper_id.is_not(None),
+                DiscoveryItem.status.in_(["review", "promoted", "filtered"]),
             )
         )
     )
@@ -512,12 +552,9 @@ def _sync_arxiv(
         for category in categories
         if isinstance(category, str) and category not in {"cs.SE", "cs.HC"}
     ] or DEFAULT_SYNC_CATEGORIES
-    # Revisit recent source timestamps so announcement/search-index delays do not
-    # permanently disappear behind a successful time cursor. Library deduplication
-    # keeps overlap from producing repeat recommendations.
-    fetch_start = min(start, cutoff - timedelta(days=INDEX_LOOKBACK_DAYS))
+    fetch_start = start
     query = (
-        f"Atom lastUpdatedDate descending -> OAI-PMH fallback; "
+        f"RSS announcement batches + Atom article-version cursor; "
         f"updates ({fetch_start.isoformat()}, {cutoff.isoformat()}], "
         f"categories={','.join(categories)}"
     )
@@ -539,6 +576,14 @@ def _sync_arxiv(
             start=fetch_start,
             end=cutoff,
             categories=categories,
+            pending=[
+                PaperCreate(**{name: getattr(paper, name) for name in PaperCreate.model_fields})
+                for paper in session.scalars(
+                    select(Paper).where(
+                        Paper.metadata_json["arxiv_timestamp_pending"].as_boolean() == True
+                    )
+                )
+            ],
         )
         if not source_stats.get("complete"):
             raise ValueError("arXiv source coverage is incomplete; cursor was not advanced")
@@ -546,21 +591,40 @@ def _sync_arxiv(
             **source_stats,
             "window_start": fetch_start.isoformat(),
             "window_end": cutoff.isoformat(),
-            "index_lookback_days": INDEX_LOOKBACK_DAYS,
+            "cursor_basis": CURSOR_BASIS,
         }
         run.total_results = len(raw_items)
         run.fetched_count = len(raw_items)
 
-        library_keys = _library_keys(session)
+        # Prefer the highest version per ID and retain RSS provenance when API
+        # scanning returns the same version, so a late announcement isn't filtered.
+        merged: dict[str, PaperCreate] = {}
+        source_duplicates = 0
+        for item in raw_items:
+            key = item.arxiv_id or item.title
+            earlier = merged.get(key)
+            if earlier is None:
+                merged[key] = item
+                continue
+            source_duplicates += 1
+            if (item.arxiv_version or 0) > (earlier.arxiv_version or 0):
+                merged[key] = item
+            elif item.arxiv_version == earlier.arxiv_version:
+                metadata = {**earlier.metadata_json, **item.metadata_json}
+                if _parse_source_time(metadata.get("arxiv_updated_at")) is not None:
+                    metadata["arxiv_timestamp_pending"] = False
+                item.metadata_json = metadata
+                merged[key] = item
         seen_keys: set[str] = set()
         paper_ids: list[str] = []
         agent_review_paper_ids: list[str] = []
         filtered_paper_ids: list[str] = []
-        promoted_papers: list[Paper] = []
         promoted_this_run = 0
-        domain_rejected = duplicate_count = skipped_existing = outside_window = 0
+        domain_rejected = skipped_existing = outside_window = updated_existing = 0
+        duplicate_count = source_duplicates
+        source_stamps: list[datetime] = []
         batch_ids = list(retry_ids)
-        for payload in raw_items:
+        for payload in merged.values():
             identity_keys = _identity_keys(payload.arxiv_id, payload.doi, payload.title)
             if identity_keys & seen_keys:
                 duplicate_count += 1
@@ -585,10 +649,43 @@ def _sync_arxiv(
                 stage.status = "outside_window"
                 stage.reason = "source update is outside this discovery source window"
                 continue
-            if identity_keys & library_keys:
+            stamp = _parse_source_time(
+                payload.metadata_json.get("arxiv_updated_at")
+                or payload.metadata_json.get("arxiv_published_at")
+            )
+            if stamp is not None:
+                source_stamps.append(stamp)
+            existing = find_existing_paper(
+                session, arxiv_id=payload.arxiv_id, doi=payload.doi, title=payload.title
+            )
+            old_version = (existing.arxiv_version or 0) if existing else 0
+            # Never downgrade a newer library version using an older RSS batch.
+            if existing and (payload.arxiv_version or 0) < old_version:
                 skipped_existing += 1
                 stage.status = "existing"
-                stage.reason = "already present in Frontier library"
+                stage.reason = "older than the stored article version"
+                stage.paper_id = existing.id
+                continue
+            paper, created = create_or_update_paper(session, payload, actor="system", commit=False)
+            stage.paper_id = paper.id
+            if not created:
+                skipped_existing += 1
+                newer = (payload.arxiv_version or 0) > old_version
+                if newer:
+                    paper.title = payload.title
+                    paper.normalized_title = normalize_title(payload.title)
+                    paper.abstract = payload.abstract or paper.abstract
+                    paper.source_url = payload.source_url or paper.source_url
+                    paper.pdf_url = payload.pdf_url or paper.pdf_url
+                    # The prior path belongs to the PaperVersion captured by the merge.
+                    paper.pdf_path = None
+                    if payload.metadata_json.get("arxiv_timestamp_pending"):
+                        paper.metadata_json = {**paper.metadata_json, "arxiv_updated_at": None}
+                    updated_existing += 1
+                stage.status = "updated_existing" if newer else "existing"
+                stage.reason = (
+                    "source metadata merged; existing feedback and recommendation state preserved"
+                )
                 continue
             in_scope, _domains, domain_reason = _domain_scope(payload)
             if not in_scope:
@@ -596,8 +693,6 @@ def _sync_arxiv(
                 stage.status = "domain_rejected"
                 stage.reason = domain_reason
                 continue
-            paper, _created = create_or_update_paper(session, payload, actor="system")
-            library_keys.update(identity_keys)
             batch_ids.append(paper.id)
             promoted_this_run += 1
             ranked = score_paper(ranker, paper)
@@ -619,10 +714,6 @@ def _sync_arxiv(
                 f"model score={ranked.score:.2f}, confidence={ranked.confidence:.2f}, "
                 f"support={ranked.support:.2f}"
             )
-            promoted_papers.append(paper)
-
-        if promoted_papers:
-            session.commit()
 
         routed_ids, routed_review_ids, routed_filtered_ids = _batch_candidate_routing(
             session,
@@ -633,7 +724,10 @@ def _sync_arxiv(
         agent_review_paper_ids = routed_review_ids
         filtered_paper_ids = routed_filtered_ids
 
-        cursor.committed_through = cutoff
+        if source_stats.get("cursor_can_advance", True) and source_stamps:
+            cursor.committed_through = max(
+                source_stamps + ([previous_committed] if previous_committed else [])
+            )
         cursor.last_success_at = now_utc
         cursor.last_error = None
         run.status = "completed"
@@ -648,8 +742,13 @@ def _sync_arxiv(
             "brief_date": brief_date.isoformat(),
             "run_id": run.id,
             "cursor": {
+                "basis": CURSOR_BASIS,
                 "previous": previous_committed.isoformat() if previous_committed else None,
-                "committed_through": cursor.committed_through.isoformat(),
+                "committed_through": (
+                    _aware_utc(cursor.committed_through).isoformat()
+                    if cursor.committed_through
+                    else None
+                ),
             },
             "window": {"start": start.isoformat(), "end": cutoff.isoformat()},
             "query": query,
@@ -668,6 +767,7 @@ def _sync_arxiv(
                 "fetched": run.fetched_count,
                 "deduplicated": duplicate_count,
                 "existing": skipped_existing,
+                "updated_existing": updated_existing,
                 "domain_rejected": domain_rejected,
                 "outside_window": outside_window,
                 "promoted_this_run": promoted_this_run,
@@ -680,7 +780,7 @@ def _sync_arxiv(
             "batch_paper_ids": list(dict.fromkeys(batch_ids)),
             "agent_review_paper_ids": agent_review_paper_ids,
             "model_filtered_paper_ids": filtered_paper_ids,
-            "coverage_complete": True,
+            "coverage_complete": source_stats.get("coverage_complete", True),
         }
         run.result_json = result
         log_operation(

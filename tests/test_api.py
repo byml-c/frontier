@@ -89,14 +89,24 @@ def test_stream_close_after_metadata_marks_task_interrupted(client: TestClient) 
         assert task.result_json["stream_status"] == "interrupted"
 
 
-def test_conversation_close_after_metadata_releases_active_task(
+def test_conversation_continues_after_browser_disconnect(
     client: TestClient,
     monkeypatch,
 ) -> None:
+    import threading
+    import time
+
     from frontier.api import conversations
     from frontier.database import SessionLocal
     from frontier.schemas import MessageCreate
 
+    release = threading.Event()
+
+    def fake_stream(*args, **kwargs):
+        assert release.wait(timeout=3)
+        yield {"type": "delta", "delta": "页面关闭后仍完成"}
+
+    monkeypatch.setattr(conversations, "stream_codex_prompt", fake_stream)
     monkeypatch.setattr(conversations.settings, "enable_codex_runs", True)
     conversation = client.post(
         "/api/conversations",
@@ -116,12 +126,19 @@ def test_conversation_close_after_metadata_releases_active_task(
         await iterator.aclose()
 
     asyncio.run(close_after_metadata())
-    detail = client.get(f"/api/conversations/{conversation['id']}").json()
-    assert detail["active_task"] is None
+    release.set()
+    deadline = time.monotonic() + 4
+    while True:
+        detail = client.get(f"/api/conversations/{conversation['id']}").json()
+        if detail["active_task"] is None:
+            break
+        assert time.monotonic() < deadline
+        time.sleep(0.02)
     assistant = detail["messages"][-1]
-    assert assistant["context_json"]["stream_status"] == "interrupted"
+    assert assistant["content"] == "页面关闭后仍完成"
+    assert assistant["context_json"]["stream_status"] == "completed"
     task = client.get(f"/api/tasks/{assistant['context_json']['task_id']}").json()
-    assert task["status"] == "failed"
+    assert task["status"] == "completed"
 
 
 def test_translation_close_after_metadata_marks_task_interrupted(client: TestClient) -> None:

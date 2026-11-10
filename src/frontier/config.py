@@ -27,6 +27,7 @@ class Settings(BaseSettings):
     api_base_url: str = "http://127.0.0.1:8000"
     codex_command: str = "codex"
     codex_profile: str | None = None
+    codex_backends_file: Path = PROJECT_ROOT / "codex-backends.json"
     outbound_proxy: str | None = None
     codex_sandbox: str = "workspace-write"
     codex_network_access: bool = True

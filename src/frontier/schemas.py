@@ -332,12 +332,21 @@ class PaperAgentContextSyncRequest(BaseModel):
     query: str | None = Field(default=None, max_length=4_000)
 
 
+class CodexSelection(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    backend: str = Field(min_length=1, max_length=80)
+    model: str = Field(min_length=1, max_length=200)
+    reasoning_effort: str | None = Field(default=None, max_length=30)
+
+
 class MessageCreate(BaseModel):
     content: str
     selected_text: str | None = None
     page_number: int | None = None
     retry_assistant_id: str | None = None
     context_json: dict[str, Any] = Field(default_factory=dict)
+    codex: CodexSelection | None = None
 
 
 class SettingUpdate(BaseModel):

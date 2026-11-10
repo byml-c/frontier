@@ -37,9 +37,7 @@ def test_app_server_command_uses_configured_profile(monkeypatch) -> None:
     assert "agents.max_concurrent_threads_per_session=1" in command
     assert "agents.max_depth=1" in command
     assert "agents.job_max_runtime_seconds=1800" in command
-    assert command.index("app-server") > command.index(
-        "agents.job_max_runtime_seconds=1800"
-    )
+    assert command.index("app-server") > command.index("agents.job_max_runtime_seconds=1800")
     assert command[-1] == "--stdio"
 
 
@@ -562,9 +560,7 @@ def test_stream_turn_rebuilds_thread_after_provider_switch(monkeypatch) -> None:
     writes: list[dict] = []
     responses = iter(
         [
-            CodexStreamError(
-                "failed to load configuration: Model provider `deepseek` not found"
-            ),
+            CodexStreamError("failed to load configuration: Model provider `deepseek` not found"),
             {
                 "thread": {"id": "thread-openai"},
                 "model": "gpt-5.6-sol",
@@ -574,9 +570,7 @@ def test_stream_turn_rebuilds_thread_after_provider_switch(monkeypatch) -> None:
             {},
         ]
     )
-    messages = iter(
-        [{"method": "turn/completed", "params": {"turn": {"status": "completed"}}}]
-    )
+    messages = iter([{"method": "turn/completed", "params": {"turn": {"status": "completed"}}}])
 
     def await_response(*_args):
         response = next(responses)
@@ -606,9 +600,7 @@ def test_stream_turn_rebuilds_thread_after_provider_switch(monkeypatch) -> None:
         "thread/start",
         "turn/start",
     ]
-    assert writes[2]["params"]["input"][0]["text"] == (
-        "persisted history and current prompt"
-    )
+    assert writes[2]["params"]["input"][0]["text"] == ("persisted history and current prompt")
     assert next(event for event in events if event["type"] == "runtime") == {
         "type": "runtime",
         "model": "gpt-5.6-sol",
@@ -677,11 +669,7 @@ def test_app_server_pool_reuses_process_and_loaded_thread(monkeypatch) -> None:
     monkeypatch.setattr(interactive_stream, "_read_message", lambda *_args: next(messages))
 
     first = list(interactive_stream.stream_codex_prompt("first"))
-    second = list(
-        interactive_stream.stream_codex_prompt(
-            "second", session_id="thread-persistent"
-        )
-    )
+    second = list(interactive_stream.stream_codex_prompt("second", session_id="thread-persistent"))
 
     assert len(starts) == 1
     assert stops == []
@@ -693,9 +681,7 @@ def test_app_server_pool_reuses_process_and_loaded_thread(monkeypatch) -> None:
     assert next(event for event in first if event["type"] == "thread")["thread_id"] == (
         "thread-persistent"
     )
-    assert next(event for event in second if event["type"] == "runtime")["model"] == (
-        "gpt-5.4"
-    )
+    assert next(event for event in second if event["type"] == "runtime")["model"] == ("gpt-5.4")
 
     pool.shutdown()
     assert stops == [process]
@@ -1025,11 +1011,14 @@ def test_stale_lease_timeout_cannot_kill_reassigned_worker(monkeypatch) -> None:
 
     assert reassigned is worker
     assert reassigned.active_lease_id != stale_lease
-    assert pool.invalidate(
-        worker,
-        stale_lease,
-        termination_reason="turn_timeout",
-    ) is False
+    assert (
+        pool.invalidate(
+            worker,
+            stale_lease,
+            termination_reason="turn_timeout",
+        )
+        is False
+    )
     assert stopped == []
 
     pool.release(reassigned, lease_id=reassigned.active_lease_id)
@@ -1102,9 +1091,7 @@ def test_cancelled_turn_does_not_restore_abandoned_thread_affinity(monkeypatch) 
     worker = pool.acquire("thread-abandoned")
     handle = interactive_stream._PooledTurnHandle(worker, pool)
     handle.bind_thread("thread-abandoned")
-    worker.loaded_threads["thread-abandoned"] = {
-        "thread": {"id": "thread-abandoned"}
-    }
+    worker.loaded_threads["thread-abandoned"] = {"thread": {"id": "thread-abandoned"}}
     handle.mark_terminal()
     handle.cancel()
     handle.finish()
@@ -1119,3 +1106,165 @@ def test_cancelled_turn_does_not_restore_abandoned_thread_affinity(monkeypatch) 
     assert "thread-abandoned" not in pool._thread_workers
     assert "thread-abandoned" not in worker.loaded_threads
     pool.shutdown()
+
+
+def test_turn_replays_early_notifications_and_routes_selected_model(monkeypatch) -> None:
+    import io
+    import json
+
+    process = _FakeProcess()
+    process.stdout = io.StringIO(
+        "\n".join(
+            json.dumps(message)
+            for message in [
+                {"id": 2, "result": {"thread": {"id": "thread-1"}}},
+                {
+                    "method": "item/agentMessage/delta",
+                    "params": {"threadId": "thread-1", "turnId": "turn-1", "delta": "早到的输出"},
+                },
+                {
+                    "method": "turn/completed",
+                    "params": {
+                        "threadId": "thread-1",
+                        "turn": {"id": "turn-1", "status": "completed"},
+                    },
+                },
+                {"id": 3, "result": {"turn": {"id": "turn-1"}}},
+            ]
+        )
+        + "\n"
+    )
+    worker = interactive_stream._CodexAppServerWorker(process)
+    writes = []
+    monkeypatch.setattr(interactive_stream, "_write_message", lambda _, value: writes.append(value))
+    events = list(
+        interactive_stream._stream_turn(
+            worker,
+            "Hello",
+            model="deepseek-flash",
+            backend_name="codex_deepseek",
+            reasoning_effort="low",
+        )
+    )
+    assert [event["delta"] for event in events if event["type"] == "delta"] == ["早到的输出"]
+    assert writes[0]["params"]["model"] == "deepseek-flash"
+    assert writes[1]["params"]["model"] == "deepseek-flash"
+    assert writes[1]["params"]["effort"] == "low"
+    assert next(event for event in events if event["type"] == "runtime")["backend"] == (
+        "codex_deepseek"
+    )
+    assert not worker.pending_messages
+
+
+@pytest.mark.parametrize("delta", ["", "缺失", "缺失尾部"])
+def test_completed_agent_message_repairs_missing_deltas_immediately(monkeypatch, delta) -> None:
+    responses = iter([{"thread": {"id": "thread-1"}}, {"turn": {"id": "turn-1"}}])
+    messages = iter(
+        [
+            {"method": "item/agentMessage/delta", "params": {"delta": delta}},
+            {
+                "method": "item/completed",
+                "params": {"item": {"id": "final", "type": "agentMessage", "text": "缺失尾部"}},
+            },
+            {
+                "method": "turn/completed",
+                "params": {
+                    "turn": {
+                        "id": "turn-1",
+                        "status": "completed",
+                        "items": [
+                            {"type": "agentMessage", "text": "缺失尾部"},
+                        ],
+                    }
+                },
+            },
+        ]
+    )
+    monkeypatch.setattr(interactive_stream, "_write_message", lambda *_: None)
+    monkeypatch.setattr(interactive_stream, "_await_response", lambda *_: next(responses))
+    monkeypatch.setattr(interactive_stream, "_read_message", lambda *_: next(messages))
+    stream = interactive_stream._stream_turn(object(), "Hello")
+    rendered = ""
+    while rendered != "缺失尾部":
+        event = next(stream)
+        if event["type"] == "delta":
+            rendered += event["delta"]
+    assert list(stream) == []
+
+
+def test_turn_completed_items_can_supply_whole_response(monkeypatch) -> None:
+    responses = iter([{"thread": {"id": "thread-1"}}, {"turn": {"id": "turn-1"}}])
+    messages = iter(
+        [
+            {
+                "method": "item/agentMessage/delta",
+                "params": {"threadId": "thread-1", "turnId": "previous-turn", "delta": "旧输出"},
+            },
+            {
+                "method": "turn/completed",
+                "params": {
+                    "turn": {
+                        "id": "turn-1",
+                        "status": "completed",
+                        "items": [
+                            {"type": "agentMessage", "phase": "commentary", "text": "进度"},
+                            {"type": "agentMessage", "text": "最终回答"},
+                        ],
+                    }
+                },
+            },
+        ]
+    )
+    monkeypatch.setattr(interactive_stream, "_write_message", lambda *_: None)
+    monkeypatch.setattr(interactive_stream, "_await_response", lambda *_: next(responses))
+    monkeypatch.setattr(interactive_stream, "_read_message", lambda *_: next(messages))
+    events = list(interactive_stream._stream_turn(object(), "Hello"))
+    assert [event["delta"] for event in events if event["type"] == "delta"] == ["最终回答"]
+
+
+def test_backend_switch_stops_old_process_before_starting_new_one(monkeypatch, tmp_path) -> None:
+    from frontier.services.codex_backends import CodexBackend
+
+    lifecycle = []
+
+    def start(backend):
+        process = _FakeProcess()
+        lifecycle.append(("start", backend.name, process))
+        return process
+
+    def stop(process):
+        process.alive = False
+        lifecycle.append(("stop", None, process))
+
+    monkeypatch.setattr(interactive_stream, "_start_process", start)
+    monkeypatch.setattr(interactive_stream, "_stop_process", stop)
+    pool = CodexAppServerPool(max_workers=1)
+    codex = CodexBackend("codex", tmp_path / "codex", "codex")
+    deepseek = CodexBackend("deepseek", tmp_path / "deepseek", "codex")
+    first = pool.acquire(backend=codex)
+    pool.release(first)
+    assert pool.acquire(backend=codex) is first
+    pool.release(first)
+    second = pool.acquire(backend=deepseek)
+    assert second is not first
+    assert [row[:2] for row in lifecycle] == [
+        ("start", "codex"),
+        ("stop", None),
+        ("start", "deepseek"),
+    ]
+    pool.release(second)
+    pool.shutdown()
+
+
+def test_backend_uses_home_and_command_without_shell_function(monkeypatch, tmp_path) -> None:
+    from frontier.services.codex_backends import CodexBackend
+
+    backend = CodexBackend("codex_deepseek", tmp_path, "/usr/local/bin/codex", "research")
+    monkeypatch.setenv("CODEX_HOME", "/wrong-home")
+    assert interactive_stream._environment(backend)["CODEX_HOME"] == str(tmp_path)
+    assert interactive_stream._app_server_command(backend)[:4] == [
+        "/usr/local/bin/codex",
+        "--strict-config",
+        "--profile",
+        "research",
+    ]
